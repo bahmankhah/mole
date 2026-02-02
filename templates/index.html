@@ -131,7 +131,7 @@
                         <table class="w-full">
                             <thead class="bg-gray-50">
                                 <tr>
-                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Domain</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Target</th>
                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Progress</th>
                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Matches</th>
@@ -143,8 +143,11 @@
                                 <tr class="hover:bg-gray-50">
                                     <td class="px-6 py-4">
                                         <a href="/jobs/{{.ID}}" class="text-indigo-600 hover:text-indigo-800 font-medium">
-                                            {{.Domain}}
+                                            {{.TargetURL}}
                                         </a>
+                                        {{if ne .TargetURL (printf "https://%s" .Domain)}}
+                                        <span class="text-xs text-gray-400 block">{{.Domain}}</span>
+                                        {{end}}
                                     </td>
                                     <td class="px-6 py-4">
                                         <span class="status-{{.Status}}">{{.Status}}</span>
@@ -187,6 +190,55 @@
                                 <tr>
                                     <td colspan="5" class="px-6 py-8 text-center text-gray-500">
                                         No jobs yet. Create one to start crawling!
+                                    </td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Discovery Jobs -->
+                <div class="bg-white rounded-lg shadow mt-6">
+                    <div class="p-6 border-b border-gray-200">
+                        <h2 class="text-xl font-semibold">🔎 Subdomain Discovery Jobs</h2>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Domain</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subdomains</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-200">
+                                {{range .discoveryJobs}}
+                                <tr class="hover:bg-gray-50">
+                                    <td class="px-6 py-4">
+                                        <a href="/discovery/{{.ID}}" class="text-purple-600 hover:text-purple-800 font-medium">
+                                            {{.Domain}}
+                                        </a>
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        <span class="status-{{.Status}}">{{.Status}}</span>
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        <span class="text-purple-600 font-bold">{{.SubdomainsFound}}</span>
+                                    </td>
+                                    <td class="px-6 py-4 text-sm text-gray-500">
+                                        {{.CreatedAt.Format "Jan 02 15:04"}}
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        <a href="/discovery/{{.ID}}" class="text-indigo-600 hover:text-indigo-800">View</a>
+                                    </td>
+                                </tr>
+                                {{else}}
+                                <tr>
+                                    <td colspan="5" class="px-6 py-8 text-center text-gray-500">
+                                        No discovery jobs yet. Click "Scan Subdomains" on a crawl job to discover subdomains.
                                     </td>
                                 </tr>
                                 {{end}}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/resolver/crawler/config"
 	"github.com/resolver/crawler/crawler"
@@ -165,36 +166,74 @@ func (m *Manager) DeleteJob(jobID string) error {
 
 // StartSubdomainDiscovery starts subdomain discovery for a job
 func (m *Manager) StartSubdomainDiscovery(jobID string) error {
-	var job models.CrawlJob
-	if err := m.db.First(&job, "id = ?", jobID).Error; err != nil {
+	var crawlJob models.CrawlJob
+	if err := m.db.First(&crawlJob, "id = ?", jobID).Error; err != nil {
 		return err
 	}
+
+	// Create a discovery job first
+	discoveryJob := &models.DiscoveryJob{
+		Domain: crawlJob.Domain,
+		Status: models.JobStatusRunning,
+	}
+	now := time.Now()
+	discoveryJob.StartedAt = &now
+	if err := m.db.Create(discoveryJob).Error; err != nil {
+		return err
+	}
+
+	// Link the discovery job to the crawl job
+	m.db.Model(&crawlJob).Update("discovery_job_id", discoveryJob.ID)
 
 	m.subdomainCtx, m.subdomainCancel = context.WithCancel(context.Background())
 
 	go func() {
+		foundCount := 0
+
 		// Add the main domain itself as a subdomain
 		mainSub := &models.Subdomain{
-			DiscoveryJobID: jobID,
-			Domain:         job.Domain,
-			Subdomain:      job.Domain,
-			FullURL:        "https://" + job.Domain,
+			DiscoveryJobID: discoveryJob.ID,
+			Domain:         crawlJob.Domain,
+			Subdomain:      crawlJob.Domain,
+			FullURL:        "https://" + crawlJob.Domain,
 			IsActive:       true,
 		}
-		m.db.Create(mainSub)
+		if err := m.db.Create(mainSub).Error; err == nil {
+			foundCount++
+		}
 
-		m.subdomainScanner.DiscoverSubdomains(job.Domain, func(subdomain string) {
+		m.subdomainScanner.DiscoverSubdomains(crawlJob.Domain, func(subdomain string) {
+			// Check context
+			select {
+			case <-m.subdomainCtx.Done():
+				return
+			default:
+			}
+
 			// Save discovered subdomain
 			sub := &models.Subdomain{
-				DiscoveryJobID: jobID,
-				Domain:         job.Domain,
+				DiscoveryJobID: discoveryJob.ID,
+				Domain:         crawlJob.Domain,
 				Subdomain:      subdomain,
 				FullURL:        "https://" + subdomain,
 				IsActive:       true,
 			}
-			m.db.Create(sub)
+			if err := m.db.Create(sub).Error; err == nil {
+				foundCount++
+				// Update count
+				m.db.Model(&models.DiscoveryJob{}).Where("id = ?", discoveryJob.ID).Update("subdomains_found", foundCount)
+			}
 			log.Printf("[JobManager] Discovered subdomain: %s", subdomain)
 		})
+
+		// Mark discovery as completed
+		now := time.Now()
+		m.db.Model(&models.DiscoveryJob{}).Where("id = ?", discoveryJob.ID).Updates(map[string]interface{}{
+			"status":           models.JobStatusCompleted,
+			"completed_at":     &now,
+			"subdomains_found": foundCount,
+		})
+		log.Printf("[JobManager] Discovery completed for %s. Found %d subdomains.", crawlJob.Domain, foundCount)
 	}()
 
 	return nil
@@ -205,6 +244,38 @@ func (m *Manager) StopSubdomainDiscovery() {
 	if m.subdomainCancel != nil {
 		m.subdomainCancel()
 	}
+}
+
+// GetDiscoveryJobs retrieves all discovery jobs
+func (m *Manager) GetDiscoveryJobs(limit, offset int) ([]models.DiscoveryJob, int64, error) {
+	var jobs []models.DiscoveryJob
+	var total int64
+
+	m.db.Model(&models.DiscoveryJob{}).Count(&total)
+
+	if err := m.db.Order("created_at DESC").Limit(limit).Offset(offset).Find(&jobs).Error; err != nil {
+		return nil, 0, err
+	}
+
+	return jobs, total, nil
+}
+
+// GetDiscoveryJob retrieves a discovery job by ID
+func (m *Manager) GetDiscoveryJob(jobID string) (*models.DiscoveryJob, error) {
+	var job models.DiscoveryJob
+	if err := m.db.First(&job, "id = ?", jobID).Error; err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
+// GetSubdomainsByDiscoveryJob retrieves subdomains for a discovery job
+func (m *Manager) GetSubdomainsByDiscoveryJob(discoveryJobID string) ([]models.Subdomain, error) {
+	var subdomains []models.Subdomain
+	if err := m.db.Where("discovery_job_id = ?", discoveryJobID).Order("subdomain ASC").Find(&subdomains).Error; err != nil {
+		return nil, err
+	}
+	return subdomains, nil
 }
 
 // GetSubdomains retrieves subdomains for a job (checks both discovery_job_id for discovery jobs or crawl_job_id for crawl jobs)

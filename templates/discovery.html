@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Discovery: {{.job.Domain}} - Resolver Crawler</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .status-pending { color: #f59e0b; }
+        .status-running { color: #3b82f6; animation: pulse 2s infinite; }
+        .status-completed { color: #10b981; }
+        .status-failed { color: #ef4444; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <!-- Navigation -->
+    <nav class="bg-indigo-600 text-white shadow-lg">
+        <div class="max-w-7xl mx-auto px-4 py-4">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-4">
+                    <a href="/" class="text-2xl font-bold hover:text-indigo-200">🔍 Resolver Crawler</a>
+                    <span class="text-indigo-200">/</span>
+                    <span>Discovery: {{.job.Domain}}</span>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <span class="status-{{.job.Status}} text-lg font-semibold">{{.job.Status}}</span>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="max-w-7xl mx-auto px-4 py-8">
+        <!-- Discovery Job Header -->
+        <div class="bg-white rounded-lg shadow p-6 mb-8">
+            <div class="flex items-center justify-between mb-6">
+                <div>
+                    <h1 class="text-3xl font-bold text-gray-800">🔎 Subdomain Discovery</h1>
+                    <p class="text-gray-500 mt-1">Domain: <span class="font-semibold">{{.job.Domain}}</span></p>
+                    <p class="text-gray-400 text-sm">Job ID: {{.job.ID}}</p>
+                </div>
+            </div>
+
+            <!-- Stats Grid -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-gray-500 text-sm">Status</div>
+                    <div class="text-xl font-bold status-{{.job.Status}}">{{.job.Status}}</div>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-gray-500 text-sm">Subdomains Found</div>
+                    <div class="text-2xl font-bold text-purple-600">{{.job.SubdomainsFound}}</div>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-gray-500 text-sm">Created</div>
+                    <div class="text-lg font-medium text-gray-700">{{.job.CreatedAt.Format "Jan 02, 15:04"}}</div>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-gray-500 text-sm">Completed</div>
+                    <div class="text-lg font-medium text-gray-700">
+                        {{if .job.CompletedAt}}{{.job.CompletedAt.Format "Jan 02, 15:04"}}{{else}}-{{end}}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Subdomains List -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-bold text-gray-800 mb-4">Discovered Subdomains</h2>
+            
+            {{if .subdomains}}
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {{range .subdomains}}
+                <div class="border border-gray-200 rounded-lg p-4 hover:bg-gray-50 transition">
+                    <div class="font-medium text-gray-800">{{.Subdomain}}</div>
+                    {{if .IPAddress}}
+                    <div class="text-sm text-gray-500 mt-1">IP: {{.IPAddress}}</div>
+                    {{end}}
+                    <div class="mt-3 flex flex-wrap gap-2">
+                        <a href="{{.FullURL}}" target="_blank" 
+                           class="inline-flex items-center text-blue-600 hover:text-blue-800 text-sm">
+                            🔗 Visit
+                        </a>
+                        {{if .CrawlJobID}}
+                        <a href="/jobs/{{.CrawlJobID}}" 
+                           class="inline-flex items-center text-green-600 hover:text-green-800 text-sm">
+                            📊 View Crawl
+                        </a>
+                        {{else}}
+                        <button onclick="startCrawlForSubdomain({{.ID}})" 
+                                class="inline-flex items-center text-indigo-600 hover:text-indigo-800 text-sm font-medium">
+                            🕷 Start Crawl
+                        </button>
+                        {{end}}
+                    </div>
+                </div>
+                {{end}}
+            </div>
+            {{else}}
+            <div class="text-center py-12 text-gray-500">
+                <p class="text-lg">No subdomains discovered yet</p>
+                {{if eq .job.Status "running"}}
+                <p class="text-sm mt-2">Discovery is in progress... refresh to see results</p>
+                {{else}}
+                <p class="text-sm mt-2">Discovery may have just started or no subdomains were found</p>
+                {{end}}
+            </div>
+            {{end}}
+        </div>
+    </div>
+
+    <script>
+        window.startCrawlForSubdomain = async function(subdomainId) {
+            try {
+                const response = await fetch(`/api/subdomains/${subdomainId}/crawl`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ max_depth: 10 })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    alert('Crawl job created! Redirecting...');
+                    window.location.href = '/jobs/' + data.data.id;
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error creating crawl job: ' + e.message);
+            }
+        };
+
+        // Auto-refresh when running
+        {{if eq .job.Status "running"}}
+        setInterval(() => location.reload(), 5000);
+        {{end}}
+    </script>
+</body>
+</html>

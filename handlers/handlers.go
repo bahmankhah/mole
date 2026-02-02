@@ -32,17 +32,19 @@ type Response struct {
 // Index renders the main dashboard
 func (h *Handler) Index(c *gin.Context) {
 	jobs, _, _ := h.jobManager.GetJobs(10, 0)
+	discoveryJobs, _, _ := h.jobManager.GetDiscoveryJobs(10, 0)
 	matches, _, _ := h.jobManager.GetAllPhraseMatches(10, 0)
 	phrases, _ := h.jobManager.GetSearchPhrases()
 	activeJob := h.jobManager.GetActiveJob()
 	stats := h.jobManager.GetEngineStats()
 
 	c.HTML(http.StatusOK, "index.html", gin.H{
-		"jobs":      jobs,
-		"matches":   matches,
-		"phrases":   phrases,
-		"activeJob": activeJob,
-		"stats":     stats,
+		"jobs":          jobs,
+		"discoveryJobs": discoveryJobs,
+		"matches":       matches,
+		"phrases":       phrases,
+		"activeJob":     activeJob,
+		"stats":         stats,
 	})
 }
 
@@ -229,8 +231,8 @@ func (h *Handler) StartCrawlForSubdomain(c *gin.Context) {
 	}
 
 	var req struct {
-		MaxDepth   int  `json:"max_depth"`
-		AutoStart  bool `json:"auto_start"`
+		MaxDepth  int  `json:"max_depth"`
+		AutoStart bool `json:"auto_start"`
 	}
 	c.ShouldBindJSON(&req)
 
@@ -249,7 +251,7 @@ func (h *Handler) StartCrawlForSubdomain(c *gin.Context) {
 	if req.AutoStart {
 		if err := h.jobManager.StartJob(job.ID); err != nil {
 			c.JSON(http.StatusOK, Response{
-				Success: true, 
+				Success: true,
 				Message: "Crawl job created but could not auto-start: " + err.Error(),
 				Data:    job,
 			})
@@ -258,6 +260,58 @@ func (h *Handler) StartCrawlForSubdomain(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, Response{Success: true, Data: job, Message: "Crawl job created"})
+}
+
+// GetDiscoveryJobs returns all discovery jobs
+func (h *Handler) GetDiscoveryJobs(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+
+	jobs, total, err := h.jobManager.GetDiscoveryJobs(limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, Response{
+		Success: true,
+		Data: gin.H{
+			"jobs":   jobs,
+			"total":  total,
+			"limit":  limit,
+			"offset": offset,
+		},
+	})
+}
+
+// GetDiscoveryJob returns a single discovery job with its subdomains
+func (h *Handler) GetDiscoveryJob(c *gin.Context) {
+	jobID := c.Param("id")
+
+	job, err := h.jobManager.GetDiscoveryJob(jobID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, Response{Success: false, Error: "Discovery job not found"})
+		return
+	}
+
+	subdomains, _ := h.jobManager.GetSubdomainsByDiscoveryJob(jobID)
+
+	// Check if request accepts HTML
+	if c.GetHeader("Accept") == "text/html" || c.Query("format") == "html" {
+		c.HTML(http.StatusOK, "discovery.html", gin.H{
+			"job":        job,
+			"subdomains": subdomains,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, Response{
+		Success: true,
+		Data: gin.H{
+			"job":        job,
+			"subdomains": subdomains,
+		},
+	})
 }
 
 // GetMatches returns phrase matches

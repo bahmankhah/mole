@@ -79,6 +79,10 @@ func main() {
 		c.Request.Header.Set("Accept", "text/html")
 		handler.GetJob(c)
 	})
+	router.GET("/discovery/:id", func(c *gin.Context) {
+		c.Request.Header.Set("Accept", "text/html")
+		handler.GetDiscoveryJob(c)
+	})
 
 	// API routes
 	api := router.Group("/api")
@@ -92,6 +96,10 @@ func main() {
 		api.POST("/jobs/pause", handler.PauseJob)
 		api.POST("/jobs/resume", handler.ResumeJob)
 		api.DELETE("/jobs/:id", handler.DeleteJob)
+
+		// Discovery jobs
+		api.GET("/discovery", handler.GetDiscoveryJobs)
+		api.GET("/discovery/:id", handler.GetDiscoveryJob)
 
 		// Subdomains
 		api.POST("/jobs/:id/subdomains/discover", handler.StartSubdomainDiscovery)

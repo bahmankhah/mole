@@ -124,42 +124,23 @@ func (f *DBFrontier) GetNextURL() (*models.FrontierURL, error) {
 	var frontierURL models.FrontierURL
 	var result *gorm.DB
 
-	if shouldTeleport {
-		// Teleport: select a random URL from all pending/completed URLs in this job
-		// This allows revisiting already crawled pages (random surfer behavior)
-		var count int64
-		f.db.Model(&models.FrontierURL{}).
-			Where("crawl_job_id = ? AND status IN ?", crawlJobID, 
-				[]string{models.FrontierStatusPending, models.FrontierStatusCompleted}).
-			Count(&count)
+	// Always require pending URLs to proceed
+	var pendingCount int64
+	f.db.Model(&models.FrontierURL{}).
+		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
+		Count(&pendingCount)
 
-		if count == 0 {
-			return nil, errors.New("frontier is empty")
-		}
-
-		offset := f.rng.Intn(int(count))
-		result = f.db.Where("crawl_job_id = ? AND status IN ?", crawlJobID,
-			[]string{models.FrontierStatusPending, models.FrontierStatusCompleted}).
-			Offset(offset).
-			Limit(1).
-			First(&frontierURL)
-	} else {
-		// Normal: get a random pending URL
-		var count int64
-		f.db.Model(&models.FrontierURL{}).
-			Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
-			Count(&count)
-
-		if count == 0 {
-			return nil, errors.New("no pending URLs in frontier")
-		}
-
-		offset := f.rng.Intn(int(count))
-		result = f.db.Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
-			Offset(offset).
-			Limit(1).
-			First(&frontierURL)
+	if pendingCount == 0 {
+		return nil, errors.New("no pending URLs in frontier")
 	}
+
+	// Teleport: still pick a random pending URL (frontier only contains pending URLs)
+	_ = shouldTeleport
+	offset := f.rng.Intn(int(pendingCount))
+	result = f.db.Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
+		Offset(offset).
+		Limit(1).
+		First(&frontierURL)
 
 	if result.Error != nil {
 		return nil, result.Error

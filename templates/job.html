@@ -17,6 +17,24 @@
         }
         .tab-active { border-bottom: 2px solid #4f46e5; color: #4f46e5; }
     </style>
+    <script>
+        // Tab switching - must be in head so it's available before onclick handlers
+        function showTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(function(el) { el.classList.add('hidden'); });
+            document.querySelectorAll('.tab-btn').forEach(function(el) {
+                el.classList.remove('tab-active');
+                el.classList.add('text-gray-500');
+            });
+
+            var tabEl = document.getElementById('tab-' + tabName);
+            if (tabEl) tabEl.classList.remove('hidden');
+            var tabButton = document.querySelector('[data-tab="' + tabName + '"]');
+            if (tabButton) {
+                tabButton.classList.add('tab-active');
+                tabButton.classList.remove('text-gray-500');
+            }
+        }
+    </script>
 </head>
 <body class="bg-gray-100 min-h-screen">
     <!-- Navigation -->
@@ -26,7 +44,7 @@
                 <div class="flex items-center space-x-4">
                     <a href="/" class="text-2xl font-bold hover:text-indigo-200">🔍 Resolver Crawler</a>
                     <span class="text-indigo-200">/</span>
-                    <span>{{.job.Domain}}</span>
+                    <span>{{.job.TargetURL}}</span>
                 </div>
                 <div class="flex items-center space-x-4">
                     <span class="status-{{.job.Status}} text-lg font-semibold">{{.job.Status}}</span>
@@ -40,8 +58,8 @@
         <div class="bg-white rounded-lg shadow p-6 mb-8">
             <div class="flex items-center justify-between mb-6">
                 <div>
-                    <h1 class="text-3xl font-bold text-gray-800">{{.job.Domain}}</h1>
-                    <p class="text-gray-500 mt-1">Job ID: {{.job.ID}}</p>
+                    <h1 class="text-3xl font-bold text-gray-800">{{.job.TargetURL}}</h1>
+                    <p class="text-gray-500 mt-1">Job ID: {{.job.ID}} · Base Domain: {{.job.Domain}}</p>
                 </div>
                 <div class="flex space-x-3">
                     {{if eq .job.Status "pending"}}
@@ -282,19 +300,6 @@
     </div>
 
     <script>
-        // Tab switching - defined globally before any onclick handlers
-        window.showTab = function(tabName) {
-            document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
-            document.querySelectorAll('.tab-btn').forEach(el => {
-                el.classList.remove('tab-active');
-                el.classList.add('text-gray-500');
-            });
-            
-            document.getElementById('tab-' + tabName).classList.remove('hidden');
-            document.querySelector(`[data-tab="${tabName}"]`).classList.add('tab-active');
-            document.querySelector(`[data-tab="${tabName}"]`).classList.remove('text-gray-500');
-        };
-
         // API helpers
         async function apiCall(method, url, data = null) {
             const options = {

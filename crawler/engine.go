@@ -15,6 +15,7 @@ import (
 	"github.com/resolver/crawler/models"
 	"github.com/resolver/crawler/modules"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // CrawlerState represents the current state of the crawler
@@ -128,6 +129,14 @@ func (e *Engine) Start(job *models.CrawlJob) error {
 	e.ctx, e.cancel = context.WithCancel(context.Background())
 	atomic.StoreInt64(&e.crawledCount, 0)
 	atomic.StoreInt64(&e.matchCount, 0)
+
+	var crawledCount int64
+	e.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ?", job.ID).Count(&crawledCount)
+	atomic.StoreInt64(&e.crawledCount, crawledCount)
+
+	var matchCount int64
+	e.db.Model(&models.PhraseMatch{}).Where("crawl_job_id = ?", job.ID).Count(&matchCount)
+	atomic.StoreInt64(&e.matchCount, matchCount)
 
 	// Set the crawl job in frontier
 	e.frontier.SetCrawlJob(job.ID)
@@ -305,7 +314,7 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
 		log.Printf("[Worker %d] Failed to fetch %s: %v", workerID, url, err)
-		e.saveCrawledPage(url, 0, "", 0, depth, err.Error(), startTime)
+		_, _ = e.saveCrawledPage(url, 0, "", 0, depth, err.Error(), startTime)
 		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, 3)
 		return
 	}
@@ -315,7 +324,7 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024)) // 10MB limit
 	if err != nil {
 		log.Printf("[Worker %d] Failed to read body for %s: %v", workerID, url, err)
-		e.saveCrawledPage(url, resp.StatusCode, resp.Header.Get("Content-Type"), 0, depth, err.Error(), startTime)
+		_, _ = e.saveCrawledPage(url, resp.StatusCode, resp.Header.Get("Content-Type"), 0, depth, err.Error(), startTime)
 		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, 3)
 		return
 	}
@@ -323,8 +332,10 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	contentType := resp.Header.Get("Content-Type")
 
 	// Save crawled page
-	page := e.saveCrawledPage(url, resp.StatusCode, contentType, int64(len(body)), depth, "", startTime)
-	atomic.AddInt64(&e.crawledCount, 1)
+	page, created := e.saveCrawledPage(url, resp.StatusCode, contentType, int64(len(body)), depth, "", startTime)
+	if created {
+		atomic.AddInt64(&e.crawledCount, 1)
+	}
 
 	// Mark as completed in frontier
 	e.frontier.MarkCompleted(frontierURL.ID)
@@ -423,7 +434,7 @@ func (e *Engine) processRobots(url string, body []byte, depth int) {
 }
 
 // saveCrawledPage saves a crawled page to database
-func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string, contentLength int64, depth int, errorMsg string, startTime time.Time) *models.CrawledPage {
+func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string, contentLength int64, depth int, errorMsg string, startTime time.Time) (*models.CrawledPage, bool) {
 	normalizedURL, _ := e.urlCleaner.ProcessURL(url)
 	urlHash := e.urlCleaner.HashURL(normalizedURL)
 
@@ -448,8 +459,24 @@ func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string,
 		ErrorMessage:  errorMsg,
 	}
 
-	e.db.Create(page)
-	return page
+	result := e.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "url_hash"}},
+		DoNothing: true,
+	}).Create(page)
+
+	if result.Error != nil {
+		return page, false
+	}
+
+	if result.RowsAffected == 0 {
+		var existing models.CrawledPage
+		if err := e.db.Where("url_hash = ?", urlHash).First(&existing).Error; err == nil {
+			return &existing, false
+		}
+		return page, false
+	}
+
+	return page, true
 }
 
 // savePhraseMatch saves a phrase match to database
