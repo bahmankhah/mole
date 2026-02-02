@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: crawler_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: crawler_password
+      MYSQL_DATABASE: crawler_db
+      MYSQL_USER: crawler
+      MYSQL_PASSWORD: crawler_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  crawler:
+    build: .
+    container_name: resolver_crawler
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: crawler
+      DB_PASSWORD: crawler_password
+      DB_NAME: crawler_db
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - ./templates:/app/templates
+    restart: unless-stopped
+
+volumes:
+  mysql_data:

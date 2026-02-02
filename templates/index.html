@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Resolver Crawler - Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <style>
+        .status-pending { color: #f59e0b; }
+        .status-running { color: #3b82f6; animation: pulse 2s infinite; }
+        .status-completed { color: #10b981; }
+        .status-failed { color: #ef4444; }
+        .status-paused { color: #6b7280; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <!-- Navigation -->
+    <nav class="bg-indigo-600 text-white shadow-lg">
+        <div class="max-w-7xl mx-auto px-4 py-4">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-4">
+                    <h1 class="text-2xl font-bold">🔍 Resolver Crawler</h1>
+                    <span class="text-indigo-200 text-sm">Advanced Web Crawler & Subdomain Discovery</span>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <span id="crawler-status" class="px-3 py-1 bg-indigo-700 rounded-full text-sm">
+                        {{if .activeJob}}
+                            <span class="status-running">● Running</span>
+                        {{else}}
+                            <span class="status-pending">○ Idle</span>
+                        {{end}}
+                    </span>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="max-w-7xl mx-auto px-4 py-8">
+        <!-- Stats Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div class="bg-white rounded-lg shadow p-6">
+                <div class="text-gray-500 text-sm">Pages Crawled</div>
+                <div class="text-3xl font-bold text-indigo-600">{{if .stats.crawled}}{{.stats.crawled}}{{else}}0{{end}}</div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <div class="text-gray-500 text-sm">Phrase Matches</div>
+                <div class="text-3xl font-bold text-green-600">{{if .stats.matches}}{{.stats.matches}}{{else}}0{{end}}</div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <div class="text-gray-500 text-sm">Frontier Size</div>
+                <div class="text-3xl font-bold text-blue-600">{{if .stats.frontier_size}}{{.stats.frontier_size}}{{else}}0{{end}}</div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <div class="text-gray-500 text-sm">Known URLs</div>
+                <div class="text-3xl font-bold text-purple-600">{{if .stats.total_known}}{{.stats.total_known}}{{else}}0{{end}}</div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <!-- Create Job Form -->
+            <div class="lg:col-span-1">
+                <div class="bg-white rounded-lg shadow p-6 mb-6">
+                    <h2 class="text-xl font-semibold mb-4">Create New Job</h2>
+                    <form action="/api/jobs" method="POST" class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Domain</label>
+                            <input type="text" name="domain" placeholder="example.com" required
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Max Depth</label>
+                            <input type="number" name="max_depth" value="10" min="1" max="50"
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                        </div>
+                        <button type="submit"
+                            class="w-full bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700 transition">
+                            Create Job
+                        </button>
+                    </form>
+                </div>
+
+                <!-- Search Phrases -->
+                <div class="bg-white rounded-lg shadow p-6">
+                    <h2 class="text-xl font-semibold mb-4">Search Phrases</h2>
+                    <form action="/api/phrases" method="POST" class="mb-4">
+                        <div class="flex space-x-2">
+                            <input type="text" name="phrase" placeholder="Add phrase to detect..."
+                                class="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                            <button type="submit"
+                                class="bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700 transition">
+                                Add
+                            </button>
+                        </div>
+                    </form>
+                    <ul class="space-y-2">
+                        {{range .phrases}}
+                        <li class="flex items-center justify-between p-2 bg-gray-50 rounded">
+                            <span class="{{if .IsActive}}text-gray-800{{else}}text-gray-400 line-through{{end}}">
+                                "{{.Phrase}}"
+                            </span>
+                            <div class="flex space-x-2">
+                                <button onclick="togglePhrase({{.ID}}, {{not .IsActive}})"
+                                    class="text-sm text-blue-600 hover:text-blue-800">
+                                    {{if .IsActive}}Disable{{else}}Enable{{end}}
+                                </button>
+                                <button onclick="deletePhrase({{.ID}})"
+                                    class="text-sm text-red-600 hover:text-red-800">
+                                    Delete
+                                </button>
+                            </div>
+                        </li>
+                        {{else}}
+                        <li class="text-gray-500 text-center py-4">No phrases configured</li>
+                        {{end}}
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Jobs List -->
+            <div class="lg:col-span-2">
+                <div class="bg-white rounded-lg shadow">
+                    <div class="p-6 border-b border-gray-200">
+                        <h2 class="text-xl font-semibold">Crawl Jobs</h2>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Domain</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Progress</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Matches</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-200">
+                                {{range .jobs}}
+                                <tr class="hover:bg-gray-50">
+                                    <td class="px-6 py-4">
+                                        <a href="/jobs/{{.ID}}" class="text-indigo-600 hover:text-indigo-800 font-medium">
+                                            {{.Domain}}
+                                        </a>
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        <span class="status-{{.Status}}">{{.Status}}</span>
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        {{.CrawledURLs}} / {{.TotalURLs}}
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        <span class="{{if gt .FoundMatches 0}}text-green-600 font-bold{{end}}">
+                                            {{.FoundMatches}}
+                                        </span>
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        <div class="flex space-x-2">
+                                            {{if eq .Status "pending"}}
+                                            <button onclick="startJob('{{.ID}}')"
+                                                class="text-green-600 hover:text-green-800">Start</button>
+                                            <button onclick="discoverSubdomains('{{.ID}}')"
+                                                class="text-blue-600 hover:text-blue-800">Scan Subdomains</button>
+                                            {{else if eq .Status "running"}}
+                                            <button onclick="pauseJob()"
+                                                class="text-yellow-600 hover:text-yellow-800">Pause</button>
+                                            <button onclick="stopJob()"
+                                                class="text-red-600 hover:text-red-800">Stop</button>
+                                            {{else if eq .Status "paused"}}
+                                            <button onclick="resumeJob()"
+                                                class="text-green-600 hover:text-green-800">Resume</button>
+                                            <button onclick="stopJob()"
+                                                class="text-red-600 hover:text-red-800">Stop</button>
+                                            {{end}}
+                                            <a href="/jobs/{{.ID}}" class="text-indigo-600 hover:text-indigo-800">View</a>
+                                            {{if ne .Status "running"}}
+                                            <button onclick="deleteJob('{{.ID}}')"
+                                                class="text-red-600 hover:text-red-800">Delete</button>
+                                            {{end}}
+                                        </div>
+                                    </td>
+                                </tr>
+                                {{else}}
+                                <tr>
+                                    <td colspan="5" class="px-6 py-8 text-center text-gray-500">
+                                        No jobs yet. Create one to start crawling!
+                                    </td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Recent Matches -->
+                <div class="bg-white rounded-lg shadow mt-6">
+                    <div class="p-6 border-b border-gray-200">
+                        <h2 class="text-xl font-semibold">Recent Phrase Matches</h2>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Phrase</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">URL</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-200">
+                                {{range .matches}}
+                                <tr class="hover:bg-gray-50">
+                                    <td class="px-6 py-4 text-sm text-gray-500">
+                                        {{.FoundAt.Format "Jan 02 15:04:05"}}
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        <span class="px-2 py-1 bg-yellow-100 text-yellow-800 rounded text-sm">
+                                            {{.Phrase}}
+                                        </span>
+                                    </td>
+                                    <td class="px-6 py-4 max-w-md truncate">
+                                        <a href="{{.URL}}" target="_blank" class="text-blue-600 hover:text-blue-800 text-sm">
+                                            {{.URL}}
+                                        </a>
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        {{.Occurrences}}
+                                    </td>
+                                </tr>
+                                {{else}}
+                                <tr>
+                                    <td colspan="4" class="px-6 py-8 text-center text-gray-500">
+                                        No matches found yet
+                                    </td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // API helpers
+        async function apiCall(method, url, data = null) {
+            const options = {
+                method: method,
+                headers: { 'Content-Type': 'application/json' },
+            };
+            if (data) options.body = JSON.stringify(data);
+            const response = await fetch(url, options);
+            return response.json();
+        }
+
+        // Job actions
+        async function startJob(id) {
+            await apiCall('POST', `/api/jobs/${id}/start`);
+            location.reload();
+        }
+
+        async function stopJob() {
+            await apiCall('POST', '/api/jobs/stop');
+            location.reload();
+        }
+
+        async function pauseJob() {
+            await apiCall('POST', '/api/jobs/pause');
+            location.reload();
+        }
+
+        async function resumeJob() {
+            await apiCall('POST', '/api/jobs/resume');
+            location.reload();
+        }
+
+        async function deleteJob(id) {
+            if (confirm('Are you sure you want to delete this job?')) {
+                await apiCall('DELETE', `/api/jobs/${id}`);
+                location.reload();
+            }
+        }
+
+        async function discoverSubdomains(id) {
+            await apiCall('POST', `/api/jobs/${id}/subdomains/discover`);
+            alert('Subdomain discovery started!');
+        }
+
+        // Phrase actions
+        async function togglePhrase(id, active) {
+            await apiCall('PUT', `/api/phrases/${id}`, { is_active: active });
+            location.reload();
+        }
+
+        async function deletePhrase(id) {
+            if (confirm('Are you sure you want to delete this phrase?')) {
+                await apiCall('DELETE', `/api/phrases/${id}`);
+                location.reload();
+            }
+        }
+
+        // Auto-refresh when job is running
+        {{if .activeJob}}
+        setInterval(() => {
+            fetch('/api/stats')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        document.querySelector('.text-indigo-600.text-3xl').textContent = data.data.engine.crawled || 0;
+                        document.querySelector('.text-green-600.text-3xl').textContent = data.data.engine.matches || 0;
+                        document.querySelector('.text-blue-600.text-3xl').textContent = data.data.engine.frontier_size || 0;
+                        document.querySelector('.text-purple-600.text-3xl').textContent = data.data.engine.total_known || 0;
+                    }
+                });
+        }, 5000);
+        {{end}}
+    </script>
+</body>
+</html>
