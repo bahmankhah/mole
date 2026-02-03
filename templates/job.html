@@ -15,6 +15,10 @@
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
         .tab-active { border-bottom: 2px solid #4f46e5; color: #4f46e5; }
     </style>
     <script>
@@ -56,12 +60,12 @@
     <div class="max-w-7xl mx-auto px-4 py-8">
         <!-- Job Header -->
         <div class="bg-white rounded-lg shadow p-6 mb-8">
-            <div class="flex items-center justify-between mb-6">
-                <div>
-                    <h1 class="text-3xl font-bold text-gray-800">{{.job.TargetURL}}</h1>
-                    <p class="text-gray-500 mt-1">Job ID: {{.job.ID}} · Base Domain: {{.job.Domain}}</p>
+            <div class="flex items-start justify-between mb-6 gap-4">
+                <div class="min-w-0 flex-1">
+                    <h1 class="text-2xl font-bold text-gray-800 truncate" title="{{.job.TargetURL}}">{{.job.TargetURL}}</h1>
+                    <p class="text-gray-500 mt-1 text-sm">Job ID: {{.job.ID}} · Base Domain: {{.job.Domain}}</p>
                 </div>
-                <div class="flex space-x-3">
+                <div class="flex space-x-3 flex-shrink-0">
                     {{if eq .job.Status "pending"}}
                     <button onclick="startJob('{{.job.ID}}')"
                         class="bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700 transition">
@@ -108,10 +112,6 @@
                     <div class="text-2xl font-bold text-green-600">{{.job.FoundMatches}}</div>
                 </div>
                 <div class="bg-gray-50 rounded-lg p-4">
-                    <div class="text-gray-500 text-sm">Subdomains Found</div>
-                    <div class="text-2xl font-bold text-purple-600">{{len .subdomains}}</div>
-                </div>
-                <div class="bg-gray-50 rounded-lg p-4">
                     <div class="text-gray-500 text-sm">Max Depth</div>
                     <div class="text-2xl font-bold text-gray-600">{{.job.MaxDepth}}</div>
                 </div>
@@ -133,9 +133,6 @@
                 <nav class="flex space-x-8 px-6" id="tabs">
                     <button onclick="showTab('matches')" class="tab-btn py-4 text-sm font-medium tab-active" data-tab="matches">
                         Phrase Matches ({{.matchTotal}})
-                    </button>
-                    <button onclick="showTab('subdomains')" class="tab-btn py-4 text-sm font-medium text-gray-500 hover:text-gray-700" data-tab="subdomains">
-                        Subdomains ({{len .subdomains}})
                     </button>
                     <button onclick="showTab('pages')" class="tab-btn py-4 text-sm font-medium text-gray-500 hover:text-gray-700" data-tab="pages">
                         Crawled Pages ({{.pageTotal}})
@@ -192,52 +189,40 @@
                 {{end}}
             </div>
 
-            <!-- Subdomains Tab -->
-            <div id="tab-subdomains" class="tab-content p-6 hidden">
-                <div class="mb-4">
-                    <button onclick="discoverSubdomains('{{.job.ID}}')"
-                        class="bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition text-sm">
-                        🔎 Discover More Subdomains
-                    </button>
-                </div>
-                {{if .subdomains}}
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {{range .subdomains}}
-                    <div class="border border-gray-200 rounded-lg p-4 hover:bg-gray-50">
-                        <div class="font-medium text-gray-800">{{.Subdomain}}</div>
-                        {{if .IPAddress}}
-                        <div class="text-sm text-gray-500 mt-1">IP: {{.IPAddress}}</div>
-                        {{end}}
-                        <div class="mt-3 flex space-x-2">
-                            <a href="{{.FullURL}}" target="_blank" class="text-blue-600 hover:text-blue-800 text-sm">
-                                Visit →
-                            </a>
-                            {{if .CrawlJobID}}
-                            <a href="/jobs/{{.CrawlJobID}}" class="text-green-600 hover:text-green-800 text-sm">
-                                View Crawl →
-                            </a>
-                            {{else}}
-                            <button onclick="startCrawlForSubdomain({{.ID}})" 
-                                class="text-indigo-600 hover:text-indigo-800 text-sm font-medium">
-                                🕷 Start Crawl
-                            </button>
-                            {{end}}
-                        </div>
-                    </div>
-                    {{end}}
-                </div>
-                {{else}}
-                <div class="text-center py-12 text-gray-500">
-                    <p class="text-lg">No subdomains discovered yet</p>
-                    <p class="text-sm mt-2">Click "Discover Subdomains" to start scanning</p>
-                </div>
-                {{end}}
-            </div>
-
             <!-- Pages Tab -->
             <div id="tab-pages" class="tab-content p-6 hidden">
-                {{if .pages}}
-                <div class="overflow-x-auto">
+                <!-- Controls Row -->
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center space-x-4">
+                        <span class="text-sm text-gray-600">Total: <span id="pages-total">{{.pageTotal}}</span> pages</span>
+                    </div>
+                    <div class="flex items-center space-x-4">
+                        <!-- Auto-refresh toggle -->
+                        <button id="auto-refresh-btn" onclick="toggleAutoRefresh()" 
+                            class="flex items-center space-x-2 px-3 py-2 border border-gray-300 rounded-md hover:bg-gray-50 transition">
+                            <svg id="auto-refresh-icon" class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                            </svg>
+                            <span id="auto-refresh-text" class="text-sm text-gray-600">Auto-refresh: Off</span>
+                        </button>
+                        <!-- Pagination -->
+                        <div class="flex items-center space-x-2">
+                            <button id="pages-prev-btn" onclick="loadPages('prev')" disabled
+                                class="px-3 py-2 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
+                                ← Prev
+                            </button>
+                            <span class="text-sm text-gray-600">
+                                Page <span id="pages-current-page">1</span> of <span id="pages-total-pages">1</span>
+                            </span>
+                            <button id="pages-next-btn" onclick="loadPages('next')" disabled
+                                class="px-3 py-2 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
+                                Next →
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="pages-table-container" class="overflow-x-auto">
                     <table class="w-full">
                         <thead class="bg-gray-50">
                             <tr>
@@ -249,57 +234,144 @@
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Depth</th>
                             </tr>
                         </thead>
-                        <tbody class="divide-y divide-gray-200">
-                            {{range .pages}}
-                            <tr class="hover:bg-gray-50">
-                                <td class="px-4 py-3 max-w-md">
-                                    <a href="{{.URL}}" target="_blank" class="text-blue-600 hover:text-blue-800 text-sm truncate block">
-                                        {{.URL}}
-                                    </a>
-                                </td>
-                                <td class="px-4 py-3">
-                                    <span class="px-2 py-1 rounded text-xs font-medium
-                                        {{if and (ge .StatusCode 200) (lt .StatusCode 300)}}bg-green-100 text-green-800
-                                        {{else if and (ge .StatusCode 300) (lt .StatusCode 400)}}bg-blue-100 text-blue-800
-                                        {{else if and (ge .StatusCode 400) (lt .StatusCode 500)}}bg-yellow-100 text-yellow-800
-                                        {{else}}bg-red-100 text-red-800{{end}}">
-                                        {{.StatusCode}}
-                                    </span>
-                                </td>
-                                <td class="px-4 py-3 text-sm text-gray-500">
-                                    {{.ContentType}}
-                                </td>
-                                <td class="px-4 py-3 text-sm text-gray-500">
-                                    {{if gt .ContentLength 1048576}}
-                                        {{printf "%.2f" (divf .ContentLength 1048576.0)}} MB
-                                    {{else if gt .ContentLength 1024}}
-                                        {{printf "%.2f" (divf .ContentLength 1024.0)}} KB
-                                    {{else}}
-                                        {{.ContentLength}} B
-                                    {{end}}
-                                </td>
-                                <td class="px-4 py-3 text-sm text-gray-500">
-                                    {{.ResponseTime}} ms
-                                </td>
-                                <td class="px-4 py-3 text-sm text-gray-500">
-                                    {{.Depth}}
-                                </td>
-                            </tr>
-                            {{end}}
+                        <tbody id="pages-tbody" class="divide-y divide-gray-200">
+                            <!-- Rows will be populated by JavaScript -->
                         </tbody>
                     </table>
                 </div>
-                {{else}}
-                <div class="text-center py-12 text-gray-500">
+                <div id="pages-empty" class="text-center py-12 text-gray-500 hidden">
                     <p class="text-lg">No pages crawled yet</p>
                     <p class="text-sm mt-2">Start the crawler to begin fetching pages</p>
                 </div>
-                {{end}}
             </div>
         </div>
     </div>
 
     <script>
+        // Pages pagination state
+        const pagesState = {
+            jobId: '{{.job.ID}}',
+            currentPage: 1,
+            pageSize: 20,
+            total: {{.pageTotal}},
+            autoRefresh: false,
+            autoRefreshInterval: null
+        };
+
+        // Format file size
+        function formatSize(bytes) {
+            if (bytes > 1048576) return (bytes / 1048576).toFixed(2) + ' MB';
+            if (bytes > 1024) return (bytes / 1024).toFixed(2) + ' KB';
+            return bytes + ' B';
+        }
+
+        // Get status code badge class
+        function getStatusClass(code) {
+            if (code >= 200 && code < 300) return 'bg-green-100 text-green-800';
+            if (code >= 300 && code < 400) return 'bg-blue-100 text-blue-800';
+            if (code >= 400 && code < 500) return 'bg-yellow-100 text-yellow-800';
+            return 'bg-red-100 text-red-800';
+        }
+
+        // Render pages table
+        function renderPagesTable(pages) {
+            const tbody = document.getElementById('pages-tbody');
+            const emptyMsg = document.getElementById('pages-empty');
+            const tableContainer = document.getElementById('pages-table-container');
+
+            if (!pages || pages.length === 0) {
+                tbody.innerHTML = '';
+                tableContainer.classList.add('hidden');
+                emptyMsg.classList.remove('hidden');
+                return;
+            }
+
+            tableContainer.classList.remove('hidden');
+            emptyMsg.classList.add('hidden');
+
+            tbody.innerHTML = pages.map(page => `
+                <tr class="hover:bg-gray-50">
+                    <td class="px-4 py-3 max-w-md">
+                        <a href="${page.url}" target="_blank" class="text-blue-600 hover:text-blue-800 text-sm truncate block">
+                            ${page.url}
+                        </a>
+                    </td>
+                    <td class="px-4 py-3">
+                        <span class="px-2 py-1 rounded text-xs font-medium ${getStatusClass(page.status_code)}">
+                            ${page.status_code}
+                        </span>
+                    </td>
+                    <td class="px-4 py-3 text-sm text-gray-500">${page.content_type || '-'}</td>
+                    <td class="px-4 py-3 text-sm text-gray-500">${formatSize(page.content_length || 0)}</td>
+                    <td class="px-4 py-3 text-sm text-gray-500">${page.response_time || 0} ms</td>
+                    <td class="px-4 py-3 text-sm text-gray-500">${page.depth}</td>
+                </tr>
+            `).join('');
+        }
+
+        // Update pagination controls
+        function updatePaginationControls() {
+            const totalPages = Math.ceil(pagesState.total / pagesState.pageSize) || 1;
+            document.getElementById('pages-current-page').textContent = pagesState.currentPage;
+            document.getElementById('pages-total-pages').textContent = totalPages;
+            document.getElementById('pages-total').textContent = pagesState.total;
+
+            document.getElementById('pages-prev-btn').disabled = pagesState.currentPage <= 1;
+            document.getElementById('pages-next-btn').disabled = pagesState.currentPage >= totalPages;
+        }
+
+        // Load pages from API
+        async function fetchPages() {
+            const offset = (pagesState.currentPage - 1) * pagesState.pageSize;
+            try {
+                const response = await fetch(`/api/jobs/${pagesState.jobId}/pages?limit=${pagesState.pageSize}&offset=${offset}`);
+                const data = await response.json();
+                if (data.success && data.data) {
+                    pagesState.total = data.data.total || 0;
+                    renderPagesTable(data.data.pages || []);
+                    updatePaginationControls();
+                }
+            } catch (error) {
+                console.error('Failed to fetch pages:', error);
+            }
+        }
+
+        // Load pages with navigation
+        window.loadPages = function(direction) {
+            const totalPages = Math.ceil(pagesState.total / pagesState.pageSize) || 1;
+            if (direction === 'prev' && pagesState.currentPage > 1) {
+                pagesState.currentPage--;
+            } else if (direction === 'next' && pagesState.currentPage < totalPages) {
+                pagesState.currentPage++;
+            }
+            fetchPages();
+        };
+
+        // Toggle auto-refresh
+        window.toggleAutoRefresh = function() {
+            pagesState.autoRefresh = !pagesState.autoRefresh;
+            const icon = document.getElementById('auto-refresh-icon');
+            const text = document.getElementById('auto-refresh-text');
+            const btn = document.getElementById('auto-refresh-btn');
+
+            if (pagesState.autoRefresh) {
+                icon.classList.remove('text-gray-400');
+                icon.classList.add('text-green-500');
+                text.textContent = 'Auto-refresh: On';
+                btn.classList.add('bg-green-50', 'border-green-300');
+                pagesState.autoRefreshInterval = setInterval(fetchPages, 3000);
+            } else {
+                icon.classList.remove('text-green-500');
+                icon.classList.add('text-gray-400');
+                text.textContent = 'Auto-refresh: Off';
+                btn.classList.remove('bg-green-50', 'border-green-300');
+                if (pagesState.autoRefreshInterval) {
+                    clearInterval(pagesState.autoRefreshInterval);
+                    pagesState.autoRefreshInterval = null;
+                }
+            }
+        };
+
         // API helpers
         async function apiCall(method, url, data = null) {
             const options = {
@@ -341,10 +413,10 @@
             location.reload();
         };
 
-        // Auto-refresh when running
-        {{if eq .job.Status "running"}}
-        setInterval(() => location.reload(), 10000);
-        {{end}}
+        // Load pages on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            fetchPages();
+        });
     </script>
 </body>
 </html>

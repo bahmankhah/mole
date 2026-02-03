@@ -19,8 +19,12 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Println("Starting Resolver Crawler...")
 
-	// Load configuration
-	cfg := config.DefaultConfig()
+	// Load configuration from file (with fallback to defaults)
+	configPath := "config.yaml"
+	if envPath := os.Getenv("CONFIG_PATH"); envPath != "" {
+		configPath = envPath
+	}
+	cfg := config.LoadConfig(configPath)
 	log.Printf("Configuration loaded: DB=%s:%s/%s, Server=%s:%s",
 		cfg.Database.Host, cfg.Database.Port, cfg.Database.DBName,
 		cfg.Server.Host, cfg.Server.Port)
@@ -100,6 +104,7 @@ func main() {
 		// Discovery jobs
 		api.GET("/discovery", handler.GetDiscoveryJobs)
 		api.GET("/discovery/:id", handler.GetDiscoveryJob)
+		api.POST("/discovery", handler.CreateDiscoveryJob)
 
 		// Subdomains
 		api.POST("/jobs/:id/subdomains/discover", handler.StartSubdomainDiscovery)

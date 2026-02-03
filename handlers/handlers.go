@@ -51,8 +51,9 @@ func (h *Handler) Index(c *gin.Context) {
 // CreateJob creates a new crawl job
 func (h *Handler) CreateJob(c *gin.Context) {
 	var req struct {
-		Domain   string `json:"domain" form:"domain" binding:"required"`
-		MaxDepth int    `json:"max_depth" form:"max_depth"`
+		TargetURL string `json:"target_url" form:"target_url"`
+		Domain    string `json:"domain" form:"domain"`
+		MaxDepth  int    `json:"max_depth" form:"max_depth"`
 	}
 
 	if err := c.ShouldBind(&req); err != nil {
@@ -60,18 +61,29 @@ func (h *Handler) CreateJob(c *gin.Context) {
 		return
 	}
 
+	// Use target_url if provided, otherwise fall back to domain
+	target := req.TargetURL
+	if target == "" {
+		target = req.Domain
+	}
+	if target == "" {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Error: "target_url or domain is required"})
+		return
+	}
+
 	if req.MaxDepth == 0 {
 		req.MaxDepth = 10
 	}
 
-	job, err := h.jobManager.CreateJob(req.Domain, req.MaxDepth)
+	job, err := h.jobManager.CreateJob(target, req.MaxDepth)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Success: false, Error: err.Error()})
 		return
 	}
 
-	// Check if request accepts HTML
-	if c.GetHeader("Accept") == "text/html" {
+	// Check if request is from a form submission
+	contentType := c.GetHeader("Content-Type")
+	if contentType == "application/x-www-form-urlencoded" || c.GetHeader("Accept") == "text/html" {
 		c.Redirect(http.StatusFound, "/jobs/"+job.ID)
 		return
 	}
@@ -284,6 +296,33 @@ func (h *Handler) GetDiscoveryJobs(c *gin.Context) {
 	})
 }
 
+// CreateDiscoveryJob creates a new discovery job directly for a domain
+func (h *Handler) CreateDiscoveryJob(c *gin.Context) {
+	var req struct {
+		Domain string `json:"domain" form:"domain" binding:"required"`
+	}
+
+	if err := c.ShouldBind(&req); err != nil {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+		return
+	}
+
+	job, err := h.jobManager.CreateDiscoveryJobForDomain(req.Domain)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Error: err.Error()})
+		return
+	}
+
+	// Check if request is from a form submission
+	contentType := c.GetHeader("Content-Type")
+	if contentType == "application/x-www-form-urlencoded" || c.GetHeader("Accept") == "text/html" {
+		c.Redirect(http.StatusFound, "/discovery/"+job.ID)
+		return
+	}
+
+	c.JSON(http.StatusCreated, Response{Success: true, Data: job})
+}
+
 // GetDiscoveryJob returns a single discovery job with its subdomains
 func (h *Handler) GetDiscoveryJob(c *gin.Context) {
 	jobID := c.Param("id")
@@ -371,6 +410,13 @@ func (h *Handler) AddPhrase(c *gin.Context) {
 	phrase, err := h.jobManager.AddSearchPhrase(req.Phrase)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Success: false, Error: err.Error()})
+		return
+	}
+
+	// Check if request is from a form submission
+	contentType := c.GetHeader("Content-Type")
+	if contentType == "application/x-www-form-urlencoded" || c.GetHeader("Accept") == "text/html" {
+		c.Redirect(http.StatusFound, "/")
 		return
 	}
 

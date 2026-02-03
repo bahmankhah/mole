@@ -87,6 +87,7 @@ func NewEngine(cfg config.CrawlerConfig, db *gorm.DB) *Engine {
 	// Create DB-backed frontier
 	frontier := modules.NewDBFrontier(db, urlCleaner, cfg.TeleportProbability)
 	frontier.Initialize()
+	frontier.SetSkipExtensions(cfg.SkipExtensions)
 
 	return &Engine{
 		config:         cfg,

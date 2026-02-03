@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,22 +34,64 @@ func NewManager(db *gorm.DB, cfg *config.Config, engine *crawler.Engine) *Manage
 	scanner := modules.NewSubdomainScanner(cfg.Subdomain)
 	scanner.Initialize()
 
-	return &Manager{
+	m := &Manager{
 		db:               db,
 		config:           cfg,
 		engine:           engine,
 		subdomainScanner: scanner,
 	}
+
+	// Clean up any stale running/paused jobs from previous runs
+	m.cleanupStaleJobs()
+
+	return m
 }
 
-// CreateJob creates a new crawl job for a domain
-func (m *Manager) CreateJob(domain string, maxDepth int) (*models.CrawlJob, error) {
-	// Clean domain
-	domain = modules.CleanDomain(domain)
+// cleanupStaleJobs resets any jobs that were running or paused when the server stopped
+func (m *Manager) cleanupStaleJobs() {
+	// Update any running jobs to cancelled status
+	result := m.db.Model(&models.CrawlJob{}).
+		Where("status IN ?", []string{string(models.JobStatusRunning), string(models.JobStatusPaused)}).
+		Updates(map[string]interface{}{
+			"status":        models.JobStatusCancelled,
+			"error_message": "Job interrupted by server restart",
+		})
+	if result.RowsAffected > 0 {
+		log.Printf("[JobManager] Cleaned up %d stale jobs from previous run", result.RowsAffected)
+	}
+
+	// Also clean up any stale discovery jobs
+	m.db.Model(&models.DiscoveryJob{}).
+		Where("status IN ?", []string{string(models.JobStatusRunning), string(models.JobStatusPaused)}).
+		Updates(map[string]interface{}{
+			"status":        models.JobStatusCancelled,
+			"error_message": "Job interrupted by server restart",
+		})
+}
+
+// CreateJob creates a new crawl job for a URL or domain
+func (m *Manager) CreateJob(targetURL string, maxDepth int) (*models.CrawlJob, error) {
+	// Parse the URL to extract domain
+	var domain string
+	var fullURL string
+
+	// Check if it's a full URL or just a domain
+	if strings.HasPrefix(targetURL, "http://") || strings.HasPrefix(targetURL, "https://") {
+		parsed, err := url.Parse(targetURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid URL: %v", err)
+		}
+		domain = parsed.Host
+		fullURL = targetURL
+	} else {
+		// It's just a domain
+		domain = modules.CleanDomain(targetURL)
+		fullURL = "https://" + domain
+	}
 
 	job := &models.CrawlJob{
 		Domain:    domain,
-		TargetURL: "https://" + domain,
+		TargetURL: fullURL,
 		Status:    models.JobStatusPending,
 		MaxDepth:  maxDepth,
 	}
@@ -56,7 +100,7 @@ func (m *Manager) CreateJob(domain string, maxDepth int) (*models.CrawlJob, erro
 		return nil, err
 	}
 
-	log.Printf("[JobManager] Created job %s for domain %s", job.ID, domain)
+	log.Printf("[JobManager] Created job %s for URL %s (domain: %s)", job.ID, fullURL, domain)
 	return job, nil
 }
 
@@ -94,7 +138,19 @@ func (m *Manager) StopJob() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.activeJob == nil {
+	// Check engine state directly
+	engineState := m.engine.GetState()
+	if engineState == crawler.StateIdle {
+		// Engine is idle, but check if there's a job in the database that needs cleanup
+		var runningJob models.CrawlJob
+		if err := m.db.Where("status IN ?", []string{string(models.JobStatusRunning), string(models.JobStatusPaused)}).First(&runningJob).Error; err == nil {
+			// Found a stale job, update its status
+			runningJob.Status = models.JobStatusCancelled
+			runningJob.ErrorMessage = "Job stopped manually"
+			m.db.Save(&runningJob)
+			log.Printf("[JobManager] Cleaned up stale job %s", runningJob.ID)
+			return nil
+		}
 		return fmt.Errorf("no active job")
 	}
 
@@ -108,8 +164,21 @@ func (m *Manager) PauseJob() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.activeJob == nil {
-		return fmt.Errorf("no active job")
+	// Check engine state directly
+	engineState := m.engine.GetState()
+	if engineState != crawler.StateRunning {
+		// Engine is not running, but check if there's a job in the database that needs cleanup
+		if engineState == crawler.StateIdle {
+			var runningJob models.CrawlJob
+			if err := m.db.Where("status = ?", string(models.JobStatusRunning)).First(&runningJob).Error; err == nil {
+				// Found a stale running job, update its status to paused
+				runningJob.Status = models.JobStatusPaused
+				m.db.Save(&runningJob)
+				log.Printf("[JobManager] Marked stale job %s as paused", runningJob.ID)
+				return nil
+			}
+		}
+		return fmt.Errorf("no running job to pause")
 	}
 
 	m.engine.Pause()
@@ -121,8 +190,9 @@ func (m *Manager) ResumeJob() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.activeJob == nil {
-		return fmt.Errorf("no active job")
+	// Check engine state directly
+	if m.engine.GetState() != crawler.StatePaused {
+		return fmt.Errorf("no paused job to resume")
 	}
 
 	m.engine.Resume()
@@ -237,6 +307,76 @@ func (m *Manager) StartSubdomainDiscovery(jobID string) error {
 	}()
 
 	return nil
+}
+
+// CreateDiscoveryJobForDomain creates and starts a discovery job directly for a domain
+func (m *Manager) CreateDiscoveryJobForDomain(domain string) (*models.DiscoveryJob, error) {
+	// Clean domain
+	domain = modules.CleanDomain(domain)
+
+	// Create a discovery job
+	discoveryJob := &models.DiscoveryJob{
+		Domain: domain,
+		Status: models.JobStatusRunning,
+	}
+	now := time.Now()
+	discoveryJob.StartedAt = &now
+	if err := m.db.Create(discoveryJob).Error; err != nil {
+		return nil, err
+	}
+
+	m.subdomainCtx, m.subdomainCancel = context.WithCancel(context.Background())
+
+	go func() {
+		foundCount := 0
+
+		// Add the main domain itself as a subdomain
+		mainSub := &models.Subdomain{
+			DiscoveryJobID: discoveryJob.ID,
+			Domain:         domain,
+			Subdomain:      domain,
+			FullURL:        "https://" + domain,
+			IsActive:       true,
+		}
+		if err := m.db.Create(mainSub).Error; err == nil {
+			foundCount++
+		}
+
+		m.subdomainScanner.DiscoverSubdomains(domain, func(subdomain string) {
+			// Check context
+			select {
+			case <-m.subdomainCtx.Done():
+				return
+			default:
+			}
+
+			// Save discovered subdomain
+			sub := &models.Subdomain{
+				DiscoveryJobID: discoveryJob.ID,
+				Domain:         domain,
+				Subdomain:      subdomain,
+				FullURL:        "https://" + subdomain,
+				IsActive:       true,
+			}
+			if err := m.db.Create(sub).Error; err == nil {
+				foundCount++
+				// Update count
+				m.db.Model(&models.DiscoveryJob{}).Where("id = ?", discoveryJob.ID).Update("subdomains_found", foundCount)
+			}
+			log.Printf("[JobManager] Discovered subdomain: %s", subdomain)
+		})
+
+		// Mark discovery as completed
+		now := time.Now()
+		m.db.Model(&models.DiscoveryJob{}).Where("id = ?", discoveryJob.ID).Updates(map[string]interface{}{
+			"status":           models.JobStatusCompleted,
+			"completed_at":     &now,
+			"subdomains_found": foundCount,
+		})
+		log.Printf("[JobManager] Discovery completed for %s. Found %d subdomains.", domain, foundCount)
+	}()
+
+	return discoveryJob, nil
 }
 
 // StopSubdomainDiscovery stops subdomain discovery
@@ -445,9 +585,8 @@ func (m *Manager) DeleteSearchPhrase(id uint) error {
 
 // GetActiveJob returns the currently active job
 func (m *Manager) GetActiveJob() *models.CrawlJob {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.activeJob
+	// Get the job directly from the engine for accurate state
+	return m.engine.GetCurrentJob()
 }
 
 // GetEngineStats returns current engine statistics

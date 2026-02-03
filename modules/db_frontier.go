@@ -6,6 +6,9 @@ import (
 	"errors"
 	"log"
 	"math/rand"
+	"net/url"
+	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +24,7 @@ type DBFrontier struct {
 	teleportProbability float64
 	rng                 *rand.Rand
 	urlCleaner          *URLCleaner
+	skipExtensions      map[string]bool
 	mu                  sync.Mutex
 }
 
@@ -31,7 +35,44 @@ func NewDBFrontier(db *gorm.DB, urlCleaner *URLCleaner, teleportProb float64) *D
 		teleportProbability: teleportProb,
 		rng:                 rand.New(rand.NewSource(time.Now().UnixNano())),
 		urlCleaner:          urlCleaner,
+		skipExtensions:      make(map[string]bool),
 	}
+}
+
+// SetSkipExtensions sets the file extensions to skip
+func (f *DBFrontier) SetSkipExtensions(extensions []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.skipExtensions = make(map[string]bool)
+	for _, ext := range extensions {
+		// Normalize extension to lowercase with leading dot
+		ext = strings.ToLower(strings.TrimSpace(ext))
+		if !strings.HasPrefix(ext, ".") {
+			ext = "." + ext
+		}
+		f.skipExtensions[ext] = true
+	}
+	log.Printf("[%s] Configured to skip %d file extensions", f.Name(), len(f.skipExtensions))
+}
+
+// shouldSkipURL checks if a URL should be skipped based on its file extension
+func (f *DBFrontier) shouldSkipURL(rawURL string) bool {
+	if len(f.skipExtensions) == 0 {
+		return false
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+
+	// Get the file extension from the path
+	ext := strings.ToLower(path.Ext(parsed.Path))
+	if ext == "" {
+		return false
+	}
+
+	return f.skipExtensions[ext]
 }
 
 // Name returns the module name
@@ -65,6 +106,11 @@ func (f *DBFrontier) AddURL(rawURL string, depth int, parentURL string) error {
 
 	if crawlJobID == "" {
 		return errors.New("no crawl job set")
+	}
+
+	// Check if URL should be skipped based on file extension
+	if f.shouldSkipURL(rawURL) {
+		return nil // Silently skip URLs with excluded extensions
 	}
 
 	// Clean and normalize the URL

@@ -1,0 +1,93 @@
+# Resolver Crawler Configuration
+
+database:
+  host: localhost
+  port: "3306"
+  user: root
+  password: "1234"
+  dbname: crawler_db
+
+server:
+  host: 0.0.0.0
+  port: "5050"
+
+crawler:
+  max_concurrent_requests: 10
+  request_timeout: 30s
+  politeness_delay: 0s
+  teleport_probability: 0.2
+  max_depth: 10
+  user_agent: "ResolveCrawler/1.0 (+https://resolver.local)"
+  max_retries: 3
+  skip_extensions:
+    # Images
+    - .jpg
+    - .jpeg
+    - .png
+    - .gif
+    - .bmp
+    - .ico
+    - .svg
+    - .webp
+    - .tiff
+    - .tif
+    # Documents
+    - .pdf
+    - .doc
+    - .docx
+    - .xls
+    - .xlsx
+    - .ppt
+    - .pptx
+    - .odt
+    - .ods
+    - .odp
+    # Archives
+    - .zip
+    - .rar
+    - .7z
+    - .tar
+    - .gz
+    - .bz2
+    - .xz
+    # Media
+    - .mp3
+    - .mp4
+    - .avi
+    - .mov
+    - .wmv
+    - .flv
+    - .mkv
+    - .webm
+    - .wav
+    - .ogg
+    - .m4a
+    # Fonts
+    - .woff
+    - .woff2
+    - .ttf
+    - .eot
+    - .otf
+    # Binary files
+    - .exe
+    - .msi
+    - .dmg
+    - .pkg
+    - .deb
+    - .rpm
+    - .apk
+    - .ipa
+    - .iso
+    - .bin
+    - .dat
+    # Web assets
+    - .js
+    - .css
+
+subdomain:
+  dns_servers:
+    - 8.8.8.8:53
+    - 8.8.4.4:53
+    - 1.1.1.1:53
+  concurrent_lookups: 50
+  timeout: 5s

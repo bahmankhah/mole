@@ -85,7 +85,8 @@ type Subdomain struct {
 	IsActive       bool         `gorm:"default:true" json:"is_active"`
 	CrawlJobID     *string      `gorm:"type:varchar(36);index" json:"crawl_job_id,omitempty"`
 	CreatedAt      time.Time    `json:"created_at"`
-	DiscoveryJob   DiscoveryJob `gorm:"foreignKey:DiscoveryJobID" json:"-"`
+	DiscoveryJob   DiscoveryJob `gorm:"foreignKey:DiscoveryJobID;constraint:OnDelete:CASCADE" json:"-"`
+	CrawlJob       *CrawlJob    `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:SET NULL" json:"-"`
 }
 
 // CrawledPage represents a crawled web page
@@ -104,7 +105,7 @@ type CrawledPage struct {
 	CrawledAt     time.Time `json:"crawled_at"`
 	ResponseTime  int64     `json:"response_time_ms"`
 	ErrorMessage  string    `gorm:"type:text" json:"error_message,omitempty"`
-	CrawlJob      CrawlJob  `gorm:"foreignKey:CrawlJobID" json:"-"`
+	CrawlJob      CrawlJob  `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
 // FrontierURL represents a URL in the crawl frontier queue
@@ -121,7 +122,7 @@ type FrontierURL struct {
 	RetryCount    int       `gorm:"default:0" json:"retry_count"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
-	CrawlJob      CrawlJob  `gorm:"foreignKey:CrawlJobID" json:"-"`
+	CrawlJob      CrawlJob  `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
 // FrontierStatus constants
@@ -142,8 +143,8 @@ type PhraseMatch struct {
 	Context     string      `gorm:"type:text" json:"context,omitempty"`
 	Occurrences int         `gorm:"default:1" json:"occurrences"`
 	FoundAt     time.Time   `json:"found_at"`
-	CrawlJob    CrawlJob    `gorm:"foreignKey:CrawlJobID" json:"-"`
-	Page        CrawledPage `gorm:"foreignKey:PageID" json:"-"`
+	CrawlJob    CrawlJob    `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
+	Page        CrawledPage `gorm:"foreignKey:PageID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
 // SearchPhrase represents a phrase to search for during crawling
