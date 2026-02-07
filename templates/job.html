@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Job: {{.job.Domain}} - Resolver Crawler</title>
+    <title>Job: {{.job.Domain}} - Mole</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         .status-pending { color: #f59e0b; }
@@ -11,46 +11,33 @@
         .status-completed { color: #10b981; }
         .status-failed { color: #ef4444; }
         .status-paused { color: #6b7280; }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-        @keyframes spin {
-            from { transform: rotate(0deg); }
-            to { transform: rotate(360deg); }
-        }
+        .status-cancelled { color: #6b7280; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
         .tab-active { border-bottom: 2px solid #4f46e5; color: #4f46e5; }
+        .badge-content { background:#dbeafe; color:#1e40af; }
+        .badge-url    { background:#fef3c7; color:#92400e; }
+        .badge-anchor { background:#d1fae5; color:#065f46; }
     </style>
     <script>
-        // Tab switching - must be in head so it's available before onclick handlers
-        function showTab(tabName) {
-            document.querySelectorAll('.tab-content').forEach(function(el) { el.classList.add('hidden'); });
-            document.querySelectorAll('.tab-btn').forEach(function(el) {
-                el.classList.remove('tab-active');
-                el.classList.add('text-gray-500');
-            });
-
-            var tabEl = document.getElementById('tab-' + tabName);
-            if (tabEl) tabEl.classList.remove('hidden');
-            var tabButton = document.querySelector('[data-tab="' + tabName + '"]');
-            if (tabButton) {
-                tabButton.classList.add('tab-active');
-                tabButton.classList.remove('text-gray-500');
-            }
+        function showTab(t){
+            document.querySelectorAll('.tab-content').forEach(function(e){e.classList.add('hidden')});
+            document.querySelectorAll('.tab-btn').forEach(function(e){e.classList.remove('tab-active');e.classList.add('text-gray-500')});
+            var el=document.getElementById('tab-'+t);if(el)el.classList.remove('hidden');
+            var btn=document.querySelector('[data-tab="'+t+'"]');if(btn){btn.classList.add('tab-active');btn.classList.remove('text-gray-500');}
         }
     </script>
 </head>
 <body class="bg-gray-100 min-h-screen">
-    <!-- Navigation -->
     <nav class="bg-indigo-600 text-white shadow-lg">
         <div class="max-w-7xl mx-auto px-4 py-4">
             <div class="flex items-center justify-between">
                 <div class="flex items-center space-x-4">
-                    <a href="/" class="text-2xl font-bold hover:text-indigo-200">🔍 Resolver Crawler</a>
+                    <a href="/" class="text-2xl font-bold hover:text-indigo-200 flex items-center gap-2"><svg class="w-7 h-7" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><ellipse cx="32" cy="38" rx="26" ry="20" fill="#6B4226"/><ellipse cx="32" cy="30" rx="18" ry="16" fill="#8B5E3C"/><ellipse cx="32" cy="28" rx="10" ry="8" fill="#D4A76A"/><circle cx="26" cy="26" r="3" fill="#1a1a2e"/><circle cx="38" cy="26" r="3" fill="#1a1a2e"/><circle cx="27" cy="26.5" r="1" fill="white"/><circle cx="39" cy="26.5" r="1" fill="white"/><ellipse cx="32" cy="31" rx="4" ry="3" fill="#FF8FA3"/><ellipse cx="22" cy="20" rx="5" ry="3" fill="#8B5E3C" transform="rotate(-20 22 20)"/><ellipse cx="42" cy="20" rx="5" ry="3" fill="#8B5E3C" transform="rotate(20 42 20)"/><ellipse cx="15" cy="44" rx="6" ry="4" fill="#6B4226" transform="rotate(-30 15 44)"/><ellipse cx="49" cy="44" rx="6" ry="4" fill="#6B4226" transform="rotate(30 49 44)"/></svg> Mole</a>
                     <span class="text-indigo-200">/</span>
-                    <span>{{.job.TargetURL}}</span>
+                    <span class="truncate max-w-xs">{{.job.Domain}}</span>
                 </div>
                 <div class="flex items-center space-x-4">
+                    <a href="/search" class="text-indigo-200 hover:text-white transition text-sm">🔎 Search</a>
                     <span class="status-{{.job.Status}} text-lg font-semibold">{{.job.Status}}</span>
                 </div>
             </div>
@@ -63,44 +50,24 @@
             <div class="flex items-start justify-between mb-6 gap-4">
                 <div class="min-w-0 flex-1">
                     <h1 class="text-2xl font-bold text-gray-800 truncate" title="{{.job.TargetURL}}">{{.job.TargetURL}}</h1>
-                    <p class="text-gray-500 mt-1 text-sm">Job ID: {{.job.ID}} · Base Domain: {{.job.Domain}}</p>
+                    <p class="text-gray-500 mt-1 text-sm">Job ID: {{.job.ID}} · Domain: {{.job.Domain}}</p>
                 </div>
                 <div class="flex space-x-3 flex-shrink-0">
                     {{if eq .job.Status "pending"}}
-                    <button onclick="startJob('{{.job.ID}}')"
-                        class="bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700 transition">
-                        ▶ Start Crawl
-                    </button>
-                    <button onclick="discoverSubdomains('{{.job.ID}}')"
-                        class="bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition">
-                        🔎 Discover Subdomains
-                    </button>
+                    <button onclick="startJob('{{.job.ID}}')" class="bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700 transition">▶ Start</button>
+                    <button onclick="discoverSubdomains('{{.job.ID}}')" class="bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition">🔎 Discover</button>
                     {{else if eq .job.Status "running"}}
-                    <button onclick="pauseJob()"
-                        class="bg-yellow-600 text-white py-2 px-4 rounded-md hover:bg-yellow-700 transition">
-                        ⏸ Pause
-                    </button>
-                    <button onclick="stopJob()"
-                        class="bg-red-600 text-white py-2 px-4 rounded-md hover:bg-red-700 transition">
-                        ⏹ Stop
-                    </button>
+                    <button onclick="pauseJob()" class="bg-yellow-600 text-white py-2 px-4 rounded-md hover:bg-yellow-700 transition">⏸ Pause</button>
+                    <button onclick="stopJob()" class="bg-red-600 text-white py-2 px-4 rounded-md hover:bg-red-700 transition">⏹ Stop</button>
                     {{else if eq .job.Status "paused"}}
-                    <button onclick="resumeJob()"
-                        class="bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700 transition">
-                        ▶ Resume
-                    </button>
-                    <button onclick="stopJob()"
-                        class="bg-red-600 text-white py-2 px-4 rounded-md hover:bg-red-700 transition">
-                        ⏹ Stop
-                    </button>
+                    <button onclick="resumeJob()" class="bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700 transition">▶ Resume</button>
+                    <button onclick="stopJob()" class="bg-red-600 text-white py-2 px-4 rounded-md hover:bg-red-700 transition">⏹ Stop</button>
                     {{end}}
                 </div>
             </div>
-
-            <!-- Stats Grid -->
             <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <div class="bg-gray-50 rounded-lg p-4">
-                    <div class="text-gray-500 text-sm">Crawled URLs</div>
+                    <div class="text-gray-500 text-sm">Crawled</div>
                     <div class="text-2xl font-bold text-indigo-600">{{.job.CrawledURLs}}</div>
                 </div>
                 <div class="bg-gray-50 rounded-lg p-4">
@@ -108,21 +75,22 @@
                     <div class="text-2xl font-bold text-blue-600">{{.job.TotalURLs}}</div>
                 </div>
                 <div class="bg-gray-50 rounded-lg p-4">
-                    <div class="text-gray-500 text-sm">Phrase Matches</div>
+                    <div class="text-gray-500 text-sm">Matches</div>
                     <div class="text-2xl font-bold text-green-600">{{.job.FoundMatches}}</div>
                 </div>
                 <div class="bg-gray-50 rounded-lg p-4">
                     <div class="text-gray-500 text-sm">Max Depth</div>
                     <div class="text-2xl font-bold text-gray-600">{{.job.MaxDepth}}</div>
                 </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-gray-500 text-sm">Config</div>
+                    <div class="text-sm font-medium mt-1">{{if .job.Settings}}<span class="text-indigo-600">Custom</span>{{else}}<span class="text-gray-400">Defaults</span>{{end}}</div>
+                </div>
             </div>
-
             {{if .job.StartedAt}}
             <div class="mt-4 text-sm text-gray-500">
                 Started: {{.job.StartedAt.Format "Jan 02, 2006 15:04:05"}}
-                {{if .job.CompletedAt}}
-                | Completed: {{.job.CompletedAt.Format "Jan 02, 2006 15:04:05"}}
-                {{end}}
+                {{if .job.CompletedAt}} | Completed: {{.job.CompletedAt.Format "Jan 02, 2006 15:04:05"}}{{end}}
             </div>
             {{end}}
         </div>
@@ -130,17 +98,14 @@
         <!-- Tabs -->
         <div class="bg-white rounded-lg shadow">
             <div class="border-b border-gray-200">
-                <nav class="flex space-x-8 px-6" id="tabs">
-                    <button onclick="showTab('matches')" class="tab-btn py-4 text-sm font-medium tab-active" data-tab="matches">
-                        Phrase Matches ({{.matchTotal}})
-                    </button>
-                    <button onclick="showTab('pages')" class="tab-btn py-4 text-sm font-medium text-gray-500 hover:text-gray-700" data-tab="pages">
-                        Crawled Pages ({{.pageTotal}})
-                    </button>
+                <nav class="flex space-x-8 px-6">
+                    <button onclick="showTab('matches')" class="tab-btn py-4 text-sm font-medium tab-active" data-tab="matches">Phrase Matches ({{.matchTotal}})</button>
+                    <button onclick="showTab('pages')" class="tab-btn py-4 text-sm font-medium text-gray-500 hover:text-gray-700" data-tab="pages">Crawled Pages ({{.pageTotal}})</button>
+                    <button onclick="showTab('settings')" class="tab-btn py-4 text-sm font-medium text-gray-500 hover:text-gray-700" data-tab="settings">⚙ Settings</button>
                 </nav>
             </div>
 
-            <!-- Matches Tab -->
+            <!-- ── Matches Tab ── -->
             <div id="tab-matches" class="tab-content p-6">
                 {{if .matches}}
                 <div class="overflow-x-auto">
@@ -149,6 +114,7 @@
                             <tr>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Phrase</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">URL</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Context</th>
@@ -157,25 +123,12 @@
                         <tbody class="divide-y divide-gray-200">
                             {{range .matches}}
                             <tr class="hover:bg-gray-50">
-                                <td class="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">
-                                    {{.FoundAt.Format "Jan 02 15:04:05"}}
-                                </td>
-                                <td class="px-4 py-3">
-                                    <span class="px-2 py-1 bg-yellow-100 text-yellow-800 rounded text-sm font-medium">
-                                        {{.Phrase}}
-                                    </span>
-                                </td>
-                                <td class="px-4 py-3 max-w-md">
-                                    <a href="{{.URL}}" target="_blank" class="text-blue-600 hover:text-blue-800 text-sm truncate block">
-                                        {{.URL}}
-                                    </a>
-                                </td>
-                                <td class="px-4 py-3 text-center">
-                                    <span class="font-bold text-green-600">{{.Occurrences}}</span>
-                                </td>
-                                <td class="px-4 py-3 text-sm text-gray-600 max-w-lg truncate" title="{{.Context}}">
-                                    {{if .Context}}{{.Context}}{{else}}-{{end}}
-                                </td>
+                                <td class="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">{{.FoundAt.Format "Jan 02 15:04:05"}}</td>
+                                <td class="px-4 py-3"><span class="px-2 py-1 bg-yellow-100 text-yellow-800 rounded text-sm font-medium">{{.Phrase}}</span></td>
+                                <td class="px-4 py-3"><span class="px-2 py-0.5 rounded text-xs font-medium {{if eq .MatchType "url"}}badge-url{{else if eq .MatchType "anchor"}}badge-anchor{{else}}badge-content{{end}}">{{if .MatchType}}{{.MatchType}}{{else}}content{{end}}</span></td>
+                                <td class="px-4 py-3 max-w-md"><a href="{{.URL}}" target="_blank" class="text-blue-600 hover:text-blue-800 text-sm truncate block">{{.URL}}</a></td>
+                                <td class="px-4 py-3 text-center"><span class="font-bold text-green-600">{{.Occurrences}}</span></td>
+                                <td class="px-4 py-3 text-sm text-gray-600 max-w-lg truncate" title="{{.Context}}">{{if .Context}}{{.Context}}{{else}}-{{end}}</td>
                             </tr>
                             {{end}}
                         </tbody>
@@ -189,39 +142,22 @@
                 {{end}}
             </div>
 
-            <!-- Pages Tab -->
+            <!-- ── Pages Tab ── -->
             <div id="tab-pages" class="tab-content p-6 hidden">
-                <!-- Controls Row -->
                 <div class="flex items-center justify-between mb-4">
+                    <span class="text-sm text-gray-600">Total: <span id="pages-total">{{.pageTotal}}</span> pages</span>
                     <div class="flex items-center space-x-4">
-                        <span class="text-sm text-gray-600">Total: <span id="pages-total">{{.pageTotal}}</span> pages</span>
-                    </div>
-                    <div class="flex items-center space-x-4">
-                        <!-- Auto-refresh toggle -->
-                        <button id="auto-refresh-btn" onclick="toggleAutoRefresh()" 
-                            class="flex items-center space-x-2 px-3 py-2 border border-gray-300 rounded-md hover:bg-gray-50 transition">
-                            <svg id="auto-refresh-icon" class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                            </svg>
+                        <button id="auto-refresh-btn" onclick="toggleAutoRefresh()" class="flex items-center space-x-2 px-3 py-2 border border-gray-300 rounded-md hover:bg-gray-50 transition">
+                            <svg id="auto-refresh-icon" class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
                             <span id="auto-refresh-text" class="text-sm text-gray-600">Auto-refresh: Off</span>
                         </button>
-                        <!-- Pagination -->
                         <div class="flex items-center space-x-2">
-                            <button id="pages-prev-btn" onclick="loadPages('prev')" disabled
-                                class="px-3 py-2 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
-                                ← Prev
-                            </button>
-                            <span class="text-sm text-gray-600">
-                                Page <span id="pages-current-page">1</span> of <span id="pages-total-pages">1</span>
-                            </span>
-                            <button id="pages-next-btn" onclick="loadPages('next')" disabled
-                                class="px-3 py-2 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
-                                Next →
-                            </button>
+                            <button id="pages-prev-btn" onclick="loadPages('prev')" disabled class="px-3 py-2 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">← Prev</button>
+                            <span class="text-sm text-gray-600">Page <span id="pages-current-page">1</span>/<span id="pages-total-pages">1</span></span>
+                            <button id="pages-next-btn" onclick="loadPages('next')" disabled class="px-3 py-2 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">Next →</button>
                         </div>
                     </div>
                 </div>
-
                 <div id="pages-table-container" class="overflow-x-auto">
                     <table class="w-full">
                         <thead class="bg-gray-50">
@@ -234,9 +170,7 @@
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Depth</th>
                             </tr>
                         </thead>
-                        <tbody id="pages-tbody" class="divide-y divide-gray-200">
-                            <!-- Rows will be populated by JavaScript -->
-                        </tbody>
+                        <tbody id="pages-tbody" class="divide-y divide-gray-200"></tbody>
                     </table>
                 </div>
                 <div id="pages-empty" class="text-center py-12 text-gray-500 hidden">
@@ -244,179 +178,200 @@
                     <p class="text-sm mt-2">Start the crawler to begin fetching pages</p>
                 </div>
             </div>
+
+            <!-- ── Settings Tab ── -->
+            <div id="tab-settings" class="tab-content p-6 hidden">
+                <div class="max-w-3xl">
+                    <div class="flex items-center justify-between mb-6">
+                        <div>
+                            <h3 class="text-lg font-semibold text-gray-800">Job Settings</h3>
+                            <p class="text-sm text-gray-500 mt-1">Override default crawler config for this job. Empty fields use global defaults.</p>
+                        </div>
+                        {{if eq .job.Status "pending"}}
+                        <span class="px-3 py-1 bg-green-100 text-green-700 rounded-full text-xs font-medium">Editable</span>
+                        {{else}}
+                        <span class="px-3 py-1 bg-gray-100 text-gray-500 rounded-full text-xs font-medium">Read-only</span>
+                        {{end}}
+                    </div>
+
+                    <div id="settings-alert" class="hidden mb-4 p-3 rounded-md text-sm"></div>
+
+                    <form id="settings-form" onsubmit="saveSettings(event)">
+                        <div class="border border-gray-200 rounded-lg mb-6">
+                            <div class="bg-gray-50 px-4 py-3 border-b border-gray-200 rounded-t-lg">
+                                <h4 class="text-sm font-semibold text-gray-700">Crawler Configuration</h4>
+                            </div>
+                            <div class="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Max Concurrent Requests</label>
+                                    <input type="number" id="set-max-concurrent" min="1" max="100" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <p class="text-xs text-gray-400 mt-1">Default: <span class="def-val" data-key="max_concurrent_requests"></span></p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Request Timeout (sec)</label>
+                                    <input type="number" id="set-request-timeout" min="1" max="300" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <p class="text-xs text-gray-400 mt-1">Default: <span class="def-val" data-key="request_timeout_seconds"></span></p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Politeness Delay (ms)</label>
+                                    <input type="number" id="set-politeness-delay" min="0" max="60000" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <p class="text-xs text-gray-400 mt-1">Default: <span class="def-val" data-key="politeness_delay_ms"></span>ms · Randomized ±1s at runtime</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Max Depth</label>
+                                    <input type="number" id="set-max-depth" min="1" max="100" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <p class="text-xs text-gray-400 mt-1">Default: <span class="def-val" data-key="max_depth"></span></p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Max Retries</label>
+                                    <input type="number" id="set-max-retries" min="0" max="10" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <p class="text-xs text-gray-400 mt-1">Default: <span class="def-val" data-key="max_retries"></span></p>
+                                </div>
+                                <div class="md:col-span-2">
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">User Agent</label>
+                                    <input type="text" id="set-user-agent" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <p class="text-xs text-gray-400 mt-1 truncate">Default: <span class="def-val" data-key="user_agent"></span></p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="border border-gray-200 rounded-lg mb-6">
+                            <div class="bg-gray-50 px-4 py-3 border-b border-gray-200 rounded-t-lg">
+                                <h4 class="text-sm font-semibold text-gray-700">URL Filtering (Regex)</h4>
+                            </div>
+                            <div class="p-4 space-y-4">
+                                <div class="bg-amber-50 border border-amber-200 rounded-md p-3">
+                                    <p class="text-xs text-amber-800"><strong>Note:</strong> If include patterns are set, only matching URLs are crawled and exclude patterns are ignored. Otherwise, exclude patterns filter out matching URLs.</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Include Patterns <span class="text-gray-400 text-xs">(one regex per line)</span></label>
+                                    <textarea id="set-url-include" rows="3" placeholder="/blog/.*&#10;/products/[0-9]+" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono text-sm disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}></textarea>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Exclude Patterns <span class="text-gray-400 text-xs">(one regex per line)</span></label>
+                                    <textarea id="set-url-exclude" rows="3" placeholder="\.(css|js|png|jpg)$&#10;/admin/.*" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono text-sm disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}></textarea>
+                                </div>
+                            </div>
+                        </div>
+
+                        {{if eq .job.Status "pending"}}
+                        <div class="flex items-center justify-between">
+                            <button type="button" onclick="resetToDefaults()" class="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50 transition">Reset to Defaults</button>
+                            <button type="submit" id="save-settings-btn" class="px-6 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 transition text-sm font-medium">Save Settings</button>
+                        </div>
+                        {{end}}
+                    </form>
+                </div>
+            </div>
         </div>
     </div>
 
     <script>
-        // Pages pagination state
-        const pagesState = {
-            jobId: '{{.job.ID}}',
-            currentPage: 1,
-            pageSize: 20,
-            total: {{.pageTotal}},
-            autoRefresh: false,
-            autoRefreshInterval: null
-        };
+        var pagesState = { jobId:'{{.job.ID}}', currentPage:1, pageSize:20, total:{{.pageTotal}}, autoRefresh:false, interval:null };
+        var defaultSettings = {{.defaultSettingsJSON}};
+        var currentSettings = {{if .settingsJSON}}{{.settingsJSON}}{{else}}null{{end}};
 
-        // Format file size
-        function formatSize(bytes) {
-            if (bytes > 1048576) return (bytes / 1048576).toFixed(2) + ' MB';
-            if (bytes > 1024) return (bytes / 1024).toFixed(2) + ' KB';
-            return bytes + ' B';
+        /* ── Settings ── */
+        function populateSettings(){
+            document.querySelectorAll('.def-val').forEach(function(el){
+                var k=el.getAttribute('data-key'); el.textContent=defaultSettings[k]!=null?defaultSettings[k]:'-';
+            });
+            var s=currentSettings||{};
+            setVal('set-max-concurrent',s.max_concurrent_requests);
+            setVal('set-request-timeout',s.request_timeout_seconds);
+            setVal('set-politeness-delay',s.politeness_delay_ms);
+            setVal('set-max-depth',s.max_depth);
+            setVal('set-max-retries',s.max_retries);
+            setVal('set-user-agent',s.user_agent);
+            document.getElementById('set-url-include').value=(s.url_include_patterns||[]).join('\n');
+            document.getElementById('set-url-exclude').value=(s.url_exclude_patterns||[]).join('\n');
+        }
+        function setVal(id,v){var e=document.getElementById(id);if(e)e.value=(v!=null&&v!=undefined)?v:'';}
+        function intVal(id){var v=document.getElementById(id).value.trim();return v===''?undefined:parseInt(v,10);}
+        function strVal(id){var v=document.getElementById(id).value.trim();return v===''?undefined:v;}
+        function linesVal(id){var v=document.getElementById(id).value.trim();if(!v)return undefined;var l=v.split('\n').map(function(x){return x.trim()}).filter(function(x){return x.length>0});return l.length?l:undefined;}
+
+        function buildPayload(){
+            var p={};
+            var v;
+            v=intVal('set-max-concurrent');if(v!==undefined)p.max_concurrent_requests=v;
+            v=intVal('set-request-timeout');if(v!==undefined)p.request_timeout_seconds=v;
+            v=intVal('set-politeness-delay');if(v!==undefined)p.politeness_delay_ms=v;
+            v=intVal('set-max-depth');if(v!==undefined)p.max_depth=v;
+            v=intVal('set-max-retries');if(v!==undefined)p.max_retries=v;
+            v=strVal('set-user-agent');if(v!==undefined)p.user_agent=v;
+            v=linesVal('set-url-include');if(v!==undefined)p.url_include_patterns=v;
+            v=linesVal('set-url-exclude');if(v!==undefined)p.url_exclude_patterns=v;
+            return p;
+        }
+        function showAlert(msg,ok){
+            var el=document.getElementById('settings-alert');
+            el.textContent=msg;
+            el.className='mb-4 p-3 rounded-md text-sm '+(ok?'bg-green-50 border border-green-200 text-green-700':'bg-red-50 border border-red-200 text-red-700');
+            setTimeout(function(){el.classList.add('hidden')},4000);
+        }
+        async function saveSettings(e){
+            e.preventDefault();
+            var btn=document.getElementById('save-settings-btn');btn.disabled=true;btn.textContent='Saving…';
+            try{
+                var r=await fetch('/api/jobs/'+pagesState.jobId+'/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildPayload())});
+                var d=await r.json();
+                showAlert(d.success?'Settings saved.':'Error: '+(d.error||'Unknown'),d.success);
+            }catch(err){showAlert('Network error: '+err.message,false);}
+            btn.disabled=false;btn.textContent='Save Settings';
+        }
+        function resetToDefaults(){
+            ['set-max-concurrent','set-request-timeout','set-politeness-delay','set-max-depth','set-max-retries','set-user-agent'].forEach(function(id){document.getElementById(id).value='';});
+            document.getElementById('set-url-include').value='';
+            document.getElementById('set-url-exclude').value='';
         }
 
-        // Get status code badge class
-        function getStatusClass(code) {
-            if (code >= 200 && code < 300) return 'bg-green-100 text-green-800';
-            if (code >= 300 && code < 400) return 'bg-blue-100 text-blue-800';
-            if (code >= 400 && code < 500) return 'bg-yellow-100 text-yellow-800';
-            return 'bg-red-100 text-red-800';
+        /* ── Pages Tab ── */
+        function fmtSize(b){if(b>1048576)return(b/1048576).toFixed(2)+' MB';if(b>1024)return(b/1024).toFixed(2)+' KB';return b+' B';}
+        function statusCls(c){if(c>=200&&c<300)return'bg-green-100 text-green-800';if(c>=300&&c<400)return'bg-blue-100 text-blue-800';if(c>=400&&c<500)return'bg-yellow-100 text-yellow-800';return'bg-red-100 text-red-800';}
+
+        function renderPages(pages){
+            var tb=document.getElementById('pages-tbody'),empty=document.getElementById('pages-empty'),tc=document.getElementById('pages-table-container');
+            if(!pages||!pages.length){tb.innerHTML='';tc.classList.add('hidden');empty.classList.remove('hidden');return;}
+            tc.classList.remove('hidden');empty.classList.add('hidden');
+            tb.innerHTML=pages.map(function(p){
+                return '<tr class="hover:bg-gray-50"><td class="px-4 py-3 max-w-md"><a href="'+p.url+'" target="_blank" class="text-blue-600 hover:text-blue-800 text-sm truncate block">'+p.url+'</a></td><td class="px-4 py-3"><span class="px-2 py-1 rounded text-xs font-medium '+statusCls(p.status_code)+'">'+p.status_code+'</span></td><td class="px-4 py-3 text-sm text-gray-500">'+(p.content_type||'-')+'</td><td class="px-4 py-3 text-sm text-gray-500">'+fmtSize(p.content_length||0)+'</td><td class="px-4 py-3 text-sm text-gray-500">'+(p.response_time_ms||0)+' ms</td><td class="px-4 py-3 text-sm text-gray-500">'+p.depth+'</td></tr>';
+            }).join('');
         }
-
-        // Render pages table
-        function renderPagesTable(pages) {
-            const tbody = document.getElementById('pages-tbody');
-            const emptyMsg = document.getElementById('pages-empty');
-            const tableContainer = document.getElementById('pages-table-container');
-
-            if (!pages || pages.length === 0) {
-                tbody.innerHTML = '';
-                tableContainer.classList.add('hidden');
-                emptyMsg.classList.remove('hidden');
-                return;
-            }
-
-            tableContainer.classList.remove('hidden');
-            emptyMsg.classList.add('hidden');
-
-            tbody.innerHTML = pages.map(page => `
-                <tr class="hover:bg-gray-50">
-                    <td class="px-4 py-3 max-w-md">
-                        <a href="${page.url}" target="_blank" class="text-blue-600 hover:text-blue-800 text-sm truncate block">
-                            ${page.url}
-                        </a>
-                    </td>
-                    <td class="px-4 py-3">
-                        <span class="px-2 py-1 rounded text-xs font-medium ${getStatusClass(page.status_code)}">
-                            ${page.status_code}
-                        </span>
-                    </td>
-                    <td class="px-4 py-3 text-sm text-gray-500">${page.content_type || '-'}</td>
-                    <td class="px-4 py-3 text-sm text-gray-500">${formatSize(page.content_length || 0)}</td>
-                    <td class="px-4 py-3 text-sm text-gray-500">${page.response_time || 0} ms</td>
-                    <td class="px-4 py-3 text-sm text-gray-500">${page.depth}</td>
-                </tr>
-            `).join('');
+        function updatePageControls(){
+            var tp=Math.ceil(pagesState.total/pagesState.pageSize)||1;
+            document.getElementById('pages-current-page').textContent=pagesState.currentPage;
+            document.getElementById('pages-total-pages').textContent=tp;
+            document.getElementById('pages-total').textContent=pagesState.total;
+            document.getElementById('pages-prev-btn').disabled=pagesState.currentPage<=1;
+            document.getElementById('pages-next-btn').disabled=pagesState.currentPage>=tp;
         }
-
-        // Update pagination controls
-        function updatePaginationControls() {
-            const totalPages = Math.ceil(pagesState.total / pagesState.pageSize) || 1;
-            document.getElementById('pages-current-page').textContent = pagesState.currentPage;
-            document.getElementById('pages-total-pages').textContent = totalPages;
-            document.getElementById('pages-total').textContent = pagesState.total;
-
-            document.getElementById('pages-prev-btn').disabled = pagesState.currentPage <= 1;
-            document.getElementById('pages-next-btn').disabled = pagesState.currentPage >= totalPages;
+        async function fetchPages(){
+            var off=(pagesState.currentPage-1)*pagesState.pageSize;
+            try{var r=await fetch('/api/jobs/'+pagesState.jobId+'/pages?limit='+pagesState.pageSize+'&offset='+off);var d=await r.json();if(d.success&&d.data){pagesState.total=d.data.total||0;renderPages(d.data.pages||[]);updatePageControls();}}catch(e){console.error(e);}
         }
-
-        // Load pages from API
-        async function fetchPages() {
-            const offset = (pagesState.currentPage - 1) * pagesState.pageSize;
-            try {
-                const response = await fetch(`/api/jobs/${pagesState.jobId}/pages?limit=${pagesState.pageSize}&offset=${offset}`);
-                const data = await response.json();
-                if (data.success && data.data) {
-                    pagesState.total = data.data.total || 0;
-                    renderPagesTable(data.data.pages || []);
-                    updatePaginationControls();
-                }
-            } catch (error) {
-                console.error('Failed to fetch pages:', error);
-            }
-        }
-
-        // Load pages with navigation
-        window.loadPages = function(direction) {
-            const totalPages = Math.ceil(pagesState.total / pagesState.pageSize) || 1;
-            if (direction === 'prev' && pagesState.currentPage > 1) {
-                pagesState.currentPage--;
-            } else if (direction === 'next' && pagesState.currentPage < totalPages) {
-                pagesState.currentPage++;
-            }
+        window.loadPages=function(dir){
+            var tp=Math.ceil(pagesState.total/pagesState.pageSize)||1;
+            if(dir==='prev'&&pagesState.currentPage>1)pagesState.currentPage--;
+            else if(dir==='next'&&pagesState.currentPage<tp)pagesState.currentPage++;
             fetchPages();
         };
-
-        // Toggle auto-refresh
-        window.toggleAutoRefresh = function() {
-            pagesState.autoRefresh = !pagesState.autoRefresh;
-            const icon = document.getElementById('auto-refresh-icon');
-            const text = document.getElementById('auto-refresh-text');
-            const btn = document.getElementById('auto-refresh-btn');
-
-            if (pagesState.autoRefresh) {
-                icon.classList.remove('text-gray-400');
-                icon.classList.add('text-green-500');
-                text.textContent = 'Auto-refresh: On';
-                btn.classList.add('bg-green-50', 'border-green-300');
-                pagesState.autoRefreshInterval = setInterval(fetchPages, 3000);
-            } else {
-                icon.classList.remove('text-green-500');
-                icon.classList.add('text-gray-400');
-                text.textContent = 'Auto-refresh: Off';
-                btn.classList.remove('bg-green-50', 'border-green-300');
-                if (pagesState.autoRefreshInterval) {
-                    clearInterval(pagesState.autoRefreshInterval);
-                    pagesState.autoRefreshInterval = null;
-                }
-            }
+        window.toggleAutoRefresh=function(){
+            pagesState.autoRefresh=!pagesState.autoRefresh;
+            var icon=document.getElementById('auto-refresh-icon'),text=document.getElementById('auto-refresh-text'),btn=document.getElementById('auto-refresh-btn');
+            if(pagesState.autoRefresh){icon.classList.remove('text-gray-400');icon.classList.add('text-green-500');text.textContent='Auto-refresh: On';btn.classList.add('bg-green-50','border-green-300');pagesState.interval=setInterval(fetchPages,3000);}
+            else{icon.classList.remove('text-green-500');icon.classList.add('text-gray-400');text.textContent='Auto-refresh: Off';btn.classList.remove('bg-green-50','border-green-300');if(pagesState.interval){clearInterval(pagesState.interval);pagesState.interval=null;}}
         };
 
-        // API helpers
-        async function apiCall(method, url, data = null) {
-            const options = {
-                method: method,
-                headers: { 'Content-Type': 'application/json' },
-            };
-            if (data) options.body = JSON.stringify(data);
-            const response = await fetch(url, options);
-            return response.json();
-        }
+        /* ── Actions ── */
+        async function apiCall(m,u,d){var o={method:m,headers:{'Content-Type':'application/json'}};if(d)o.body=JSON.stringify(d);return(await fetch(u,o)).json();}
+        window.startJob=async function(id){await apiCall('POST','/api/jobs/'+id+'/start');location.reload();};
+        window.stopJob=async function(){await apiCall('POST','/api/jobs/stop');location.reload();};
+        window.pauseJob=async function(){await apiCall('POST','/api/jobs/pause');location.reload();};
+        window.resumeJob=async function(){await apiCall('POST','/api/jobs/resume');location.reload();};
+        window.discoverSubdomains=async function(id){await apiCall('POST','/api/jobs/'+id+'/subdomains/discover');alert('Subdomain discovery started!');};
 
-        window.startJob = async function(id) {
-            await apiCall('POST', `/api/jobs/${id}/start`);
-            location.reload();
-        };
-
-        window.stopJob = async function() {
-            await apiCall('POST', '/api/jobs/stop');
-            location.reload();
-        };
-
-        window.pauseJob = async function() {
-            await apiCall('POST', '/api/jobs/pause');
-            location.reload();
-        };
-
-        window.resumeJob = async function() {
-            await apiCall('POST', '/api/jobs/resume');
-            location.reload();
-        };
-
-        window.discoverSubdomains = async function(id) {
-            await apiCall('POST', `/api/jobs/${id}/subdomains/discover`);
-            alert('Subdomain discovery started! Refresh the page to see results.');
-        };
-
-        window.startCrawlForSubdomain = async function(subdomainId) {
-            await apiCall('POST', `/api/subdomains/${subdomainId}/crawl`);
-            location.reload();
-        };
-
-        // Load pages on page load
-        document.addEventListener('DOMContentLoaded', function() {
-            fetchPages();
-        });
+        document.addEventListener('DOMContentLoaded',function(){fetchPages();populateSettings();});
     </script>
 </body>
 </html>

@@ -17,7 +17,7 @@ import (
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Println("Starting Resolver Crawler...")
+	log.Println("Starting Mole...")
 
 	// Load configuration from file (with fallback to defaults)
 	configPath := "config.yaml"
@@ -68,6 +68,33 @@ func main() {
 			}
 			return a / b
 		},
+		"add": func(a, b int) int {
+			return a + b
+		},
+		"subtract": func(a, b int) int {
+			return a - b
+		},
+		"pages": func(current, total int) []int {
+			var p []int
+			start := current - 2
+			if start < 1 {
+				start = 1
+			}
+			end := start + 4
+			if end > total {
+				end = total
+			}
+			if end-start < 4 && start > 1 {
+				start = end - 4
+				if start < 1 {
+					start = 1
+				}
+			}
+			for i := start; i <= end; i++ {
+				p = append(p, i)
+			}
+			return p
+		},
 	}
 
 	// Load templates with custom functions
@@ -79,6 +106,7 @@ func main() {
 
 	// Web routes
 	router.GET("/", handler.Index)
+	router.GET("/search", handler.SearchPage)
 	router.GET("/jobs/:id", func(c *gin.Context) {
 		c.Request.Header.Set("Accept", "text/html")
 		handler.GetJob(c)
@@ -117,11 +145,18 @@ func main() {
 		// Phrase matches
 		api.GET("/matches", handler.GetMatches)
 
+		// Search
+		api.GET("/search", handler.SearchAPI)
+
 		// Search phrases
 		api.GET("/phrases", handler.GetPhrases)
 		api.POST("/phrases", handler.AddPhrase)
 		api.PUT("/phrases/:id", handler.UpdatePhrase)
 		api.DELETE("/phrases/:id", handler.DeletePhrase)
+
+		// Job settings
+		api.PUT("/jobs/:id/settings", handler.UpdateJobSettings)
+		api.GET("/settings/defaults", handler.GetDefaultSettings)
 
 		// Stats
 		api.GET("/stats", handler.GetStats)

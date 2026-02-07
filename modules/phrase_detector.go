@@ -72,13 +72,31 @@ func (p *SimplePhraseDetector) RemovePhrase(phrase string) {
 
 // DetectPhrases detects phrases in content and returns matches
 func (p *SimplePhraseDetector) DetectPhrases(content string) []PhraseMatchResult {
+	return p.detectInText(content, "content")
+}
+
+// DetectPhrasesInURL detects phrases in a URL
+func (p *SimplePhraseDetector) DetectPhrasesInURL(rawURL string) []PhraseMatchResult {
+	return p.detectInText(rawURL, "url")
+}
+
+// DetectPhrasesInAnchor detects phrases in anchor text
+func (p *SimplePhraseDetector) DetectPhrasesInAnchor(anchorText string) []PhraseMatchResult {
+	if anchorText == "" {
+		return nil
+	}
+	return p.detectInText(anchorText, "anchor")
+}
+
+// detectInText performs phrase detection on text with the given match type
+func (p *SimplePhraseDetector) detectInText(text string, matchType string) []PhraseMatchResult {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	var results []PhraseMatchResult
 
 	// Normalize content for searching
-	normalizedContent := normalizeContent(content)
+	normalizedContent := normalizeContent(text)
 
 	for phrase, re := range p.phrases {
 		matches := re.FindAllStringIndex(normalizedContent, -1)
@@ -91,6 +109,7 @@ func (p *SimplePhraseDetector) DetectPhrases(content string) []PhraseMatchResult
 				Phrase:      phrase,
 				Occurrences: len(matches),
 				Context:     context,
+				MatchType:   matchType,
 			})
 		}
 	}

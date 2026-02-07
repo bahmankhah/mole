@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -49,6 +50,13 @@ type Engine struct {
 	wg         sync.WaitGroup
 	currentJob *models.CrawlJob
 	jobMu      sync.RWMutex
+	rng        *rand.Rand
+
+	// Effective config for current job (merged)
+	effectiveConfig config.CrawlerConfig
+
+	// Phrase ID lookup: phrase string -> SearchPhrase.ID
+	phraseIDMap map[string]uint
 
 	// Stats
 	crawledCount int64
@@ -99,6 +107,8 @@ func NewEngine(cfg config.CrawlerConfig, db *gorm.DB) *Engine {
 		sitemapParser:  sitemapParser,
 		robotsParser:   robotsParser,
 		frontier:       frontier,
+		rng:            rand.New(rand.NewSource(time.Now().UnixNano())),
+		phraseIDMap:    make(map[string]uint),
 	}
 }
 
@@ -109,8 +119,11 @@ func (e *Engine) LoadPhrases() error {
 		return err
 	}
 
+	// Clear and rebuild
+	e.phraseIDMap = make(map[string]uint)
 	for _, p := range phrases {
 		e.phraseDetector.AddPhrase(p.Phrase)
+		e.phraseIDMap[p.Phrase] = p.ID
 	}
 
 	log.Printf("[Engine] Loaded %d search phrases", len(phrases))
@@ -126,6 +139,22 @@ func (e *Engine) Start(job *models.CrawlJob) error {
 	e.jobMu.Lock()
 	e.currentJob = job
 	e.jobMu.Unlock()
+
+	// Merge job settings with default config
+	e.effectiveConfig = e.config
+	if job.Settings != nil {
+		e.mergeJobSettings(job.Settings)
+	}
+
+	// Apply URL filters from job settings
+	if job.Settings != nil {
+		e.frontier.SetURLFilters(job.Settings.URLIncludePatterns, job.Settings.URLExcludePatterns)
+	} else {
+		e.frontier.SetURLFilters(nil, nil)
+	}
+
+	// Apply skip extensions from effective config
+	e.frontier.SetSkipExtensions(e.effectiveConfig.SkipExtensions)
 
 	e.ctx, e.cancel = context.WithCancel(context.Background())
 	atomic.StoreInt64(&e.crawledCount, 0)
@@ -162,16 +191,61 @@ func (e *Engine) Start(job *models.CrawlJob) error {
 	}
 
 	// Start worker goroutines
-	e.wg.Add(e.config.MaxConcurrentRequests)
-	for i := 0; i < e.config.MaxConcurrentRequests; i++ {
+	workerCount := e.effectiveConfig.MaxConcurrentRequests
+	e.wg.Add(workerCount)
+	for i := 0; i < workerCount; i++ {
 		go e.worker(i)
 	}
 
 	// Start monitoring goroutine
 	go e.monitor()
 
+	// Start completion watcher
+	go e.watchForCompletion()
+
 	log.Printf("[Engine] Started crawling job %s for target %s", job.ID, job.TargetURL)
 	return nil
+}
+
+// mergeJobSettings merges per-job settings into the effective config
+func (e *Engine) mergeJobSettings(s *models.JobSettings) {
+	if s.MaxConcurrentRequests != nil {
+		e.effectiveConfig.MaxConcurrentRequests = *s.MaxConcurrentRequests
+	}
+	if s.RequestTimeoutSec != nil {
+		e.effectiveConfig.RequestTimeout = time.Duration(*s.RequestTimeoutSec) * time.Second
+	}
+	if s.PolitenessDelayMs != nil {
+		e.effectiveConfig.PolitenessDelay = time.Duration(*s.PolitenessDelayMs) * time.Millisecond
+	}
+	if s.MaxDepth != nil {
+		e.effectiveConfig.MaxDepth = *s.MaxDepth
+	}
+	if s.UserAgent != nil {
+		e.effectiveConfig.UserAgent = *s.UserAgent
+	}
+	if s.MaxRetries != nil {
+		e.effectiveConfig.MaxRetries = *s.MaxRetries
+	}
+	if len(s.SkipExtensions) > 0 {
+		e.effectiveConfig.SkipExtensions = s.SkipExtensions
+	}
+}
+
+// randomizedDelay returns a randomized delay based on the politeness delay.
+// It varies from (delay - 1s) to (delay + 1s) in milliseconds, minimum 0.
+func (e *Engine) randomizedDelay() time.Duration {
+	baseMs := e.effectiveConfig.PolitenessDelay.Milliseconds()
+	minMs := baseMs - 1000
+	if minMs < 0 {
+		minMs = 0
+	}
+	maxMs := baseMs + 1000
+	if maxMs <= minMs {
+		return time.Duration(minMs) * time.Millisecond
+	}
+	delayMs := minMs + int64(e.rng.Intn(int(maxMs-minMs+1)))
+	return time.Duration(delayMs) * time.Millisecond
 }
 
 // addSeedURLs adds initial seed URLs for the job
@@ -245,6 +319,40 @@ func (e *Engine) GetState() CrawlerState {
 	return CrawlerState(atomic.LoadInt32(&e.state))
 }
 
+// watchForCompletion waits for all workers to finish and marks the job as complete
+func (e *Engine) watchForCompletion() {
+	// Wait for all workers to finish
+	e.wg.Wait()
+
+	// Check if we were stopped manually (state would be StateStopping or StateIdle)
+	// If state is still Running, workers exited naturally due to empty frontier
+	if atomic.LoadInt32(&e.state) == int32(StateRunning) {
+		log.Printf("[Engine] All workers finished, marking job as completed")
+
+		// Cancel the context to stop the monitor goroutine
+		if e.cancel != nil {
+			e.cancel()
+		}
+
+		// Update job status to completed
+		e.jobMu.Lock()
+		if e.currentJob != nil {
+			now := time.Now()
+			e.currentJob.Status = models.JobStatusCompleted
+			e.currentJob.CompletedAt = &now
+			e.currentJob.CrawledURLs = int(atomic.LoadInt64(&e.crawledCount))
+			e.currentJob.FoundMatches = int(atomic.LoadInt64(&e.matchCount))
+			e.db.Save(e.currentJob)
+			log.Printf("[Engine] Job %s completed. Crawled: %d, Matches: %d",
+				e.currentJob.ID, e.currentJob.CrawledURLs, e.currentJob.FoundMatches)
+			e.currentJob = nil
+		}
+		e.jobMu.Unlock()
+
+		atomic.StoreInt32(&e.state, int32(StateIdle))
+	}
+}
+
 // worker is a crawl worker goroutine
 func (e *Engine) worker(id int) {
 	defer e.wg.Done()
@@ -280,7 +388,7 @@ func (e *Engine) worker(id int) {
 		emptyCount = 0
 
 		// Check depth limit
-		if frontierURL.Depth > e.config.MaxDepth {
+		if frontierURL.Depth > e.effectiveConfig.MaxDepth {
 			e.frontier.MarkCompleted(frontierURL.ID)
 			continue
 		}
@@ -288,8 +396,11 @@ func (e *Engine) worker(id int) {
 		// Crawl the URL
 		e.crawl(id, frontierURL)
 
-		// Politeness delay
-		time.Sleep(e.config.PolitenessDelay)
+		// Randomized politeness delay
+		delay := e.randomizedDelay()
+		if delay > 0 {
+			time.Sleep(delay)
+		}
 	}
 }
 
@@ -303,11 +414,11 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	req, err := http.NewRequestWithContext(e.ctx, "GET", url, nil)
 	if err != nil {
 		log.Printf("[Worker %d] Failed to create request for %s: %v", workerID, url, err)
-		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, 3)
+		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
 		return
 	}
 
-	req.Header.Set("User-Agent", e.config.UserAgent)
+	req.Header.Set("User-Agent", e.effectiveConfig.UserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
 
@@ -316,7 +427,7 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	if err != nil {
 		log.Printf("[Worker %d] Failed to fetch %s: %v", workerID, url, err)
 		_, _ = e.saveCrawledPage(url, 0, "", 0, depth, err.Error(), startTime)
-		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, 3)
+		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
 		return
 	}
 	defer resp.Body.Close()
@@ -326,7 +437,7 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	if err != nil {
 		log.Printf("[Worker %d] Failed to read body for %s: %v", workerID, url, err)
 		_, _ = e.saveCrawledPage(url, resp.StatusCode, resp.Header.Get("Content-Type"), 0, depth, err.Error(), startTime)
-		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, 3)
+		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
 		return
 	}
 
@@ -342,20 +453,40 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	e.frontier.MarkCompleted(frontierURL.ID)
 
 	// Process content based on type
-	e.processContent(workerID, url, body, contentType, depth, page)
+	e.processContent(workerID, url, body, contentType, depth, page, frontierURL.AnchorText)
 }
 
 // processContent processes fetched content
-func (e *Engine) processContent(workerID int, url string, body []byte, contentType string, depth int, page *models.CrawledPage) {
-	// Check for phrase matches
+func (e *Engine) processContent(workerID int, url string, body []byte, contentType string, depth int, page *models.CrawledPage, anchorText string) {
+	// 1. Check for phrase matches in page content
 	textContent := e.linkExtractor.ExtractTextContent(body)
 	matches := e.phraseDetector.DetectPhrases(textContent)
 
 	for _, match := range matches {
-		e.savePhraseMatch(page.ID, url, match.Phrase, match.Context, match.Occurrences)
+		e.savePhraseMatch(page.ID, url, match.Phrase, match.Context, match.Occurrences, models.MatchTypeContent)
 		atomic.AddInt64(&e.matchCount, 1)
-		log.Printf("[Worker %d] Found phrase '%s' in %s (%d occurrences)",
+		log.Printf("[Worker %d] Found phrase '%s' in content of %s (%d occurrences)",
 			workerID, match.Phrase, url, match.Occurrences)
+	}
+
+	// 2. Check for phrase matches in URL
+	urlMatches := e.phraseDetector.DetectPhrasesInURL(url)
+	for _, match := range urlMatches {
+		e.savePhraseMatch(page.ID, url, match.Phrase, match.Context, match.Occurrences, models.MatchTypeURL)
+		atomic.AddInt64(&e.matchCount, 1)
+		log.Printf("[Worker %d] Found phrase '%s' in URL %s (%d occurrences)",
+			workerID, match.Phrase, url, match.Occurrences)
+	}
+
+	// 3. Check for phrase matches in anchor text pointing to this page
+	if anchorText != "" {
+		anchorMatches := e.phraseDetector.DetectPhrasesInAnchor(anchorText)
+		for _, match := range anchorMatches {
+			e.savePhraseMatch(page.ID, url, match.Phrase, "Anchor: "+match.Context, match.Occurrences, models.MatchTypeAnchor)
+			atomic.AddInt64(&e.matchCount, 1)
+			log.Printf("[Worker %d] Found phrase '%s' in anchor text for %s (%d occurrences)",
+				workerID, match.Phrase, url, match.Occurrences)
+		}
 	}
 
 	// Process based on content type
@@ -370,7 +501,7 @@ func (e *Engine) processContent(workerID int, url string, body []byte, contentTy
 
 // processHTML processes HTML content and extracts links
 func (e *Engine) processHTML(url string, body []byte, depth int) {
-	links, err := e.linkExtractor.ExtractLinks(url, body)
+	linksWithAnchors, err := e.linkExtractor.ExtractLinksWithAnchors(url, body)
 	if err != nil {
 		log.Printf("[Engine] Failed to extract links from %s: %v", url, err)
 		return
@@ -386,19 +517,19 @@ func (e *Engine) processHTML(url string, body []byte, depth int) {
 
 	// Filter and add links
 	added := 0
-	for _, link := range links {
+	for _, la := range linksWithAnchors {
 		// Only add links from the same base domain
-		linkDomain := e.urlCleaner.ExtractBaseDomain(link)
+		linkDomain := e.urlCleaner.ExtractBaseDomain(la.URL)
 		if linkDomain == "" || !strings.Contains(linkDomain, baseDomain) {
 			continue
 		}
 
-		if err := e.frontier.AddURL(link, depth+1, url); err == nil {
+		if err := e.frontier.AddURLWithAnchor(la.URL, depth+1, url, la.AnchorText); err == nil {
 			added++
 		}
 	}
 
-	log.Printf("[Engine] Added %d/%d links from %s", added, len(links), url)
+	log.Printf("[Engine] Added %d/%d links from %s", added, len(linksWithAnchors), url)
 }
 
 // processSitemap processes sitemap XML
@@ -481,7 +612,7 @@ func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string,
 }
 
 // savePhraseMatch saves a phrase match to database
-func (e *Engine) savePhraseMatch(pageID uint, url, phrase, context string, occurrences int) {
+func (e *Engine) savePhraseMatch(pageID uint, url, phrase, context string, occurrences int, matchType models.MatchType) {
 	e.jobMu.RLock()
 	crawlJobID := ""
 	if e.currentJob != nil {
@@ -489,14 +620,22 @@ func (e *Engine) savePhraseMatch(pageID uint, url, phrase, context string, occur
 	}
 	e.jobMu.RUnlock()
 
+	// Resolve search phrase ID
+	var searchPhraseID *uint
+	if id, ok := e.phraseIDMap[phrase]; ok {
+		searchPhraseID = &id
+	}
+
 	match := &models.PhraseMatch{
-		CrawlJobID:  crawlJobID,
-		PageID:      pageID,
-		URL:         url,
-		Phrase:      phrase,
-		Context:     context,
-		Occurrences: occurrences,
-		FoundAt:     time.Now(),
+		CrawlJobID:     crawlJobID,
+		PageID:         pageID,
+		SearchPhraseID: searchPhraseID,
+		URL:            url,
+		Phrase:         phrase,
+		MatchType:      matchType,
+		Context:        context,
+		Occurrences:    occurrences,
+		FoundAt:        time.Now(),
 	}
 
 	e.db.Create(match)

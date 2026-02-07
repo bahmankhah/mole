@@ -78,4 +78,5 @@ type PhraseMatchResult struct {
 	Phrase      string
 	Occurrences int
 	Context     string
+	MatchType   string // "content", "url", "anchor"
 }

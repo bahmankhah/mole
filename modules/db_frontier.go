@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/url"
 	"path"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,8 @@ type DBFrontier struct {
 	rng                 *rand.Rand
 	urlCleaner          *URLCleaner
 	skipExtensions      map[string]bool
+	includePatterns     []*regexp.Regexp // If set, only URLs matching these are added
+	excludePatterns     []*regexp.Regexp // Ignored if includePatterns is set
 	mu                  sync.Mutex
 }
 
@@ -75,6 +78,67 @@ func (f *DBFrontier) shouldSkipURL(rawURL string) bool {
 	return f.skipExtensions[ext]
 }
 
+// SetURLFilters sets include/exclude regex patterns for URL filtering.
+// If includePatterns is non-empty, only URLs matching at least one pattern are added.
+// If includePatterns is empty but excludePatterns is non-empty, URLs matching any pattern are skipped.
+func (f *DBFrontier) SetURLFilters(includePatterns, excludePatterns []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.includePatterns = nil
+	f.excludePatterns = nil
+
+	for _, p := range includePatterns {
+		if p == "" {
+			continue
+		}
+		re, err := regexp.Compile("(?i)" + p)
+		if err != nil {
+			log.Printf("[%s] Invalid include pattern '%s': %v", f.Name(), p, err)
+			continue
+		}
+		f.includePatterns = append(f.includePatterns, re)
+	}
+
+	for _, p := range excludePatterns {
+		if p == "" {
+			continue
+		}
+		re, err := regexp.Compile("(?i)" + p)
+		if err != nil {
+			log.Printf("[%s] Invalid exclude pattern '%s': %v", f.Name(), p, err)
+			continue
+		}
+		f.excludePatterns = append(f.excludePatterns, re)
+	}
+
+	log.Printf("[%s] URL filters: %d include, %d exclude patterns", f.Name(), len(f.includePatterns), len(f.excludePatterns))
+}
+
+// shouldFilterURL checks if a URL should be filtered out based on include/exclude patterns
+func (f *DBFrontier) shouldFilterURL(rawURL string) bool {
+	// If include patterns are set, URL must match at least one
+	if len(f.includePatterns) > 0 {
+		for _, re := range f.includePatterns {
+			if re.MatchString(rawURL) {
+				return false // Matches an include pattern, allow it
+			}
+		}
+		return true // Doesn't match any include pattern, filter it out
+	}
+
+	// If no include patterns but exclude patterns are set
+	if len(f.excludePatterns) > 0 {
+		for _, re := range f.excludePatterns {
+			if re.MatchString(rawURL) {
+				return true // Matches an exclude pattern, filter it out
+			}
+		}
+	}
+
+	return false // No filtering needed
+}
+
 // Name returns the module name
 func (f *DBFrontier) Name() string {
 	return "db_frontier"
@@ -100,6 +164,11 @@ func (f *DBFrontier) SetCrawlJob(crawlJobID string) {
 
 // AddURL adds a URL to the frontier if not already exists
 func (f *DBFrontier) AddURL(rawURL string, depth int, parentURL string) error {
+	return f.AddURLWithAnchor(rawURL, depth, parentURL, "")
+}
+
+// AddURLWithAnchor adds a URL to the frontier with anchor text
+func (f *DBFrontier) AddURLWithAnchor(rawURL string, depth int, parentURL string, anchorText string) error {
 	f.mu.Lock()
 	crawlJobID := f.crawlJobID
 	f.mu.Unlock()
@@ -113,6 +182,11 @@ func (f *DBFrontier) AddURL(rawURL string, depth int, parentURL string) error {
 		return nil // Silently skip URLs with excluded extensions
 	}
 
+	// Check URL include/exclude patterns
+	if f.shouldFilterURL(rawURL) {
+		return nil // Silently skip filtered URLs
+	}
+
 	// Clean and normalize the URL
 	cleanedURL, err := f.urlCleaner.ProcessURL(rawURL)
 	if err != nil {
@@ -122,7 +196,16 @@ func (f *DBFrontier) AddURL(rawURL string, depth int, parentURL string) error {
 	// Generate URL hash
 	urlHash := hashURL(cleanedURL)
 
-	// Use upsert to avoid duplicates
+	// Check if URL was already crawled IN THIS JOB (crawled_pages contains completed URLs)
+	var crawledCount int64
+	f.db.Model(&models.CrawledPage{}).
+		Where("crawl_job_id = ? AND url_hash = ?", crawlJobID, urlHash).
+		Count(&crawledCount)
+	if crawledCount > 0 {
+		return nil // Already crawled in this job, skip
+	}
+
+	// Use upsert to avoid duplicates in frontier (per job)
 	frontierURL := models.FrontierURL{
 		CrawlJobID:    crawlJobID,
 		URL:           rawURL,
@@ -132,11 +215,12 @@ func (f *DBFrontier) AddURL(rawURL string, depth int, parentURL string) error {
 		Priority:      0,
 		Status:        models.FrontierStatusPending,
 		ParentURL:     parentURL,
+		AnchorText:    anchorText,
 	}
 
-	// Insert only if not exists (based on unique URLHash)
+	// Insert only if not exists (based on composite unique: crawl_job_id + url_hash)
 	result := f.db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "url_hash"}},
+		Columns:   []clause.Column{{Name: "crawl_job_id"}, {Name: "url_hash"}},
 		DoNothing: true,
 	}).Create(&frontierURL)
 
@@ -198,11 +282,10 @@ func (f *DBFrontier) GetNextURL() (*models.FrontierURL, error) {
 	return &frontierURL, nil
 }
 
-// MarkCompleted marks a URL as completed
+// MarkCompleted removes a successfully crawled URL from the frontier queue
+// The URL is already recorded in crawled_pages, so we delete it from the queue
 func (f *DBFrontier) MarkCompleted(urlID uint) error {
-	return f.db.Model(&models.FrontierURL{}).
-		Where("id = ?", urlID).
-		Update("status", models.FrontierStatusCompleted).Error
+	return f.db.Delete(&models.FrontierURL{}, "id = ?", urlID).Error
 }
 
 // MarkFailed marks a URL as failed
@@ -249,6 +332,7 @@ func (f *DBFrontier) TotalCount() int64 {
 }
 
 // GetStats returns frontier statistics
+// Note: completed URLs are deleted from frontier, so we get that count from crawled_pages
 func (f *DBFrontier) GetStats() (pending, processing, completed, failed int64) {
 	f.mu.Lock()
 	crawlJobID := f.crawlJobID
@@ -260,8 +344,9 @@ func (f *DBFrontier) GetStats() (pending, processing, completed, failed int64) {
 	f.db.Model(&models.FrontierURL{}).
 		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusProcessing).
 		Count(&processing)
-	f.db.Model(&models.FrontierURL{}).
-		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusCompleted).
+	// Completed URLs are removed from frontier and recorded in crawled_pages
+	f.db.Model(&models.CrawledPage{}).
+		Where("crawl_job_id = ? AND error_message = ''", crawlJobID).
 		Count(&completed)
 	f.db.Model(&models.FrontierURL{}).
 		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusFailed).
@@ -269,19 +354,37 @@ func (f *DBFrontier) GetStats() (pending, processing, completed, failed int64) {
 	return
 }
 
-// IsURLSeen checks if a URL has been seen (exists in frontier)
+// IsURLSeen checks if a URL has been seen in the current job (exists in frontier OR crawled_pages)
 func (f *DBFrontier) IsURLSeen(rawURL string) bool {
+	f.mu.Lock()
+	crawlJobID := f.crawlJobID
+	f.mu.Unlock()
+
+	if crawlJobID == "" {
+		return false
+	}
+
 	cleanedURL, err := f.urlCleaner.ProcessURL(rawURL)
 	if err != nil {
 		return false
 	}
 	urlHash := hashURL(cleanedURL)
 
-	var count int64
+	// Check if URL is in the frontier queue for this job (pending/processing/failed)
+	var frontierCount int64
 	f.db.Model(&models.FrontierURL{}).
-		Where("url_hash = ?", urlHash).
-		Count(&count)
-	return count > 0
+		Where("crawl_job_id = ? AND url_hash = ?", crawlJobID, urlHash).
+		Count(&frontierCount)
+	if frontierCount > 0 {
+		return true
+	}
+
+	// Check if URL was already crawled in this job (completed URLs are in crawled_pages)
+	var crawledCount int64
+	f.db.Model(&models.CrawledPage{}).
+		Where("crawl_job_id = ? AND url_hash = ?", crawlJobID, urlHash).
+		Count(&crawledCount)
+	return crawledCount > 0
 }
 
 // ResetProcessingURLs resets any URLs stuck in processing state (for recovery)

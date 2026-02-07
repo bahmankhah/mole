@@ -15,6 +15,12 @@ type HTMLLinkExtractor struct {
 	urlCleaner *URLCleaner
 }
 
+// LinkWithAnchor holds a link URL along with its anchor text
+type LinkWithAnchor struct {
+	URL        string
+	AnchorText string
+}
+
 // NewHTMLLinkExtractor creates a new link extractor
 func NewHTMLLinkExtractor(urlCleaner *URLCleaner) *HTMLLinkExtractor {
 	return &HTMLLinkExtractor{
@@ -40,18 +46,52 @@ func (e *HTMLLinkExtractor) Shutdown() error {
 
 // ExtractLinks extracts all links from HTML content
 func (e *HTMLLinkExtractor) ExtractLinks(baseURL string, content []byte) ([]string, error) {
+	linksWithAnchors, err := e.ExtractLinksWithAnchors(baseURL, content)
+	if err != nil {
+		return nil, err
+	}
+	links := make([]string, 0, len(linksWithAnchors))
+	for _, la := range linksWithAnchors {
+		links = append(links, la.URL)
+	}
+	return links, nil
+}
+
+// ExtractLinksWithAnchors extracts all links from HTML content along with their anchor text
+func (e *HTMLLinkExtractor) ExtractLinksWithAnchors(baseURL string, content []byte) ([]LinkWithAnchor, error) {
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(content))
 	if err != nil {
 		return nil, err
 	}
 
-	linkSet := make(map[string]struct{})
+	type linkEntry struct {
+		url        string
+		anchorText string
+	}
 
-	// Extract href attributes from <a> tags
+	linkMap := make(map[string]linkEntry)
+
+	// Extract href attributes from <a> tags with anchor text
 	doc.Find("a[href]").Each(func(_ int, s *goquery.Selection) {
 		href, exists := s.Attr("href")
 		if exists && href != "" {
-			e.addLink(baseURL, href, linkSet)
+			resolved := e.resolveLink(baseURL, href)
+			if resolved != "" {
+				anchorText := strings.TrimSpace(s.Text())
+				if existing, ok := linkMap[resolved]; ok {
+					// Append anchor text if different
+					if anchorText != "" && !strings.Contains(existing.anchorText, anchorText) {
+						if existing.anchorText != "" {
+							existing.anchorText += " | " + anchorText
+						} else {
+							existing.anchorText = anchorText
+						}
+						linkMap[resolved] = existing
+					}
+				} else {
+					linkMap[resolved] = linkEntry{url: resolved, anchorText: anchorText}
+				}
+			}
 		}
 	})
 
@@ -59,7 +99,12 @@ func (e *HTMLLinkExtractor) ExtractLinks(baseURL string, content []byte) ([]stri
 	doc.Find("img[src], script[src], iframe[src]").Each(func(_ int, s *goquery.Selection) {
 		src, exists := s.Attr("src")
 		if exists && src != "" {
-			e.addLink(baseURL, src, linkSet)
+			resolved := e.resolveLink(baseURL, src)
+			if resolved != "" {
+				if _, ok := linkMap[resolved]; !ok {
+					linkMap[resolved] = linkEntry{url: resolved}
+				}
+			}
 		}
 	})
 
@@ -67,7 +112,12 @@ func (e *HTMLLinkExtractor) ExtractLinks(baseURL string, content []byte) ([]stri
 	doc.Find("link[href]").Each(func(_ int, s *goquery.Selection) {
 		href, exists := s.Attr("href")
 		if exists && href != "" {
-			e.addLink(baseURL, href, linkSet)
+			resolved := e.resolveLink(baseURL, href)
+			if resolved != "" {
+				if _, ok := linkMap[resolved]; !ok {
+					linkMap[resolved] = linkEntry{url: resolved}
+				}
+			}
 		}
 	})
 
@@ -75,45 +125,51 @@ func (e *HTMLLinkExtractor) ExtractLinks(baseURL string, content []byte) ([]stri
 	doc.Find("form[action]").Each(func(_ int, s *goquery.Selection) {
 		action, exists := s.Attr("action")
 		if exists && action != "" {
-			e.addLink(baseURL, action, linkSet)
+			resolved := e.resolveLink(baseURL, action)
+			if resolved != "" {
+				if _, ok := linkMap[resolved]; !ok {
+					linkMap[resolved] = linkEntry{url: resolved}
+				}
+			}
 		}
 	})
 
-	// Convert set to slice
-	links := make([]string, 0, len(linkSet))
-	for link := range linkSet {
-		links = append(links, link)
+	// Convert map to slice
+	result := make([]LinkWithAnchor, 0, len(linkMap))
+	for _, entry := range linkMap {
+		result = append(result, LinkWithAnchor{URL: entry.url, AnchorText: entry.anchorText})
 	}
 
-	return links, nil
+	return result, nil
 }
 
-// addLink resolves and adds a link to the set
-func (e *HTMLLinkExtractor) addLink(baseURL, href string, linkSet map[string]struct{}) {
+// resolveLink resolves a relative link and validates it
+func (e *HTMLLinkExtractor) resolveLink(baseURL, href string) string {
 	href = strings.TrimSpace(href)
 
 	// Skip empty, javascript, mailto, tel links
 	if href == "" || strings.HasPrefix(href, "javascript:") ||
 		strings.HasPrefix(href, "mailto:") || strings.HasPrefix(href, "tel:") ||
 		strings.HasPrefix(href, "data:") || strings.HasPrefix(href, "#") {
-		return
+		return ""
 	}
 
 	// Resolve relative URL
 	resolved, err := e.urlCleaner.ResolveURL(baseURL, href)
 	if err != nil {
-		return
+		return ""
 	}
 
 	// Only add HTTP(S) links
 	parsedURL, err := url.Parse(resolved)
 	if err != nil {
-		return
+		return ""
 	}
 
 	if parsedURL.Scheme == "http" || parsedURL.Scheme == "https" {
-		linkSet[resolved] = struct{}{}
+		return resolved
 	}
+	return ""
 }
 
 // ExtractTitle extracts the page title

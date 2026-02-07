@@ -134,7 +134,7 @@ func DefaultConfig() *Config {
 			PolitenessDelay:       1 * time.Second,
 			TeleportProbability:   0.2,
 			MaxDepth:              10,
-			UserAgent:             "ResolveCrawler/1.0 (+https://resolver.local)",
+			UserAgent:             "Mole/1.0 (+https://mole.local)",
 			MaxRetries:            3,
 			SkipExtensions:        getDefaultSkipExtensions(),
 		},

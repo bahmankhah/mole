@@ -48,15 +48,24 @@ func New(cfg config.DatabaseConfig) (*Database, error) {
 // AutoMigrate runs automatic migrations for all models
 func (d *Database) AutoMigrate() error {
 	log.Println("Running database migrations...")
-	return d.DB.AutoMigrate(
+
+	err := d.DB.AutoMigrate(
 		&models.DiscoveryJob{},
 		&models.CrawlJob{},
 		&models.Subdomain{},
 		&models.CrawledPage{},
 		&models.FrontierURL{},
-		&models.PhraseMatch{},
 		&models.SearchPhrase{},
+		&models.PhraseMatch{},
 	)
+	if err != nil {
+		return err
+	}
+
+	// Create additional composite index for search performance (ignore if exists)
+	d.DB.Exec("CREATE INDEX idx_phrase_match_phrase_url ON phrase_matches(phrase(255), url(255))")
+
+	return nil
 }
 
 // SeedDefaultPhrases inserts default search phrases if not exist

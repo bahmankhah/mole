@@ -1,6 +1,9 @@
 package models
 
 import (
+	"database/sql/driver"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +30,55 @@ const (
 	JobStatusCancelled JobStatus = "cancelled"
 )
 
+// MatchType represents where a phrase was found
+type MatchType string
+
+const (
+	MatchTypeContent MatchType = "content" // Found in page body content
+	MatchTypeURL     MatchType = "url"     // Found in the page URL
+	MatchTypeAnchor  MatchType = "anchor"  // Found in anchor text pointing to the page
+)
+
+// JobSettings holds per-job crawler settings that override global defaults.
+// A nil/null value means "use global defaults".
+type JobSettings struct {
+	MaxConcurrentRequests *int     `json:"max_concurrent_requests,omitempty"`
+	RequestTimeoutSec     *int     `json:"request_timeout_seconds,omitempty"`
+	PolitenessDelayMs     *int     `json:"politeness_delay_ms,omitempty"`
+	MaxDepth              *int     `json:"max_depth,omitempty"`
+	UserAgent             *string  `json:"user_agent,omitempty"`
+	MaxRetries            *int     `json:"max_retries,omitempty"`
+	SkipExtensions        []string `json:"skip_extensions,omitempty"`
+	URLIncludePatterns    []string `json:"url_include_patterns,omitempty"` // Regex; if set, only matching URLs are crawled
+	URLExcludePatterns    []string `json:"url_exclude_patterns,omitempty"` // Regex; skipped if include is set
+}
+
+// Value implements driver.Valuer for GORM JSON storage
+func (s JobSettings) Value() (driver.Value, error) {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+	return string(b), nil
+}
+
+// Scan implements sql.Scanner for GORM JSON storage
+func (s *JobSettings) Scan(value interface{}) error {
+	if value == nil {
+		return nil
+	}
+	var bytes []byte
+	switch v := value.(type) {
+	case string:
+		bytes = []byte(v)
+	case []byte:
+		bytes = v
+	default:
+		return fmt.Errorf("cannot scan %T into JobSettings", value)
+	}
+	return json.Unmarshal(bytes, s)
+}
+
 // DiscoveryJob represents a subdomain discovery job for a domain
 type DiscoveryJob struct {
 	ID              string     `gorm:"type:varchar(36);primaryKey" json:"id"`
@@ -50,20 +102,21 @@ func (j *DiscoveryJob) BeforeCreate(tx *gorm.DB) error {
 
 // CrawlJob represents a crawling job for a specific target (domain or subdomain)
 type CrawlJob struct {
-	ID             string     `gorm:"type:varchar(36);primaryKey" json:"id"`
-	DiscoveryJobID string     `gorm:"type:varchar(36);index" json:"discovery_job_id,omitempty"`
-	TargetURL      string     `gorm:"type:varchar(512);not null" json:"target_url"`
-	Domain         string     `gorm:"type:varchar(255);index;not null" json:"domain"`
-	Status         JobStatus  `gorm:"type:varchar(20);index;default:'pending'" json:"status"`
-	TotalURLs      int        `gorm:"default:0" json:"total_urls"`
-	CrawledURLs    int        `gorm:"default:0" json:"crawled_urls"`
-	FoundMatches   int        `gorm:"default:0" json:"found_matches"`
-	MaxDepth       int        `gorm:"default:10" json:"max_depth"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	StartedAt      *time.Time `json:"started_at"`
-	CompletedAt    *time.Time `json:"completed_at"`
-	ErrorMessage   string     `gorm:"type:text" json:"error_message,omitempty"`
+	ID             string       `gorm:"type:varchar(36);primaryKey" json:"id"`
+	DiscoveryJobID string       `gorm:"type:varchar(36);index" json:"discovery_job_id,omitempty"`
+	TargetURL      string       `gorm:"type:varchar(512);not null" json:"target_url"`
+	Domain         string       `gorm:"type:varchar(255);index;not null" json:"domain"`
+	Status         JobStatus    `gorm:"type:varchar(20);index;default:'pending'" json:"status"`
+	TotalURLs      int          `gorm:"default:0" json:"total_urls"`
+	CrawledURLs    int          `gorm:"default:0" json:"crawled_urls"`
+	FoundMatches   int          `gorm:"default:0" json:"found_matches"`
+	MaxDepth       int          `gorm:"default:10" json:"max_depth"`
+	Settings       *JobSettings `gorm:"type:json" json:"settings"`
+	CreatedAt      time.Time    `json:"created_at"`
+	UpdatedAt      time.Time    `json:"updated_at"`
+	StartedAt      *time.Time   `json:"started_at"`
+	CompletedAt    *time.Time   `json:"completed_at"`
+	ErrorMessage   string       `gorm:"type:text" json:"error_message,omitempty"`
 }
 
 // BeforeCreate generates UUID for new crawl jobs
@@ -111,14 +164,15 @@ type CrawledPage struct {
 // FrontierURL represents a URL in the crawl frontier queue
 type FrontierURL struct {
 	ID            uint      `gorm:"primaryKey" json:"id"`
-	CrawlJobID    string    `gorm:"type:varchar(36);index:idx_job_status;not null" json:"crawl_job_id"`
+	CrawlJobID    string    `gorm:"type:varchar(36);index:idx_job_status;uniqueIndex:idx_job_url_hash;not null" json:"crawl_job_id"`
 	URL           string    `gorm:"type:varchar(2048);not null" json:"url"`
-	URLHash       string    `gorm:"type:varchar(64);uniqueIndex;not null" json:"url_hash"`
+	URLHash       string    `gorm:"type:varchar(64);uniqueIndex:idx_job_url_hash;not null" json:"url_hash"`
 	NormalizedURL string    `gorm:"type:varchar(2048)" json:"normalized_url"`
 	Depth         int       `json:"depth"`
 	Priority      int       `gorm:"index;default:0" json:"priority"`
-	Status        string    `gorm:"type:varchar(20);index:idx_job_status;default:'pending'" json:"status"` // pending, processing, completed, failed
+	Status        string    `gorm:"type:varchar(20);index:idx_job_status;default:'pending'" json:"status"` // pending, processing, failed
 	ParentURL     string    `gorm:"type:varchar(2048)" json:"parent_url,omitempty"`
+	AnchorText    string    `gorm:"type:text" json:"anchor_text,omitempty"`
 	RetryCount    int       `gorm:"default:0" json:"retry_count"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
@@ -135,16 +189,19 @@ const (
 
 // PhraseMatch represents a detected phrase in crawled content
 type PhraseMatch struct {
-	ID          uint        `gorm:"primaryKey" json:"id"`
-	CrawlJobID  string      `gorm:"type:varchar(36);index;not null" json:"crawl_job_id"`
-	PageID      uint        `gorm:"index" json:"page_id"`
-	URL         string      `gorm:"type:varchar(2048);not null" json:"url"`
-	Phrase      string      `gorm:"type:varchar(255);index;not null" json:"phrase"`
-	Context     string      `gorm:"type:text" json:"context,omitempty"`
-	Occurrences int         `gorm:"default:1" json:"occurrences"`
-	FoundAt     time.Time   `json:"found_at"`
-	CrawlJob    CrawlJob    `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
-	Page        CrawledPage `gorm:"foreignKey:PageID;constraint:OnDelete:CASCADE" json:"-"`
+	ID             uint          `gorm:"primaryKey" json:"id"`
+	CrawlJobID     string        `gorm:"type:varchar(36);index;not null" json:"crawl_job_id"`
+	PageID         uint          `gorm:"index" json:"page_id"`
+	SearchPhraseID *uint         `gorm:"index" json:"search_phrase_id"`
+	URL            string        `gorm:"type:varchar(2048);not null" json:"url"`
+	Phrase         string        `gorm:"type:varchar(255);index:idx_phrase;not null" json:"phrase"`
+	MatchType      MatchType     `gorm:"type:varchar(20);index;default:'content'" json:"match_type"`
+	Context        string        `gorm:"type:text" json:"context,omitempty"`
+	Occurrences    int           `gorm:"default:1" json:"occurrences"`
+	FoundAt        time.Time     `json:"found_at"`
+	CrawlJob       CrawlJob      `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
+	Page           CrawledPage   `gorm:"foreignKey:PageID;constraint:OnDelete:CASCADE" json:"-"`
+	SearchPhrase   *SearchPhrase `gorm:"foreignKey:SearchPhraseID;constraint:OnDelete:SET NULL" json:"-"`
 }
 
 // SearchPhrase represents a phrase to search for during crawling
@@ -167,4 +224,16 @@ type CrawlStats struct {
 	TotalMatches        int64   `json:"total_matches"`
 	SubdomainsFound     int64   `json:"subdomains_found"`
 	AverageResponseTime float64 `json:"average_response_time_ms"`
+}
+
+// SearchResult represents a grouped search result for the search page
+type SearchResult struct {
+	Phrase      string `json:"phrase"`
+	URL         string `json:"url"`
+	MatchType   string `json:"match_type"`
+	Context     string `json:"context"`
+	Occurrences int    `json:"occurrences"`
+	CrawlJobID  string `json:"crawl_job_id"`
+	Domain      string `json:"domain"`
+	FoundAt     string `json:"found_at"`
 }

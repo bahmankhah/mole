@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -51,9 +52,10 @@ func (h *Handler) Index(c *gin.Context) {
 // CreateJob creates a new crawl job
 func (h *Handler) CreateJob(c *gin.Context) {
 	var req struct {
-		TargetURL string `json:"target_url" form:"target_url"`
-		Domain    string `json:"domain" form:"domain"`
-		MaxDepth  int    `json:"max_depth" form:"max_depth"`
+		TargetURL string              `json:"target_url" form:"target_url"`
+		Domain    string              `json:"domain" form:"domain"`
+		MaxDepth  int                 `json:"max_depth" form:"max_depth"`
+		Settings  *models.JobSettings `json:"settings"`
 	}
 
 	if err := c.ShouldBind(&req); err != nil {
@@ -75,7 +77,7 @@ func (h *Handler) CreateJob(c *gin.Context) {
 		req.MaxDepth = 10
 	}
 
-	job, err := h.jobManager.CreateJob(target, req.MaxDepth)
+	job, err := h.jobManager.CreateJobWithSettings(target, req.MaxDepth, req.Settings)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Success: false, Error: err.Error()})
 		return
@@ -130,14 +132,25 @@ func (h *Handler) GetJob(c *gin.Context) {
 
 	// Check if request accepts HTML
 	if c.GetHeader("Accept") == "text/html" || c.Query("format") == "html" {
+		defaultSettings := h.jobManager.GetDefaultJobSettings()
+		// If the job has no custom settings, provide nil to the template
+		var settingsJSON string
+		if job.Settings != nil {
+			b, _ := json.Marshal(job.Settings)
+			settingsJSON = string(b)
+		}
+		defaultSettingsJSON, _ := json.Marshal(defaultSettings)
+
 		c.HTML(http.StatusOK, "job.html", gin.H{
-			"job":        job,
-			"subdomains": subdomains,
-			"matches":    matches,
-			"matchTotal": matchTotal,
-			"pages":      pages,
-			"pageTotal":  pageTotal,
-			"stats":      stats,
+			"job":                 job,
+			"subdomains":          subdomains,
+			"matches":             matches,
+			"matchTotal":          matchTotal,
+			"pages":               pages,
+			"pageTotal":           pageTotal,
+			"stats":               stats,
+			"settingsJSON":        settingsJSON,
+			"defaultSettingsJSON": string(defaultSettingsJSON),
 		})
 		return
 	}
@@ -489,6 +502,96 @@ func (h *Handler) GetCrawledPages(c *gin.Context) {
 			"total":  total,
 			"limit":  limit,
 			"offset": offset,
+		},
+	})
+}
+
+// UpdateJobSettings updates settings for a pending job
+func (h *Handler) UpdateJobSettings(c *gin.Context) {
+	jobID := c.Param("id")
+
+	var settings models.JobSettings
+	if err := c.ShouldBindJSON(&settings); err != nil {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+		return
+	}
+
+	if err := h.jobManager.UpdateJobSettings(jobID, &settings); err != nil {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, Response{Success: true, Message: "Settings updated"})
+}
+
+// GetDefaultSettings returns the default crawler settings
+func (h *Handler) GetDefaultSettings(c *gin.Context) {
+	settings := h.jobManager.GetDefaultJobSettings()
+	c.JSON(http.StatusOK, Response{Success: true, Data: settings})
+}
+
+// SearchPage renders the search page
+func (h *Handler) SearchPage(c *gin.Context) {
+	query := c.Query("q")
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
+	limit := 20
+	offset := (page - 1) * limit
+
+	var results []models.SearchResult
+	var total int64
+
+	if query != "" {
+		var err error
+		results, total, err = h.jobManager.SearchPhraseMatches(query, limit, offset)
+		if err != nil {
+			results = nil
+			total = 0
+		}
+	}
+
+	totalPages := int((total + int64(limit) - 1) / int64(limit))
+	if totalPages < 1 {
+		totalPages = 1
+	}
+
+	c.HTML(http.StatusOK, "search.html", gin.H{
+		"query":      query,
+		"results":    results,
+		"total":      total,
+		"page":       page,
+		"totalPages": totalPages,
+		"limit":      limit,
+	})
+}
+
+// SearchAPI handles API search requests
+func (h *Handler) SearchAPI(c *gin.Context) {
+	query := c.Query("q")
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+
+	if query == "" {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Error: "query parameter 'q' is required"})
+		return
+	}
+
+	results, total, err := h.jobManager.SearchPhraseMatches(query, limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, Response{
+		Success: true,
+		Data: gin.H{
+			"results": results,
+			"total":   total,
+			"limit":   limit,
+			"offset":  offset,
+			"query":   query,
 		},
 	})
 }

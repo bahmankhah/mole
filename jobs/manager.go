@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"net/url"
@@ -71,6 +72,11 @@ func (m *Manager) cleanupStaleJobs() {
 
 // CreateJob creates a new crawl job for a URL or domain
 func (m *Manager) CreateJob(targetURL string, maxDepth int) (*models.CrawlJob, error) {
+	return m.CreateJobWithSettings(targetURL, maxDepth, nil)
+}
+
+// CreateJobWithSettings creates a new crawl job with optional per-job settings
+func (m *Manager) CreateJobWithSettings(targetURL string, maxDepth int, settings *models.JobSettings) (*models.CrawlJob, error) {
 	// Parse the URL to extract domain
 	var domain string
 	var fullURL string
@@ -94,6 +100,7 @@ func (m *Manager) CreateJob(targetURL string, maxDepth int) (*models.CrawlJob, e
 		TargetURL: fullURL,
 		Status:    models.JobStatusPending,
 		MaxDepth:  maxDepth,
+		Settings:  settings,
 	}
 
 	if err := m.db.Create(job).Error; err != nil {
@@ -528,11 +535,12 @@ func (m *Manager) GetCrawledPages(jobID string, limit, offset int) ([]models.Cra
 func (m *Manager) GetJobStats(jobID string) (*models.CrawlStats, error) {
 	stats := &models.CrawlStats{CrawlJobID: jobID, JobID: jobID}
 
-	// Count URLs in frontier
+	// Count URLs in frontier (pending, processing, failed)
 	m.db.Model(&models.FrontierURL{}).Where("crawl_job_id = ?", jobID).Count(&stats.TotalURLsInFrontier)
 	m.db.Model(&models.FrontierURL{}).Where("crawl_job_id = ? AND status = ?", jobID, "pending").Count(&stats.PendingURLs)
 	m.db.Model(&models.FrontierURL{}).Where("crawl_job_id = ? AND status = ?", jobID, "processing").Count(&stats.ProcessingURLs)
-	m.db.Model(&models.FrontierURL{}).Where("crawl_job_id = ? AND status = ?", jobID, "completed").Count(&stats.CompletedURLs)
+	// Completed URLs are deleted from frontier and stored in crawled_pages
+	m.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ?", jobID).Count(&stats.CompletedURLs)
 	m.db.Model(&models.FrontierURL{}).Where("crawl_job_id = ? AND status = ?", jobID, "failed").Count(&stats.FailedURLs)
 
 	// Count matches
@@ -541,13 +549,15 @@ func (m *Manager) GetJobStats(jobID string) (*models.CrawlStats, error) {
 	// Count subdomains (check discovery_job_id)
 	m.db.Model(&models.Subdomain{}).Where("discovery_job_id = ?", jobID).Count(&stats.SubdomainsFound)
 
-	// Calculate average response time
-	var avgResponseTime float64
+	// Calculate average response time (handle NULL when no rows)
+	var avgResponseTime sql.NullFloat64
 	m.db.Model(&models.CrawledPage{}).
 		Where("crawl_job_id = ? AND response_time > 0", jobID).
 		Select("AVG(response_time)").
 		Scan(&avgResponseTime)
-	stats.AverageResponseTime = avgResponseTime
+	if avgResponseTime.Valid {
+		stats.AverageResponseTime = avgResponseTime.Float64
+	}
 
 	return stats, nil
 }
@@ -592,6 +602,128 @@ func (m *Manager) GetActiveJob() *models.CrawlJob {
 // GetEngineStats returns current engine statistics
 func (m *Manager) GetEngineStats() map[string]interface{} {
 	return m.engine.GetStats()
+}
+
+// UpdateJobSettings updates the settings for a pending job
+func (m *Manager) UpdateJobSettings(jobID string, settings *models.JobSettings) error {
+	var job models.CrawlJob
+	if err := m.db.First(&job, "id = ?", jobID).Error; err != nil {
+		return err
+	}
+	if job.Status != models.JobStatusPending {
+		return fmt.Errorf("can only update settings for pending jobs")
+	}
+	job.Settings = settings
+	return m.db.Save(&job).Error
+}
+
+// GetDefaultJobSettings returns the default crawler config as JobSettings
+func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
+	cfg := m.config.Crawler
+	maxConcurrent := cfg.MaxConcurrentRequests
+	timeout := int(cfg.RequestTimeout.Seconds())
+	delayMs := int(cfg.PolitenessDelay.Milliseconds())
+	maxDepth := cfg.MaxDepth
+	userAgent := cfg.UserAgent
+	maxRetries := cfg.MaxRetries
+
+	return &models.JobSettings{
+		MaxConcurrentRequests: &maxConcurrent,
+		RequestTimeoutSec:     &timeout,
+		PolitenessDelayMs:     &delayMs,
+		MaxDepth:              &maxDepth,
+		UserAgent:             &userAgent,
+		MaxRetries:            &maxRetries,
+		SkipExtensions:        cfg.SkipExtensions,
+	}
+}
+
+// SearchPhraseMatches searches phrase matches using n-gram matching
+func (m *Manager) SearchPhraseMatches(query string, limit, offset int) ([]models.SearchResult, int64, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, 0, fmt.Errorf("search query cannot be empty")
+	}
+
+	// Generate n-grams from the query
+	words := strings.Fields(query)
+	ngrams := generateNgrams(words)
+
+	if len(ngrams) == 0 {
+		return nil, 0, nil
+	}
+
+	// Build query conditions for each n-gram
+	var conditions []string
+	var args []interface{}
+	for _, ngram := range ngrams {
+		conditions = append(conditions, "pm.phrase LIKE ?")
+		args = append(args, "%"+ngram+"%")
+	}
+
+	whereClause := strings.Join(conditions, " OR ")
+
+	// Count total distinct results
+	var total int64
+	countSQL := fmt.Sprintf(`
+		SELECT COUNT(*) FROM (
+			SELECT DISTINCT pm.url, pm.phrase, pm.match_type
+			FROM phrase_matches pm
+			WHERE %s
+		) AS sub
+	`, whereClause)
+	m.db.Raw(countSQL, args...).Scan(&total)
+
+	// Get results with grouping to avoid duplicates, ordered by total occurrences
+	selectSQL := fmt.Sprintf(`
+		SELECT 
+			pm.phrase,
+			pm.url,
+			pm.match_type,
+			pm.context,
+			SUM(pm.occurrences) as occurrences,
+			pm.crawl_job_id,
+			COALESCE(cj.domain, '') as domain,
+			MAX(pm.found_at) as found_at
+		FROM phrase_matches pm
+		LEFT JOIN crawl_jobs cj ON pm.crawl_job_id = cj.id
+		WHERE %s
+		GROUP BY pm.url, pm.phrase, pm.match_type, pm.context, pm.crawl_job_id, cj.domain
+		ORDER BY occurrences DESC, found_at DESC
+		LIMIT ? OFFSET ?
+	`, whereClause)
+
+	args = append(args, limit, offset)
+
+	var results []models.SearchResult
+	if err := m.db.Raw(selectSQL, args...).Scan(&results).Error; err != nil {
+		return nil, 0, err
+	}
+
+	return results, total, nil
+}
+
+// generateNgrams generates all n-grams from a list of words
+func generateNgrams(words []string) []string {
+	if len(words) == 0 {
+		return nil
+	}
+
+	var ngrams []string
+	seen := make(map[string]bool)
+
+	// Generate n-grams from length len(words) down to 1
+	for n := len(words); n >= 1; n-- {
+		for i := 0; i <= len(words)-n; i++ {
+			ngram := strings.Join(words[i:i+n], " ")
+			if !seen[ngram] {
+				ngrams = append(ngrams, ngram)
+				seen[ngram] = true
+			}
+		}
+	}
+
+	return ngrams
 }
 
 // Shutdown gracefully shuts down the job manager
