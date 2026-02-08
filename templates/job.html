@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Job: {{.job.Domain}} - Mole</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/static/js/tailwind.js"></script>
     <style>
         .status-pending { color: #f59e0b; }
         .status-running { color: #3b82f6; animation: pulse 2s infinite; }
@@ -37,6 +37,7 @@
                     <span class="truncate max-w-xs">{{.job.Domain}}</span>
                 </div>
                 <div class="flex items-center space-x-4">
+                    <a href="/phrases" class="text-indigo-200 hover:text-white transition text-sm">📋 Phrases</a>
                     <a href="/search" class="text-indigo-200 hover:text-white transition text-sm">🔎 Search</a>
                     <span class="status-{{.job.Status}} text-lg font-semibold">{{.job.Status}}</span>
                 </div>
@@ -63,6 +64,7 @@
                     <button onclick="resumeJob()" class="bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700 transition">▶ Resume</button>
                     <button onclick="stopJob()" class="bg-red-600 text-white py-2 px-4 rounded-md hover:bg-red-700 transition">⏹ Stop</button>
                     {{end}}
+                    <button onclick="duplicateJob('{{.job.ID}}')" class="bg-gray-600 text-white py-2 px-4 rounded-md hover:bg-gray-700 transition" title="Create a copy of this job">⧉ Duplicate</button>
                 </div>
             </div>
             <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
@@ -256,7 +258,10 @@
 
                         {{if eq .job.Status "pending"}}
                         <div class="flex items-center justify-between">
-                            <button type="button" onclick="resetToDefaults()" class="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50 transition">Reset to Defaults</button>
+                            <div class="flex items-center space-x-3">
+                                <button type="button" onclick="resetToDefaults()" class="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50 transition">Clear Fields</button>
+                                <button type="button" onclick="resetToDefaultsAndSave()" class="px-4 py-2 text-sm text-red-600 border border-red-300 rounded-md hover:bg-red-50 transition">Reset to Defaults</button>
+                            </div>
                             <button type="submit" id="save-settings-btn" class="px-6 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 transition text-sm font-medium">Save Settings</button>
                         </div>
                         {{end}}
@@ -269,7 +274,7 @@
     <script>
         var pagesState = { jobId:'{{.job.ID}}', currentPage:1, pageSize:20, total:{{.pageTotal}}, autoRefresh:false, interval:null };
         var defaultSettings = {{.defaultSettingsJSON}};
-        var currentSettings = {{if .settingsJSON}}{{.settingsJSON}}{{else}}null{{end}};
+        var currentSettings = {{.settingsJSON}};
 
         /* ── Settings ── */
         function populateSettings(){
@@ -316,7 +321,8 @@
             try{
                 var r=await fetch('/api/jobs/'+pagesState.jobId+'/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildPayload())});
                 var d=await r.json();
-                showAlert(d.success?'Settings saved.':'Error: '+(d.error||'Unknown'),d.success);
+                if(d.success){showAlert('Settings saved.',true);setTimeout(function(){location.reload();},800);}
+                else{showAlert('Error: '+(d.error||'Unknown'),false);}
             }catch(err){showAlert('Network error: '+err.message,false);}
             btn.disabled=false;btn.textContent='Save Settings';
         }
@@ -324,6 +330,17 @@
             ['set-max-concurrent','set-request-timeout','set-politeness-delay','set-max-depth','set-max-retries','set-user-agent'].forEach(function(id){document.getElementById(id).value='';});
             document.getElementById('set-url-include').value='';
             document.getElementById('set-url-exclude').value='';
+        }
+        async function resetToDefaultsAndSave(){
+            if(!confirm('Reset all settings to global defaults? This will remove any custom configuration for this job.'))return;
+            var btn=document.querySelector('[onclick="resetToDefaultsAndSave()"]');if(btn){btn.disabled=true;btn.textContent='Resetting…';}
+            try{
+                var r=await fetch('/api/jobs/'+pagesState.jobId+'/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({reset:true})});
+                var d=await r.json();
+                if(d.success){showAlert('Settings reset to defaults.',true);setTimeout(function(){location.reload();},800);}
+                else{showAlert('Error: '+(d.error||'Unknown'),false);}
+            }catch(err){showAlert('Network error: '+err.message,false);}
+            if(btn){btn.disabled=false;btn.textContent='Reset to Defaults';}
         }
 
         /* ── Pages Tab ── */
@@ -365,6 +382,7 @@
 
         /* ── Actions ── */
         async function apiCall(m,u,d){var o={method:m,headers:{'Content-Type':'application/json'}};if(d)o.body=JSON.stringify(d);return(await fetch(u,o)).json();}
+        window.duplicateJob=async function(id){var r=await apiCall('POST','/api/jobs/'+id+'/duplicate');if(r.success&&r.data){window.location.href='/jobs/'+r.data.id;}else{alert('Failed to duplicate: '+(r.error||'Unknown error'));}};
         window.startJob=async function(id){await apiCall('POST','/api/jobs/'+id+'/start');location.reload();};
         window.stopJob=async function(){await apiCall('POST','/api/jobs/stop');location.reload();};
         window.pauseJob=async function(){await apiCall('POST','/api/jobs/pause');location.reload();};

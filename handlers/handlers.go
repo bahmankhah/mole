@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"encoding/json"
+	"html/template"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/resolver/crawler/jobs"
@@ -35,7 +37,12 @@ func (h *Handler) Index(c *gin.Context) {
 	jobs, _, _ := h.jobManager.GetJobs(10, 0)
 	discoveryJobs, _, _ := h.jobManager.GetDiscoveryJobs(10, 0)
 	matches, _, _ := h.jobManager.GetAllPhraseMatches(10, 0)
-	phrases, _ := h.jobManager.GetSearchPhrases()
+	phrases, _ := h.jobManager.GetRecentSearchPhrases(10)
+	allPhrases, _ := h.jobManager.GetSearchPhrases()
+	totalPhrases := 0
+	if allPhrases != nil {
+		totalPhrases = len(allPhrases)
+	}
 	activeJob := h.jobManager.GetActiveJob()
 	stats := h.jobManager.GetEngineStats()
 
@@ -44,6 +51,7 @@ func (h *Handler) Index(c *gin.Context) {
 		"discoveryJobs": discoveryJobs,
 		"matches":       matches,
 		"phrases":       phrases,
+		"totalPhrases":  totalPhrases,
 		"activeJob":     activeJob,
 		"stats":         stats,
 	})
@@ -134,12 +142,12 @@ func (h *Handler) GetJob(c *gin.Context) {
 	if c.GetHeader("Accept") == "text/html" || c.Query("format") == "html" {
 		defaultSettings := h.jobManager.GetDefaultJobSettings()
 		// If the job has no custom settings, provide nil to the template
-		var settingsJSON string
+		var settingsJSON template.JS = "null"
 		if job.Settings != nil {
 			b, _ := json.Marshal(job.Settings)
-			settingsJSON = string(b)
+			settingsJSON = template.JS(b)
 		}
-		defaultSettingsJSON, _ := json.Marshal(defaultSettings)
+		defaultSettingsB, _ := json.Marshal(defaultSettings)
 
 		c.HTML(http.StatusOK, "job.html", gin.H{
 			"job":                 job,
@@ -150,7 +158,7 @@ func (h *Handler) GetJob(c *gin.Context) {
 			"pageTotal":           pageTotal,
 			"stats":               stats,
 			"settingsJSON":        settingsJSON,
-			"defaultSettingsJSON": string(defaultSettingsJSON),
+			"defaultSettingsJSON": template.JS(defaultSettingsB),
 		})
 		return
 	}
@@ -429,11 +437,28 @@ func (h *Handler) AddPhrase(c *gin.Context) {
 	// Check if request is from a form submission
 	contentType := c.GetHeader("Content-Type")
 	if contentType == "application/x-www-form-urlencoded" || c.GetHeader("Accept") == "text/html" {
-		c.Redirect(http.StatusFound, "/")
+		referer := c.GetHeader("Referer")
+		if strings.Contains(referer, "/phrases") {
+			c.Redirect(http.StatusFound, "/phrases")
+		} else {
+			c.Redirect(http.StatusFound, "/")
+		}
 		return
 	}
 
 	c.JSON(http.StatusCreated, Response{Success: true, Data: phrase})
+}
+
+// PhrasesPage renders the dedicated phrases management page
+func (h *Handler) PhrasesPage(c *gin.Context) {
+	phrases, err := h.jobManager.GetSearchPhrasesWithStats()
+	if err != nil {
+		phrases = nil
+	}
+
+	c.HTML(http.StatusOK, "phrases.html", gin.H{
+		"phrases": phrases,
+	})
 }
 
 // UpdatePhrase updates a search phrase
@@ -506,13 +531,67 @@ func (h *Handler) GetCrawledPages(c *gin.Context) {
 	})
 }
 
+// DuplicateJob creates a new job by copying an existing job's configuration
+func (h *Handler) DuplicateJob(c *gin.Context) {
+	jobID := c.Param("id")
+
+	newJob, err := h.jobManager.DuplicateJob(jobID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+		return
+	}
+
+	// If request is from browser, redirect to the new job's page
+	if c.GetHeader("Accept") == "text/html" || c.Query("redirect") == "true" {
+		c.Redirect(http.StatusFound, "/jobs/"+newJob.ID)
+		return
+	}
+
+	c.JSON(http.StatusCreated, Response{Success: true, Data: newJob, Message: "Job duplicated"})
+}
+
 // UpdateJobSettings updates settings for a pending job
 func (h *Handler) UpdateJobSettings(c *gin.Context) {
 	jobID := c.Param("id")
 
-	var settings models.JobSettings
-	if err := c.ShouldBindJSON(&settings); err != nil {
+	// Read raw body to detect reset request
+	var raw map[string]interface{}
+	if err := c.ShouldBindJSON(&raw); err != nil {
 		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+		return
+	}
+
+	// If the payload contains "reset": true, clear settings to nil (use defaults)
+	if reset, ok := raw["reset"]; ok {
+		if r, ok := reset.(bool); ok && r {
+			if err := h.jobManager.UpdateJobSettings(jobID, nil); err != nil {
+				c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, Response{Success: true, Message: "Settings reset to defaults"})
+			return
+		}
+	}
+
+	// Re-marshal and unmarshal to get a proper JobSettings
+	b, _ := json.Marshal(raw)
+	var settings models.JobSettings
+	if err := json.Unmarshal(b, &settings); err != nil {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+		return
+	}
+
+	// Check if settings are completely empty (all zero values) — treat as nil
+	if settings.MaxConcurrentRequests == nil && settings.RequestTimeoutSec == nil &&
+		settings.PolitenessDelayMs == nil && settings.MaxDepth == nil &&
+		settings.UserAgent == nil && settings.MaxRetries == nil &&
+		len(settings.SkipExtensions) == 0 && len(settings.URLIncludePatterns) == 0 &&
+		len(settings.URLExcludePatterns) == 0 {
+		if err := h.jobManager.UpdateJobSettings(jobID, nil); err != nil {
+			c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, Response{Success: true, Message: "Settings reset to defaults"})
 		return
 	}
 
@@ -542,6 +621,7 @@ func (h *Handler) SearchPage(c *gin.Context) {
 
 	var results []models.SearchResult
 	var total int64
+	phraseExists := false
 
 	if query != "" {
 		var err error
@@ -549,6 +629,15 @@ func (h *Handler) SearchPage(c *gin.Context) {
 		if err != nil {
 			results = nil
 			total = 0
+		}
+
+		// Check if the search query already exists as a phrase
+		phrases, _ := h.jobManager.GetSearchPhrases()
+		for _, p := range phrases {
+			if strings.EqualFold(p.Phrase, query) {
+				phraseExists = true
+				break
+			}
 		}
 	}
 
@@ -558,12 +647,13 @@ func (h *Handler) SearchPage(c *gin.Context) {
 	}
 
 	c.HTML(http.StatusOK, "search.html", gin.H{
-		"query":      query,
-		"results":    results,
-		"total":      total,
-		"page":       page,
-		"totalPages": totalPages,
-		"limit":      limit,
+		"query":        query,
+		"results":      results,
+		"total":        total,
+		"page":         page,
+		"totalPages":   totalPages,
+		"limit":        limit,
+		"phraseExists": phraseExists,
 	})
 }
 

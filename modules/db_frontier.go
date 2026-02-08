@@ -164,11 +164,24 @@ func (f *DBFrontier) SetCrawlJob(crawlJobID string) {
 
 // AddURL adds a URL to the frontier if not already exists
 func (f *DBFrontier) AddURL(rawURL string, depth int, parentURL string) error {
-	return f.AddURLWithAnchor(rawURL, depth, parentURL, "")
+	return f.addURLInternal(rawURL, depth, parentURL, "", true)
 }
 
 // AddURLWithAnchor adds a URL to the frontier with anchor text
 func (f *DBFrontier) AddURLWithAnchor(rawURL string, depth int, parentURL string, anchorText string) error {
+	return f.addURLInternal(rawURL, depth, parentURL, anchorText, true)
+}
+
+// addSeedURL adds a URL to the frontier, bypassing extension and URL pattern filters.
+// Used for seed URLs that the user explicitly configured (target URL, robots.txt, sitemaps).
+func (f *DBFrontier) addSeedURL(rawURL string, depth int, parentURL string) error {
+	return f.addURLInternal(rawURL, depth, parentURL, "", false)
+}
+
+// addURLInternal is the core implementation for adding URLs to the frontier.
+// When applyFilters is true, extension and include/exclude pattern checks are applied.
+// When false, the URL is added unconditionally (used for seed URLs).
+func (f *DBFrontier) addURLInternal(rawURL string, depth int, parentURL string, anchorText string, applyFilters bool) error {
 	f.mu.Lock()
 	crawlJobID := f.crawlJobID
 	f.mu.Unlock()
@@ -177,14 +190,16 @@ func (f *DBFrontier) AddURLWithAnchor(rawURL string, depth int, parentURL string
 		return errors.New("no crawl job set")
 	}
 
-	// Check if URL should be skipped based on file extension
-	if f.shouldSkipURL(rawURL) {
-		return nil // Silently skip URLs with excluded extensions
-	}
+	if applyFilters {
+		// Check if URL should be skipped based on file extension
+		if f.shouldSkipURL(rawURL) {
+			return nil // Silently skip URLs with excluded extensions
+		}
 
-	// Check URL include/exclude patterns
-	if f.shouldFilterURL(rawURL) {
-		return nil // Silently skip filtered URLs
+		// Check URL include/exclude patterns
+		if f.shouldFilterURL(rawURL) {
+			return nil // Silently skip filtered URLs
+		}
 	}
 
 	// Clean and normalize the URL
@@ -404,31 +419,33 @@ func hashURL(url string) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// AddSeedURLs adds initial seed URLs for a crawl job
+// AddSeedURLs adds initial seed URLs for a crawl job.
+// Seed URLs bypass include/exclude URL pattern filters since they are explicitly
+// provided by the user as the starting point for the crawl.
 func (f *DBFrontier) AddSeedURLs(targetURL string) error {
-	// Add the target URL itself
-	if err := f.AddURL(targetURL, 0, ""); err != nil {
+	// Add the target URL itself (bypass filters)
+	if err := f.addSeedURL(targetURL, 0, ""); err != nil {
 		log.Printf("[%s] Warning: failed to add target URL: %v", f.Name(), err)
 	}
 
-	// Add robots.txt
+	// Add robots.txt (bypass filters)
 	robotsURL := targetURL + "/robots.txt"
-	if err := f.AddURL(robotsURL, 0, targetURL); err != nil {
+	if err := f.addSeedURL(robotsURL, 0, targetURL); err != nil {
 		log.Printf("[%s] Warning: failed to add robots.txt: %v", f.Name(), err)
 	}
 
-	// Add sitemap.xml
+	// Add sitemap.xml (bypass filters)
 	sitemapURL := targetURL + "/sitemap.xml"
-	if err := f.AddURL(sitemapURL, 0, targetURL); err != nil {
+	if err := f.addSeedURL(sitemapURL, 0, targetURL); err != nil {
 		log.Printf("[%s] Warning: failed to add sitemap.xml: %v", f.Name(), err)
 	}
 
-	// Add sitemap_index.xml
+	// Add sitemap_index.xml (bypass filters)
 	sitemapIndexURL := targetURL + "/sitemap_index.xml"
-	if err := f.AddURL(sitemapIndexURL, 0, targetURL); err != nil {
+	if err := f.addSeedURL(sitemapIndexURL, 0, targetURL); err != nil {
 		log.Printf("[%s] Warning: failed to add sitemap_index.xml: %v", f.Name(), err)
 	}
 
-	log.Printf("[%s] Added seed URLs for %s", f.Name(), targetURL)
+	log.Printf("[%s] Added seed URLs for %s (filters bypassed for seeds)", f.Name(), targetURL)
 	return nil
 }

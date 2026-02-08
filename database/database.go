@@ -65,6 +65,13 @@ func (d *Database) AutoMigrate() error {
 	// Create additional composite index for search performance (ignore if exists)
 	d.DB.Exec("CREATE INDEX idx_phrase_match_phrase_url ON phrase_matches(phrase(255), url(255))")
 
+	// Create composite index for doc_hash + crawl_job_id deduplication (ignore if exists)
+	d.DB.Exec("CREATE INDEX idx_doc_crawl_job ON crawled_pages(doc_hash, crawl_job_id)")
+
+	// Migration: drop the old global unique index on url_hash if it exists,
+	// since it's now a composite unique index (crawl_job_id, url_hash).
+	d.DB.Exec("DROP INDEX idx_crawled_pages_url_hash ON crawled_pages")
+
 	return nil
 }
 

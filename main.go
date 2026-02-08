@@ -107,6 +107,7 @@ func main() {
 	// Web routes
 	router.GET("/", handler.Index)
 	router.GET("/search", handler.SearchPage)
+	router.GET("/phrases", handler.PhrasesPage)
 	router.GET("/jobs/:id", func(c *gin.Context) {
 		c.Request.Header.Set("Accept", "text/html")
 		handler.GetJob(c)
@@ -127,6 +128,7 @@ func main() {
 		api.POST("/jobs/stop", handler.StopJob)
 		api.POST("/jobs/pause", handler.PauseJob)
 		api.POST("/jobs/resume", handler.ResumeJob)
+		api.POST("/jobs/:id/duplicate", handler.DuplicateJob)
 		api.DELETE("/jobs/:id", handler.DeleteJob)
 
 		// Discovery jobs

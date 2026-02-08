@@ -483,9 +483,9 @@ func (m *Manager) GetPhraseMatches(jobID string, limit, offset int) ([]models.Ph
 	var matches []models.PhraseMatch
 	var total int64
 
-	m.db.Model(&models.PhraseMatch{}).Where("crawl_job_id = ?", jobID).Count(&total)
+	m.db.Model(&models.PhraseMatch{}).Where("crawl_job_id = ? AND is_archived = ?", jobID, false).Count(&total)
 
-	if err := m.db.Where("crawl_job_id = ?", jobID).
+	if err := m.db.Where("crawl_job_id = ? AND is_archived = ?", jobID, false).
 		Order("found_at DESC").
 		Limit(limit).
 		Offset(offset).
@@ -501,9 +501,10 @@ func (m *Manager) GetAllPhraseMatches(limit, offset int) ([]models.PhraseMatch, 
 	var matches []models.PhraseMatch
 	var total int64
 
-	m.db.Model(&models.PhraseMatch{}).Count(&total)
+	m.db.Model(&models.PhraseMatch{}).Where("is_archived = ?", false).Count(&total)
 
-	if err := m.db.Order("found_at DESC").
+	if err := m.db.Where("is_archived = ?", false).
+		Order("found_at DESC").
 		Limit(limit).
 		Offset(offset).
 		Find(&matches).Error; err != nil {
@@ -518,9 +519,9 @@ func (m *Manager) GetCrawledPages(jobID string, limit, offset int) ([]models.Cra
 	var pages []models.CrawledPage
 	var total int64
 
-	m.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ?", jobID).Count(&total)
+	m.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ? AND is_archived = ?", jobID, false).Count(&total)
 
-	if err := m.db.Where("crawl_job_id = ?", jobID).
+	if err := m.db.Where("crawl_job_id = ? AND is_archived = ?", jobID, false).
 		Order("crawled_at DESC").
 		Limit(limit).
 		Offset(offset).
@@ -540,11 +541,11 @@ func (m *Manager) GetJobStats(jobID string) (*models.CrawlStats, error) {
 	m.db.Model(&models.FrontierURL{}).Where("crawl_job_id = ? AND status = ?", jobID, "pending").Count(&stats.PendingURLs)
 	m.db.Model(&models.FrontierURL{}).Where("crawl_job_id = ? AND status = ?", jobID, "processing").Count(&stats.ProcessingURLs)
 	// Completed URLs are deleted from frontier and stored in crawled_pages
-	m.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ?", jobID).Count(&stats.CompletedURLs)
+	m.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ? AND is_archived = ?", jobID, false).Count(&stats.CompletedURLs)
 	m.db.Model(&models.FrontierURL{}).Where("crawl_job_id = ? AND status = ?", jobID, "failed").Count(&stats.FailedURLs)
 
 	// Count matches
-	m.db.Model(&models.PhraseMatch{}).Where("crawl_job_id = ?", jobID).Count(&stats.TotalMatches)
+	m.db.Model(&models.PhraseMatch{}).Where("crawl_job_id = ? AND is_archived = ?", jobID, false).Count(&stats.TotalMatches)
 
 	// Count subdomains (check discovery_job_id)
 	m.db.Model(&models.Subdomain{}).Where("discovery_job_id = ?", jobID).Count(&stats.SubdomainsFound)
@@ -552,7 +553,7 @@ func (m *Manager) GetJobStats(jobID string) (*models.CrawlStats, error) {
 	// Calculate average response time (handle NULL when no rows)
 	var avgResponseTime sql.NullFloat64
 	m.db.Model(&models.CrawledPage{}).
-		Where("crawl_job_id = ? AND response_time > 0", jobID).
+		Where("crawl_job_id = ? AND response_time > 0 AND is_archived = ?", jobID, false).
 		Select("AVG(response_time)").
 		Scan(&avgResponseTime)
 	if avgResponseTime.Valid {
@@ -569,6 +570,46 @@ func (m *Manager) GetSearchPhrases() ([]models.SearchPhrase, error) {
 		return nil, err
 	}
 	return phrases, nil
+}
+
+// GetRecentSearchPhrases retrieves the most recent search phrases up to the given limit
+func (m *Manager) GetRecentSearchPhrases(limit int) ([]models.SearchPhrase, error) {
+	var phrases []models.SearchPhrase
+	if err := m.db.Order("created_at DESC").Limit(limit).Find(&phrases).Error; err != nil {
+		return nil, err
+	}
+	return phrases, nil
+}
+
+// GetSearchPhrasesWithStats retrieves all search phrases with match and URL counts
+func (m *Manager) GetSearchPhrasesWithStats() ([]models.PhraseWithStats, error) {
+	var results []models.PhraseWithStats
+
+	err := m.db.Raw(`
+		SELECT 
+			sp.id,
+			sp.phrase,
+			sp.is_active,
+			sp.created_at,
+			COALESCE(stats.match_count, 0) AS match_count,
+			COALESCE(stats.url_count, 0) AS url_count
+		FROM search_phrases sp
+		LEFT JOIN (
+			SELECT 
+				phrase,
+				SUM(occurrences) AS match_count,
+				COUNT(DISTINCT url) AS url_count
+			FROM phrase_matches
+			WHERE is_archived = 0
+			GROUP BY phrase
+		) stats ON sp.phrase = stats.phrase
+		ORDER BY match_count DESC, sp.phrase ASC
+	`).Scan(&results).Error
+
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 // AddSearchPhrase adds a new search phrase
@@ -613,8 +654,51 @@ func (m *Manager) UpdateJobSettings(jobID string, settings *models.JobSettings) 
 	if job.Status != models.JobStatusPending {
 		return fmt.Errorf("can only update settings for pending jobs")
 	}
+	if settings == nil {
+		// Reset to defaults: set settings column to NULL
+		return m.db.Model(&models.CrawlJob{}).Where("id = ?", jobID).Update("settings", nil).Error
+	}
 	job.Settings = settings
 	return m.db.Save(&job).Error
+}
+
+// DuplicateJob creates a new pending job by copying the target URL, domain, max depth, and settings from an existing job.
+func (m *Manager) DuplicateJob(jobID string) (*models.CrawlJob, error) {
+	var src models.CrawlJob
+	if err := m.db.First(&src, "id = ?", jobID).Error; err != nil {
+		return nil, fmt.Errorf("source job not found: %w", err)
+	}
+
+	// Deep-copy settings so the new job is independent
+	var settingsCopy *models.JobSettings
+	if src.Settings != nil {
+		s := *src.Settings // shallow copy
+		if s.SkipExtensions != nil {
+			s.SkipExtensions = append([]string(nil), src.Settings.SkipExtensions...)
+		}
+		if s.URLIncludePatterns != nil {
+			s.URLIncludePatterns = append([]string(nil), src.Settings.URLIncludePatterns...)
+		}
+		if s.URLExcludePatterns != nil {
+			s.URLExcludePatterns = append([]string(nil), src.Settings.URLExcludePatterns...)
+		}
+		settingsCopy = &s
+	}
+
+	newJob := &models.CrawlJob{
+		TargetURL: src.TargetURL,
+		Domain:    src.Domain,
+		Status:    models.JobStatusPending,
+		MaxDepth:  src.MaxDepth,
+		Settings:  settingsCopy,
+	}
+
+	if err := m.db.Create(newJob).Error; err != nil {
+		return nil, err
+	}
+
+	log.Printf("[JobManager] Duplicated job %s → %s (target: %s)", src.ID, newJob.ID, newJob.TargetURL)
+	return newJob, nil
 }
 
 // GetDefaultJobSettings returns the default crawler config as JobSettings
@@ -669,7 +753,7 @@ func (m *Manager) SearchPhraseMatches(query string, limit, offset int) ([]models
 		SELECT COUNT(*) FROM (
 			SELECT DISTINCT pm.url, pm.phrase, pm.match_type
 			FROM phrase_matches pm
-			WHERE %s
+			WHERE pm.is_archived = 0 AND (%s)
 		) AS sub
 	`, whereClause)
 	m.db.Raw(countSQL, args...).Scan(&total)
@@ -687,7 +771,7 @@ func (m *Manager) SearchPhraseMatches(query string, limit, offset int) ([]models
 			MAX(pm.found_at) as found_at
 		FROM phrase_matches pm
 		LEFT JOIN crawl_jobs cj ON pm.crawl_job_id = cj.id
-		WHERE %s
+		WHERE pm.is_archived = 0 AND (%s)
 		GROUP BY pm.url, pm.phrase, pm.match_type, pm.context, pm.crawl_job_id, cj.domain
 		ORDER BY occurrences DESC, found_at DESC
 		LIMIT ? OFFSET ?

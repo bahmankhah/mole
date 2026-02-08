@@ -145,9 +145,10 @@ type Subdomain struct {
 // CrawledPage represents a crawled web page
 type CrawledPage struct {
 	ID            uint      `gorm:"primaryKey" json:"id"`
-	CrawlJobID    string    `gorm:"type:varchar(36);index;not null" json:"crawl_job_id"`
+	CrawlJobID    string    `gorm:"type:varchar(36);uniqueIndex:idx_job_url_hash;not null" json:"crawl_job_id"`
 	URL           string    `gorm:"type:varchar(2048);index:idx_url,length:255;not null" json:"url"`
-	URLHash       string    `gorm:"type:varchar(64);uniqueIndex;not null" json:"url_hash"`
+	URLHash       string    `gorm:"type:varchar(64);uniqueIndex:idx_job_url_hash;not null" json:"url_hash"`
+	DocHash       string    `gorm:"type:varchar(64)" json:"doc_hash"`
 	NormalizedURL string    `gorm:"type:varchar(2048)" json:"normalized_url"`
 	Title         string    `gorm:"type:varchar(512)" json:"title,omitempty"`
 	StatusCode    int       `json:"status_code"`
@@ -158,6 +159,7 @@ type CrawledPage struct {
 	CrawledAt     time.Time `json:"crawled_at"`
 	ResponseTime  int64     `json:"response_time_ms"`
 	ErrorMessage  string    `gorm:"type:text" json:"error_message,omitempty"`
+	IsArchived    bool      `gorm:"default:false;index" json:"is_archived"`
 	CrawlJob      CrawlJob  `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
@@ -199,6 +201,7 @@ type PhraseMatch struct {
 	Context        string        `gorm:"type:text" json:"context,omitempty"`
 	Occurrences    int           `gorm:"default:1" json:"occurrences"`
 	FoundAt        time.Time     `json:"found_at"`
+	IsArchived     bool          `gorm:"default:false;index" json:"is_archived"`
 	CrawlJob       CrawlJob      `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
 	Page           CrawledPage   `gorm:"foreignKey:PageID;constraint:OnDelete:CASCADE" json:"-"`
 	SearchPhrase   *SearchPhrase `gorm:"foreignKey:SearchPhraseID;constraint:OnDelete:SET NULL" json:"-"`
@@ -224,6 +227,16 @@ type CrawlStats struct {
 	TotalMatches        int64   `json:"total_matches"`
 	SubdomainsFound     int64   `json:"subdomains_found"`
 	AverageResponseTime float64 `json:"average_response_time_ms"`
+}
+
+// PhraseWithStats represents a search phrase with its match count for the phrases listing page
+type PhraseWithStats struct {
+	ID         uint   `json:"id"`
+	Phrase     string `json:"phrase"`
+	IsActive   bool   `json:"is_active"`
+	CreatedAt  string `json:"created_at"`
+	MatchCount int64  `json:"match_count"`
+	URLCount   int64  `json:"url_count"`
 }
 
 // SearchResult represents a grouped search result for the search page

@@ -2,6 +2,8 @@ package crawler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -146,6 +148,17 @@ func (e *Engine) Start(job *models.CrawlJob) error {
 		e.mergeJobSettings(job.Settings)
 	}
 
+	// Recreate HTTP client with effective timeout so per-job overrides take effect
+	e.httpClient = &http.Client{
+		Timeout: e.effectiveConfig.RequestTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			return nil
+		},
+	}
+
 	// Apply URL filters from job settings
 	if job.Settings != nil {
 		e.frontier.SetURLFilters(job.Settings.URLIncludePatterns, job.Settings.URLExcludePatterns)
@@ -161,11 +174,11 @@ func (e *Engine) Start(job *models.CrawlJob) error {
 	atomic.StoreInt64(&e.matchCount, 0)
 
 	var crawledCount int64
-	e.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ?", job.ID).Count(&crawledCount)
+	e.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ? AND is_archived = ?", job.ID, false).Count(&crawledCount)
 	atomic.StoreInt64(&e.crawledCount, crawledCount)
 
 	var matchCount int64
-	e.db.Model(&models.PhraseMatch{}).Where("crawl_job_id = ?", job.ID).Count(&matchCount)
+	e.db.Model(&models.PhraseMatch{}).Where("crawl_job_id = ? AND is_archived = ?", job.ID, false).Count(&matchCount)
 	atomic.StoreInt64(&e.matchCount, matchCount)
 
 	// Set the crawl job in frontier
@@ -426,7 +439,7 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
 		log.Printf("[Worker %d] Failed to fetch %s: %v", workerID, url, err)
-		_, _ = e.saveCrawledPage(url, 0, "", 0, depth, err.Error(), startTime)
+		_, _ = e.saveCrawledPage(url, 0, "", 0, depth, err.Error(), startTime, nil)
 		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
 		return
 	}
@@ -436,7 +449,7 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024)) // 10MB limit
 	if err != nil {
 		log.Printf("[Worker %d] Failed to read body for %s: %v", workerID, url, err)
-		_, _ = e.saveCrawledPage(url, resp.StatusCode, resp.Header.Get("Content-Type"), 0, depth, err.Error(), startTime)
+		_, _ = e.saveCrawledPage(url, resp.StatusCode, resp.Header.Get("Content-Type"), 0, depth, err.Error(), startTime, nil)
 		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
 		return
 	}
@@ -444,7 +457,7 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	contentType := resp.Header.Get("Content-Type")
 
 	// Save crawled page
-	page, created := e.saveCrawledPage(url, resp.StatusCode, contentType, int64(len(body)), depth, "", startTime)
+	page, created := e.saveCrawledPage(url, resp.StatusCode, contentType, int64(len(body)), depth, "", startTime, body)
 	if created {
 		atomic.AddInt64(&e.crawledCount, 1)
 	}
@@ -566,9 +579,16 @@ func (e *Engine) processRobots(url string, body []byte, depth int) {
 }
 
 // saveCrawledPage saves a crawled page to database
-func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string, contentLength int64, depth int, errorMsg string, startTime time.Time) (*models.CrawledPage, bool) {
+func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string, contentLength int64, depth int, errorMsg string, startTime time.Time, body []byte) (*models.CrawledPage, bool) {
 	normalizedURL, _ := e.urlCleaner.ProcessURL(url)
 	urlHash := e.urlCleaner.HashURL(normalizedURL)
+
+	// Compute document content hash
+	docHash := ""
+	if len(body) > 0 {
+		h := sha256.Sum256(body)
+		docHash = hex.EncodeToString(h[:])
+	}
 
 	e.jobMu.RLock()
 	crawlJobID := ""
@@ -577,10 +597,27 @@ func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string,
 	}
 	e.jobMu.RUnlock()
 
+	// If we have a doc hash, check if this exact content already exists for this job
+	if docHash != "" && crawlJobID != "" {
+		var dupCount int64
+		e.db.Model(&models.CrawledPage{}).
+			Where("crawl_job_id = ? AND doc_hash = ? AND is_archived = ?", crawlJobID, docHash, false).
+			Count(&dupCount)
+		if dupCount > 0 {
+			log.Printf("[Engine] Skipping duplicate content (doc_hash=%s) for URL %s", docHash[:12], url)
+			// Still return a page reference so the caller can proceed
+			var existing models.CrawledPage
+			if err := e.db.Where("crawl_job_id = ? AND doc_hash = ? AND is_archived = ?", crawlJobID, docHash, false).First(&existing).Error; err == nil {
+				return &existing, false
+			}
+		}
+	}
+
 	page := &models.CrawledPage{
 		CrawlJobID:    crawlJobID,
 		URL:           url,
 		URLHash:       urlHash,
+		DocHash:       docHash,
 		NormalizedURL: normalizedURL,
 		StatusCode:    statusCode,
 		ContentType:   contentType,
@@ -592,7 +629,7 @@ func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string,
 	}
 
 	result := e.db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "url_hash"}},
+		Columns:   []clause.Column{{Name: "crawl_job_id"}, {Name: "url_hash"}},
 		DoNothing: true,
 	}).Create(page)
 
@@ -602,7 +639,7 @@ func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string,
 
 	if result.RowsAffected == 0 {
 		var existing models.CrawledPage
-		if err := e.db.Where("url_hash = ?", urlHash).First(&existing).Error; err == nil {
+		if err := e.db.Where("crawl_job_id = ? AND url_hash = ?", crawlJobID, urlHash).First(&existing).Error; err == nil {
 			return &existing, false
 		}
 		return page, false
