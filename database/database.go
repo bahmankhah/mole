@@ -78,7 +78,6 @@ func (d *Database) AutoMigrate() error {
 // SeedDefaultPhrases inserts default search phrases if not exist
 func (d *Database) SeedDefaultPhrases() error {
 	defaultPhrases := []string{
-		"qrmenu.com",
 	}
 
 	for _, phrase := range defaultPhrases {

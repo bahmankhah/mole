@@ -10,6 +10,13 @@ import (
 	"github.com/PuerkitoBio/goquery"
 )
 
+// Pre-compiled regex for whitespace normalization (avoids re-compiling on every call)
+var whitespaceRegex = regexp.MustCompile(`[\s]+`)
+
+// Pre-compiled regex for finding bare URLs in text/JSON/scripts.
+// Matches http:// and https:// URLs, stops at whitespace, quotes, angle brackets, or common delimiters.
+var bareURLRegex = regexp.MustCompile(`https?://[^\s"'<>\[\]{}|\\` + "`" + `(),;]+`)
+
 // HTMLLinkExtractor extracts links from HTML content
 type HTMLLinkExtractor struct {
 	urlCleaner *URLCleaner
@@ -134,6 +141,110 @@ func (e *HTMLLinkExtractor) ExtractLinksWithAnchors(baseURL string, content []by
 		}
 	})
 
+	// Extract URLs from data-href, data-url, data-src, data-link attributes
+	doc.Find("[data-href], [data-url], [data-src], [data-link]").Each(func(_ int, s *goquery.Selection) {
+		for _, attr := range []string{"data-href", "data-url", "data-src", "data-link"} {
+			val, exists := s.Attr(attr)
+			if exists && val != "" {
+				resolved := e.resolveLink(baseURL, val)
+				if resolved != "" {
+					if _, ok := linkMap[resolved]; !ok {
+						linkMap[resolved] = linkEntry{url: resolved}
+					}
+				}
+			}
+		}
+	})
+
+	// Extract canonical/alternate URLs from <meta> and <link> tags
+	doc.Find(`link[rel="canonical"], link[rel="alternate"]`).Each(func(_ int, s *goquery.Selection) {
+		href, exists := s.Attr("href")
+		if exists && href != "" {
+			resolved := e.resolveLink(baseURL, href)
+			if resolved != "" {
+				if _, ok := linkMap[resolved]; !ok {
+					linkMap[resolved] = linkEntry{url: resolved}
+				}
+			}
+		}
+	})
+
+	// Extract URLs from meta refresh and og:url, og:image etc.
+	doc.Find(`meta[content]`).Each(func(_ int, s *goquery.Selection) {
+		content, _ := s.Attr("content")
+		if content == "" {
+			return
+		}
+		// meta http-equiv="refresh" content="0;url=..."
+		if httpEquiv, _ := s.Attr("http-equiv"); strings.EqualFold(httpEquiv, "refresh") {
+			if idx := strings.Index(strings.ToLower(content), "url="); idx != -1 {
+				refreshURL := strings.TrimSpace(content[idx+4:])
+				resolved := e.resolveLink(baseURL, refreshURL)
+				if resolved != "" {
+					if _, ok := linkMap[resolved]; !ok {
+						linkMap[resolved] = linkEntry{url: resolved}
+					}
+				}
+			}
+		}
+		// og:url, og:image, twitter:image, etc.
+		prop, _ := s.Attr("property")
+		name, _ := s.Attr("name")
+		if strings.HasPrefix(prop, "og:") || strings.HasPrefix(name, "twitter:") {
+			if strings.HasPrefix(content, "http://") || strings.HasPrefix(content, "https://") {
+				resolved := e.resolveLink(baseURL, content)
+				if resolved != "" {
+					if _, ok := linkMap[resolved]; !ok {
+						linkMap[resolved] = linkEntry{url: resolved}
+					}
+				}
+			}
+		}
+	})
+
+	// Extract URLs from srcset attributes (responsive images)
+	doc.Find("[srcset]").Each(func(_ int, s *goquery.Selection) {
+		srcset, exists := s.Attr("srcset")
+		if !exists || srcset == "" {
+			return
+		}
+		// srcset format: "url1 1x, url2 2x" or "url1 100w, url2 200w"
+		for _, candidate := range strings.Split(srcset, ",") {
+			parts := strings.Fields(strings.TrimSpace(candidate))
+			if len(parts) >= 1 {
+				resolved := e.resolveLink(baseURL, parts[0])
+				if resolved != "" {
+					if _, ok := linkMap[resolved]; !ok {
+						linkMap[resolved] = linkEntry{url: resolved}
+					}
+				}
+			}
+		}
+	})
+
+	// Extract bare URLs from inline <script> and JSON-LD blocks
+	// This catches URLs embedded in JavaScript objects, JSON-LD, Next.js data, etc.
+	rawDoc, _ := goquery.NewDocumentFromReader(bytes.NewReader(content))
+	if rawDoc != nil {
+		rawDoc.Find("script").Each(func(_ int, s *goquery.Selection) {
+			scriptText := s.Text()
+			if len(scriptText) == 0 || len(scriptText) > 512*1024 {
+				return // skip empty or very large scripts
+			}
+			matches := bareURLRegex.FindAllString(scriptText, 200) // cap at 200 per script block
+			for _, raw := range matches {
+				// Clean trailing punctuation that the regex might grab
+				raw = strings.TrimRight(raw, ".,;:!?)]}")
+				resolved := e.resolveLink(baseURL, raw)
+				if resolved != "" {
+					if _, ok := linkMap[resolved]; !ok {
+						linkMap[resolved] = linkEntry{url: resolved}
+					}
+				}
+			}
+		})
+	}
+
 	// Convert map to slice
 	result := make([]LinkWithAnchor, 0, len(linkMap))
 	for _, entry := range linkMap {
@@ -197,7 +308,7 @@ func (e *HTMLLinkExtractor) ExtractTextContent(content []byte) string {
 	text := doc.Text()
 
 	// Clean up whitespace
-	space := regexp.MustCompile(`[\s]+`)
+	space := whitespaceRegex
 	text = space.ReplaceAllString(text, " ")
 
 	return strings.TrimSpace(text)

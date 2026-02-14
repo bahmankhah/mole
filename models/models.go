@@ -46,8 +46,10 @@ type JobSettings struct {
 	RequestTimeoutSec     *int     `json:"request_timeout_seconds,omitempty"`
 	PolitenessDelayMs     *int     `json:"politeness_delay_ms,omitempty"`
 	MaxDepth              *int     `json:"max_depth,omitempty"`
+	MaxPages              *int     `json:"max_pages,omitempty"` // 0 = unlimited
 	UserAgent             *string  `json:"user_agent,omitempty"`
 	MaxRetries            *int     `json:"max_retries,omitempty"`
+	RespectRobotsTxt      *bool    `json:"respect_robots_txt,omitempty"`
 	SkipExtensions        []string `json:"skip_extensions,omitempty"`
 	URLIncludePatterns    []string `json:"url_include_patterns,omitempty"` // Regex; if set, only matching URLs are crawled
 	URLExcludePatterns    []string `json:"url_exclude_patterns,omitempty"` // Regex; skipped if include is set

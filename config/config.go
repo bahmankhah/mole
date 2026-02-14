@@ -32,8 +32,10 @@ type CrawlerConfig struct {
 	PolitenessDelay       time.Duration `yaml:"politeness_delay"`
 	TeleportProbability   float64       `yaml:"teleport_probability"`
 	MaxDepth              int           `yaml:"max_depth"`
+	MaxPages              int           `yaml:"max_pages"` // 0 = unlimited
 	UserAgent             string        `yaml:"user_agent"`
 	MaxRetries            int           `yaml:"max_retries"`
+	RespectRobotsTxt      bool          `yaml:"respect_robots_txt"`
 	SkipExtensions        []string      `yaml:"skip_extensions"`
 }
 
@@ -134,8 +136,9 @@ func DefaultConfig() *Config {
 			PolitenessDelay:       1 * time.Second,
 			TeleportProbability:   0.2,
 			MaxDepth:              10,
-			UserAgent:             "Mole/1.0 (+https://mole.local)",
+			UserAgent:             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 			MaxRetries:            3,
+			RespectRobotsTxt:      true,
 			SkipExtensions:        getDefaultSkipExtensions(),
 		},
 		Server: ServerConfig{

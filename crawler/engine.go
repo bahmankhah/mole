@@ -1,14 +1,18 @@
 package crawler
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,19 +64,92 @@ type Engine struct {
 	// Phrase ID lookup: phrase string -> SearchPhrase.ID
 	phraseIDMap map[string]uint
 
+	// robots.txt compliance: disallowed paths per domain
+	robotRules   map[string]*modules.RobotsResult
+	robotRulesMu sync.RWMutex
+
 	// Stats
 	crawledCount int64
 	matchCount   int64
 }
 
+// chromeCipherSuites returns TLS cipher suites ordered to mimic Chrome's TLS fingerprint.
+var chromeCipherSuites = []uint16{
+	tls.TLS_AES_128_GCM_SHA256,
+	tls.TLS_AES_256_GCM_SHA384,
+	tls.TLS_CHACHA20_POLY1305_SHA256,
+	tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+	tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+	tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+	tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+	tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+	tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+}
+
+// userAgents is a pool of recent Chrome/Edge/Firefox User-Agents to rotate through.
+var userAgents = []string{
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
+}
+
+// newTransport creates an HTTP transport with a TLS config that mimics Chrome.
+func newTransport() *http.Transport {
+	return &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		MaxConnsPerHost:       20,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+		ForceAttemptHTTP2:     true,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: false,
+			MinVersion:         tls.VersionTLS12,
+			MaxVersion:         tls.VersionTLS13,
+			CipherSuites:       chromeCipherSuites,
+			CurvePreferences:   []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384},
+		},
+		DisableCompression: false,
+	}
+}
+
 // NewEngine creates a new crawler engine
 func NewEngine(cfg config.CrawlerConfig, db *gorm.DB) *Engine {
-	// Create HTTP client with timeout
+	// Create HTTP client with cookie jar, tuned transport, and browser-like behavior
+	jar, _ := cookiejar.New(nil)
 	client := &http.Client{
-		Timeout: cfg.RequestTimeout,
+		Timeout:   cfg.RequestTimeout,
+		Transport: newTransport(),
+		Jar:       jar,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return fmt.Errorf("too many redirects")
+			}
+			// Preserve browser headers on redirect
+			if len(via) > 0 {
+				for key, vals := range via[0].Header {
+					if _, exists := req.Header[key]; !exists {
+						for _, v := range vals {
+							req.Header.Add(key, v)
+						}
+					}
+				}
 			}
 			return nil
 		},
@@ -111,6 +188,7 @@ func NewEngine(cfg config.CrawlerConfig, db *gorm.DB) *Engine {
 		frontier:       frontier,
 		rng:            rand.New(rand.NewSource(time.Now().UnixNano())),
 		phraseIDMap:    make(map[string]uint),
+		robotRules:     make(map[string]*modules.RobotsResult),
 	}
 }
 
@@ -150,7 +228,8 @@ func (e *Engine) Start(job *models.CrawlJob) error {
 
 	// Recreate HTTP client with effective timeout so per-job overrides take effect
 	e.httpClient = &http.Client{
-		Timeout: e.effectiveConfig.RequestTimeout,
+		Timeout:   e.effectiveConfig.RequestTimeout,
+		Transport: newTransport(),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return fmt.Errorf("too many redirects")
@@ -158,6 +237,11 @@ func (e *Engine) Start(job *models.CrawlJob) error {
 			return nil
 		},
 	}
+
+	// Reset robots.txt rules for new job
+	e.robotRulesMu.Lock()
+	e.robotRules = make(map[string]*modules.RobotsResult)
+	e.robotRulesMu.Unlock()
 
 	// Apply URL filters from job settings
 	if job.Settings != nil {
@@ -234,11 +318,17 @@ func (e *Engine) mergeJobSettings(s *models.JobSettings) {
 	if s.MaxDepth != nil {
 		e.effectiveConfig.MaxDepth = *s.MaxDepth
 	}
+	if s.MaxPages != nil {
+		e.effectiveConfig.MaxPages = *s.MaxPages
+	}
 	if s.UserAgent != nil {
 		e.effectiveConfig.UserAgent = *s.UserAgent
 	}
 	if s.MaxRetries != nil {
 		e.effectiveConfig.MaxRetries = *s.MaxRetries
+	}
+	if s.RespectRobotsTxt != nil {
+		e.effectiveConfig.RespectRobotsTxt = *s.RespectRobotsTxt
 	}
 	if len(s.SkipExtensions) > 0 {
 		e.effectiveConfig.SkipExtensions = s.SkipExtensions
@@ -247,6 +337,7 @@ func (e *Engine) mergeJobSettings(s *models.JobSettings) {
 
 // randomizedDelay returns a randomized delay based on the politeness delay.
 // It varies from (delay - 1s) to (delay + 1s) in milliseconds, minimum 0.
+// Uses sync-safe approach to avoid race conditions on rng.
 func (e *Engine) randomizedDelay() time.Duration {
 	baseMs := e.effectiveConfig.PolitenessDelay.Milliseconds()
 	minMs := baseMs - 1000
@@ -257,7 +348,10 @@ func (e *Engine) randomizedDelay() time.Duration {
 	if maxMs <= minMs {
 		return time.Duration(minMs) * time.Millisecond
 	}
+	// Use jobMu to synchronize access to rng (it's not heavily contended here)
+	e.jobMu.RLock()
 	delayMs := minMs + int64(e.rng.Intn(int(maxMs-minMs+1)))
+	e.jobMu.RUnlock()
 	return time.Duration(delayMs) * time.Millisecond
 }
 
@@ -392,8 +486,11 @@ func (e *Engine) worker(id int) {
 		if err != nil {
 			emptyCount++
 			if emptyCount >= maxEmptyCount {
-				log.Printf("[Worker %d] Frontier empty for too long, stopping", id)
+				log.Printf("[Worker %d] Frontier empty for too long, stopping (emptyCount=%d)", id, emptyCount)
 				return
+			}
+			if emptyCount%5 == 1 {
+				log.Printf("[Worker %d] Frontier empty, waiting... (emptyCount=%d, err=%v)", id, emptyCount, err)
 			}
 			time.Sleep(500 * time.Millisecond)
 			continue
@@ -404,6 +501,20 @@ func (e *Engine) worker(id int) {
 		if frontierURL.Depth > e.effectiveConfig.MaxDepth {
 			e.frontier.MarkCompleted(frontierURL.ID)
 			continue
+		}
+
+		// Check robots.txt compliance before crawling
+		if e.effectiveConfig.RespectRobotsTxt && e.isDisallowedByRobots(frontierURL.URL) {
+			log.Printf("[Worker %d] Skipping URL disallowed by robots.txt: %s", id, frontierURL.URL)
+			e.frontier.MarkCompleted(frontierURL.ID)
+			continue
+		}
+
+		// Check max pages limit
+		if e.effectiveConfig.MaxPages > 0 && atomic.LoadInt64(&e.crawledCount) >= int64(e.effectiveConfig.MaxPages) {
+			log.Printf("[Worker %d] Max pages limit (%d) reached, stopping", id, e.effectiveConfig.MaxPages)
+			e.frontier.MarkCompleted(frontierURL.ID)
+			return
 		}
 
 		// Crawl the URL
@@ -423,6 +534,8 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	url := frontierURL.URL
 	depth := frontierURL.Depth
 
+	log.Printf("[Worker %d] >>> CRAWLING url=%s depth=%d", workerID, url, depth)
+
 	// Create request
 	req, err := http.NewRequestWithContext(e.ctx, "GET", url, nil)
 	if err != nil {
@@ -431,9 +544,33 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 		return
 	}
 
-	req.Header.Set("User-Agent", e.effectiveConfig.UserAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	// Pick a random User-Agent from the pool (or use the configured one if custom)
+	ua := e.effectiveConfig.UserAgent
+	if ua == "" || strings.Contains(ua, "Chrome/131.0.0.0") {
+		e.jobMu.RLock()
+		ua = userAgents[e.rng.Intn(len(userAgents))]
+		e.jobMu.RUnlock()
+	}
+
+	// Set headers in the exact order Chrome sends them to avoid fingerprinting.
+	// Using req.Header map directly for ordering control.
+	req.Header = http.Header{}
+	req.Header.Set("Host", req.URL.Host)
+	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"`)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	req.Header.Set("User-Agent", ua)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-User", "?1")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Cache-Control", "max-age=0")
+	// Note: Do NOT set Accept-Encoding manually. Go's Transport handles gzip
+	// automatically and decompresses transparently. Setting it manually disables
+	// automatic decompression.
 
 	// Execute request
 	resp, err := e.httpClient.Do(req)
@@ -445,18 +582,48 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	}
 	defer resp.Body.Close()
 
-	// Read response body
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024)) // 10MB limit
-	if err != nil {
-		log.Printf("[Worker %d] Failed to read body for %s: %v", workerID, url, err)
-		_, _ = e.saveCrawledPage(url, resp.StatusCode, resp.Header.Get("Content-Type"), 0, depth, err.Error(), startTime, nil)
-		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
-		return
+	log.Printf("[Worker %d] <<< RESPONSE url=%s status=%d content-encoding=%q content-type=%q content-length=%q",
+		workerID, url, resp.StatusCode,
+		resp.Header.Get("Content-Encoding"),
+		resp.Header.Get("Content-Type"),
+		resp.Header.Get("Content-Length"))
+
+	// Handle Content-Encoding in case the server sends compressed data
+	// even though the Transport didn't request it (safety net)
+	var bodyReader io.Reader = resp.Body
+	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+		log.Printf("[Worker %d] Manually decompressing gzip for %s", workerID, url)
+		gzReader, gzErr := gzip.NewReader(resp.Body)
+		if gzErr == nil {
+			defer gzReader.Close()
+			bodyReader = gzReader
+		} else {
+			log.Printf("[Worker %d] gzip.NewReader failed for %s: %v", workerID, url, gzErr)
+		}
 	}
 
 	contentType := resp.Header.Get("Content-Type")
 
-	// Save crawled page
+	// Content-Type pre-check: skip binary content early to avoid reading large bodies
+	if !isProcessableContentType(contentType) {
+		log.Printf("[Worker %d] Skipping non-processable content type %q for %s", workerID, contentType, url)
+		_, _ = e.saveCrawledPage(url, resp.StatusCode, contentType, 0, depth, "", startTime, nil)
+		e.frontier.MarkCompleted(frontierURL.ID)
+		return
+	}
+
+	// Read response body
+	body, err := io.ReadAll(io.LimitReader(bodyReader, 10*1024*1024)) // 10MB limit
+	if err != nil {
+		log.Printf("[Worker %d] Failed to read body for %s: %v", workerID, url, err)
+		_, _ = e.saveCrawledPage(url, resp.StatusCode, contentType, 0, depth, err.Error(), startTime, nil)
+		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
+		return
+	}
+
+	log.Printf("[Worker %d] BODY url=%s size=%d bytes, first100=%q", workerID, url, len(body), string(body[:min(100, len(body))]))
+
+	// Save crawled page (with title extraction for HTML)
 	page, created := e.saveCrawledPage(url, resp.StatusCode, contentType, int64(len(body)), depth, "", startTime, body)
 	if created {
 		atomic.AddInt64(&e.crawledCount, 1)
@@ -520,6 +687,8 @@ func (e *Engine) processHTML(url string, body []byte, depth int) {
 		return
 	}
 
+	log.Printf("[Engine] ExtractLinksWithAnchors returned %d raw links from %s", len(linksWithAnchors), url)
+
 	// Get base domain for the current job
 	e.jobMu.RLock()
 	baseDomain := ""
@@ -528,21 +697,34 @@ func (e *Engine) processHTML(url string, body []byte, depth int) {
 	}
 	e.jobMu.RUnlock()
 
+	log.Printf("[Engine] Job baseDomain=%q for filtering links", baseDomain)
+
 	// Filter and add links
 	added := 0
+	skippedDomain := 0
+	skippedOther := 0
 	for _, la := range linksWithAnchors {
 		// Only add links from the same base domain
 		linkDomain := e.urlCleaner.ExtractBaseDomain(la.URL)
-		if linkDomain == "" || !strings.Contains(linkDomain, baseDomain) {
+		if linkDomain == "" || linkDomain != baseDomain {
+			skippedDomain++
+			if skippedDomain <= 5 {
+				log.Printf("[Engine] SKIP domain mismatch: linkDomain=%q baseDomain=%q url=%s", linkDomain, baseDomain, la.URL)
+			}
 			continue
 		}
 
 		if err := e.frontier.AddURLWithAnchor(la.URL, depth+1, url, la.AnchorText); err == nil {
 			added++
+		} else {
+			skippedOther++
+			if skippedOther <= 5 {
+				log.Printf("[Engine] SKIP frontier rejected: err=%v url=%s", err, la.URL)
+			}
 		}
 	}
 
-	log.Printf("[Engine] Added %d/%d links from %s", added, len(linksWithAnchors), url)
+	log.Printf("[Engine] Added %d/%d links from %s (skippedDomain=%d, skippedOther=%d)", added, len(linksWithAnchors), url, skippedDomain, skippedOther)
 }
 
 // processSitemap processes sitemap XML
@@ -566,9 +748,19 @@ func (e *Engine) processSitemap(url string, body []byte, depth int) {
 	log.Printf("[Engine] Parsed sitemap %s: %d URLs, %d nested sitemaps", url, len(urls), len(sitemaps))
 }
 
-// processRobots processes robots.txt
+// processRobots processes robots.txt and stores rules for compliance
 func (e *Engine) processRobots(url string, body []byte, depth int) {
 	result := e.robotsParser.ParseRobots(url, body)
+
+	// Store robots rules for this domain
+	domain := e.urlCleaner.ExtractDomain(url)
+	if domain != "" {
+		e.robotRulesMu.Lock()
+		e.robotRules[domain] = result
+		e.robotRulesMu.Unlock()
+		log.Printf("[Engine] Stored robots.txt rules for %s: %d disallow, %d allow paths",
+			domain, len(result.DisallowedPaths), len(result.AllowedPaths))
+	}
 
 	// Add sitemaps from robots.txt
 	for _, sitemap := range result.Sitemaps {
@@ -576,6 +768,106 @@ func (e *Engine) processRobots(url string, body []byte, depth int) {
 	}
 
 	log.Printf("[Engine] Parsed robots.txt %s: %d sitemaps", url, len(result.Sitemaps))
+}
+
+// isDisallowedByRobots checks whether a URL is disallowed by the stored robots.txt rules.
+// Implements path-prefix matching: an Allow directive takes precedence if its path is
+// longer (more specific) than the matching Disallow directive.
+func (e *Engine) isDisallowedByRobots(rawURL string) bool {
+	domain := e.urlCleaner.ExtractDomain(rawURL)
+	if domain == "" {
+		return false
+	}
+
+	e.robotRulesMu.RLock()
+	rules, exists := e.robotRules[domain]
+	e.robotRulesMu.RUnlock()
+
+	if !exists || rules == nil {
+		return false // No rules loaded yet, allow by default
+	}
+
+	// Extract path from URL
+	urlPath := extractPathFromURL(rawURL)
+	if urlPath == "" {
+		urlPath = "/"
+	}
+
+	// Find the longest matching disallow path
+	longestDisallow := ""
+	for _, path := range rules.DisallowedPaths {
+		if path == "" {
+			continue
+		}
+		if strings.HasPrefix(urlPath, path) && len(path) > len(longestDisallow) {
+			longestDisallow = path
+		}
+	}
+
+	if longestDisallow == "" {
+		return false // Not disallowed
+	}
+
+	// Check if there's a more specific Allow that overrides
+	for _, path := range rules.AllowedPaths {
+		if path == "" {
+			continue
+		}
+		if strings.HasPrefix(urlPath, path) && len(path) > len(longestDisallow) {
+			return false // Allow overrides
+		}
+	}
+
+	return true // Disallowed
+}
+
+// isProcessableContentType checks if a Content-Type header indicates content
+// worth reading and processing (HTML, XML, plain text, JSON).
+func isProcessableContentType(contentType string) bool {
+	if contentType == "" {
+		return true // Unknown content type, try to process
+	}
+	ct := strings.ToLower(contentType)
+	processable := []string{
+		"text/html",
+		"application/xhtml+xml",
+		"application/xml",
+		"text/xml",
+		"text/plain",
+		"application/json",
+		"application/rss+xml",
+		"application/atom+xml",
+	}
+	for _, p := range processable {
+		if strings.Contains(ct, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractPathFromURL extracts just the path component from a URL string
+func extractPathFromURL(rawURL string) string {
+	// Find the path after the host
+	idx := strings.Index(rawURL, "://")
+	if idx == -1 {
+		return "/"
+	}
+	rest := rawURL[idx+3:]
+	slashIdx := strings.Index(rest, "/")
+	if slashIdx == -1 {
+		return "/"
+	}
+	path := rest[slashIdx:]
+	// Remove query string
+	if qIdx := strings.Index(path, "?"); qIdx != -1 {
+		path = path[:qIdx]
+	}
+	// Remove fragment
+	if fIdx := strings.Index(path, "#"); fIdx != -1 {
+		path = path[:fIdx]
+	}
+	return path
 }
 
 // saveCrawledPage saves a crawled page to database
@@ -626,6 +918,13 @@ func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string,
 		CrawledAt:     time.Now(),
 		ResponseTime:  time.Since(startTime).Milliseconds(),
 		ErrorMessage:  errorMsg,
+	}
+
+	// Extract title from HTML content
+	if len(body) > 0 && strings.Contains(contentType, "text/html") {
+		if title := e.linkExtractor.ExtractTitle(body); title != "" {
+			page.Title = title
+		}
 	}
 
 	result := e.db.Clauses(clause.OnConflict{

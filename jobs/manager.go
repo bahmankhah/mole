@@ -87,7 +87,13 @@ func (m *Manager) CreateJobWithSettings(targetURL string, maxDepth int, settings
 		if err != nil {
 			return nil, fmt.Errorf("invalid URL: %v", err)
 		}
-		domain = parsed.Host
+		// Store the base domain (e.g. "bayut.com" not "www.bayut.com")
+		// so that link filtering works correctly across subdomains
+		urlCleaner := modules.NewURLCleaner()
+		domain = urlCleaner.ExtractBaseDomain(parsed.Scheme + "://" + parsed.Host)
+		if domain == "" {
+			domain = parsed.Host // fallback
+		}
 		fullURL = targetURL
 	} else {
 		// It's just a domain
@@ -708,6 +714,7 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 	timeout := int(cfg.RequestTimeout.Seconds())
 	delayMs := int(cfg.PolitenessDelay.Milliseconds())
 	maxDepth := cfg.MaxDepth
+	maxPages := cfg.MaxPages
 	userAgent := cfg.UserAgent
 	maxRetries := cfg.MaxRetries
 
@@ -716,6 +723,7 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 		RequestTimeoutSec:     &timeout,
 		PolitenessDelayMs:     &delayMs,
 		MaxDepth:              &maxDepth,
+		MaxPages:              &maxPages,
 		UserAgent:             &userAgent,
 		MaxRetries:            &maxRetries,
 		SkipExtensions:        cfg.SkipExtensions,

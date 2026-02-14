@@ -211,19 +211,23 @@ func (f *DBFrontier) addURLInternal(rawURL string, depth int, parentURL string, 
 	// Generate URL hash
 	urlHash := hashURL(cleanedURL)
 
-	// Check if URL was already crawled IN THIS JOB (crawled_pages contains completed URLs)
+	// Check if this URL was already crawled in this job.
+	// Completed URLs are deleted from the frontier and recorded in crawled_pages,
+	// so the frontier's unique constraint alone is not enough to prevent re-crawling.
 	var crawledCount int64
 	f.db.Model(&models.CrawledPage{}).
 		Where("crawl_job_id = ? AND url_hash = ?", crawlJobID, urlHash).
 		Count(&crawledCount)
 	if crawledCount > 0 {
-		return nil // Already crawled in this job, skip
+		return nil // Already crawled, skip silently
 	}
 
-	// Use upsert to avoid duplicates in frontier (per job)
+	// Use upsert to avoid duplicates in frontier (per job).
+	// The composite unique index (crawl_job_id, url_hash) prevents duplicates,
+	// so we rely on ON CONFLICT DO NOTHING instead of a separate SELECT check.
 	frontierURL := models.FrontierURL{
 		CrawlJobID:    crawlJobID,
-		URL:           rawURL,
+		URL:           cleanedURL,
 		URLHash:       urlHash,
 		NormalizedURL: cleanedURL,
 		Depth:         depth,
@@ -239,7 +243,16 @@ func (f *DBFrontier) addURLInternal(rawURL string, depth int, parentURL string, 
 		DoNothing: true,
 	}).Create(&frontierURL)
 
-	return result.Error
+	if result.Error != nil {
+		log.Printf("[%s] DB error adding URL %s: %v", f.Name(), cleanedURL, result.Error)
+		return result.Error
+	}
+
+	if result.RowsAffected > 0 {
+		log.Printf("[%s] ADDED url=%s hash=%s depth=%d", f.Name(), cleanedURL, urlHash[:12], depth)
+	}
+
+	return nil
 }
 
 // AddURLs adds multiple URLs to the frontier
@@ -279,13 +292,36 @@ func (f *DBFrontier) GetNextURL() (*models.FrontierURL, error) {
 		return nil, errors.New("no pending URLs in frontier")
 	}
 
-	// Teleport: still pick a random pending URL (frontier only contains pending URLs)
+	// Use a more efficient random selection than OFFSET which is O(n) in MySQL.
+	// Strategy: get the MIN and MAX ids of pending URLs, pick a random id in that range,
+	// then find the first pending URL with id >= that random value.
+	var minID, maxID uint
+	f.db.Model(&models.FrontierURL{}).
+		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
+		Select("MIN(id)").Scan(&minID)
+	f.db.Model(&models.FrontierURL{}).
+		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
+		Select("MAX(id)").Scan(&maxID)
+
+	if maxID == 0 {
+		return nil, errors.New("no pending URLs in frontier")
+	}
+
+	// Pick a random ID in the range and find the nearest pending URL
 	_ = shouldTeleport
-	offset := f.rng.Intn(int(pendingCount))
-	result = f.db.Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
-		Offset(offset).
+	randomID := minID + uint(f.rng.Int63n(int64(maxID-minID+1)))
+	result = f.db.Where("crawl_job_id = ? AND status = ? AND id >= ?", crawlJobID, models.FrontierStatusPending, randomID).
+		Order("id ASC").
 		Limit(1).
 		First(&frontierURL)
+
+	// If no result (gap at the end), wrap around
+	if result.Error != nil {
+		result = f.db.Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
+			Order("id ASC").
+			Limit(1).
+			First(&frontierURL)
+	}
 
 	if result.Error != nil {
 		return nil, result.Error
@@ -422,30 +458,66 @@ func hashURL(url string) string {
 // AddSeedURLs adds initial seed URLs for a crawl job.
 // Seed URLs bypass include/exclude URL pattern filters since they are explicitly
 // provided by the user as the starting point for the crawl.
+// Extra discovery seeds (robots.txt, sitemaps) are only added when the target
+// URL points to the domain root (e.g. https://example.com/ ).
 func (f *DBFrontier) AddSeedURLs(targetURL string) error {
+	// Normalize the target URL first
+	normalized, err := f.urlCleaner.ProcessURL(targetURL)
+	if err != nil {
+		normalized = targetURL // fallback to raw if normalization fails
+	}
+
 	// Add the target URL itself (bypass filters)
-	if err := f.addSeedURL(targetURL, 0, ""); err != nil {
+	if err := f.addSeedURL(normalized, 0, ""); err != nil {
 		log.Printf("[%s] Warning: failed to add target URL: %v", f.Name(), err)
 	}
 
-	// Add robots.txt (bypass filters)
-	robotsURL := targetURL + "/robots.txt"
-	if err := f.addSeedURL(robotsURL, 0, targetURL); err != nil {
-		log.Printf("[%s] Warning: failed to add robots.txt: %v", f.Name(), err)
+	// Only add discovery seeds (robots.txt, sitemaps) if the target is a root URL.
+	// A root URL has no path or only "/".
+	if isRootURL(normalized) {
+		// Derive the origin (scheme + host) for building seed URLs
+		origin := extractOrigin(normalized)
+
+		robotsSeed := origin + "/robots.txt"
+		if err := f.addSeedURL(robotsSeed, 0, normalized); err != nil {
+			log.Printf("[%s] Warning: failed to add robots.txt: %v", f.Name(), err)
+		}
+
+		sitemapSeed := origin + "/sitemap.xml"
+		if err := f.addSeedURL(sitemapSeed, 0, normalized); err != nil {
+			log.Printf("[%s] Warning: failed to add sitemap.xml: %v", f.Name(), err)
+		}
+
+		sitemapIndexSeed := origin + "/sitemap_index.xml"
+		if err := f.addSeedURL(sitemapIndexSeed, 0, normalized); err != nil {
+			log.Printf("[%s] Warning: failed to add sitemap_index.xml: %v", f.Name(), err)
+		}
+
+		log.Printf("[%s] Added seed URLs for %s (root domain, discovery seeds included)", f.Name(), normalized)
+	} else {
+		log.Printf("[%s] Added seed URL %s (non-root path, skipping discovery seeds)", f.Name(), normalized)
 	}
 
-	// Add sitemap.xml (bypass filters)
-	sitemapURL := targetURL + "/sitemap.xml"
-	if err := f.addSeedURL(sitemapURL, 0, targetURL); err != nil {
-		log.Printf("[%s] Warning: failed to add sitemap.xml: %v", f.Name(), err)
-	}
-
-	// Add sitemap_index.xml (bypass filters)
-	sitemapIndexURL := targetURL + "/sitemap_index.xml"
-	if err := f.addSeedURL(sitemapIndexURL, 0, targetURL); err != nil {
-		log.Printf("[%s] Warning: failed to add sitemap_index.xml: %v", f.Name(), err)
-	}
-
-	log.Printf("[%s] Added seed URLs for %s (filters bypassed for seeds)", f.Name(), targetURL)
 	return nil
+}
+
+// isRootURL returns true if the URL points to the domain root with no meaningful path.
+// e.g. https://example.com, https://example.com/, https://sub.example.com/ → true
+// e.g. https://example.com/page, https://example.com/path/to → false
+func isRootURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	p := parsed.Path
+	return p == "" || p == "/"
+}
+
+// extractOrigin returns scheme://host from a URL.
+func extractOrigin(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	return parsed.Scheme + "://" + parsed.Host
 }

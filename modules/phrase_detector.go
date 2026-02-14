@@ -164,9 +164,11 @@ func (p *SimplePhraseDetector) GetPhrases() []string {
 	return phrases
 }
 
+// Pre-compiled regex for whitespace normalization
+var contentWhitespaceRegex = regexp.MustCompile(`[\s]+`)
+
 // normalizeContent prepares content for phrase detection
 func normalizeContent(content string) string {
 	// Remove excessive whitespace but preserve structure
-	space := regexp.MustCompile(`[\s]+`)
-	return space.ReplaceAllString(content, " ")
+	return contentWhitespaceRegex.ReplaceAllString(content, " ")
 }
