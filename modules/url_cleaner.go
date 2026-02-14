@@ -27,10 +27,32 @@ type URLCleaner struct {
 	sortQueryParams bool
 }
 
+// AddTrackingParams appends extra tracking parameters to the strip list.
+// This is used for per-job custom tracking params.
+func (u *URLCleaner) AddTrackingParams(params []string) {
+	if len(params) == 0 {
+		return
+	}
+	// Deduplicate
+	existing := make(map[string]bool, len(u.trackingParams))
+	for _, p := range u.trackingParams {
+		existing[p] = true
+	}
+	for _, p := range params {
+		p = strings.TrimSpace(p)
+		if p != "" && !existing[p] {
+			u.trackingParams = append(u.trackingParams, p)
+			existing[p] = true
+		}
+	}
+	log.Printf("[%s] Tracking params expanded to %d entries", u.Name(), len(u.trackingParams))
+}
+
 // NewURLCleaner creates a new URL cleaner with default settings
 func NewURLCleaner() *URLCleaner {
 	return &URLCleaner{
 		trackingParams: []string{
+			// Standard UTM & ad-network tracking
 			"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
 			"fbclid", "gclid", "gclsrc", "dclid", "msclkid", "zanpid", "igshid",
 			"ref", "ref_src", "ref_url", "source", "src", "mc_cid", "mc_eid",
@@ -38,6 +60,10 @@ func NewURLCleaner() *URLCleaner {
 			"hsa_ad", "hsa_src", "hsa_tgt", "hsa_kw", "hsa_mt", "hsa_net",
 			"hsa_ver", "trk", "trkCampaign", "li_fat_id", "s_kwcid",
 			"redirect_log_mongo_id", "redirect_mongo_id", "sb_referer_host",
+			// Common site-specific tracking & redirect params
+			"_ref", "_t", "amp", "return_url", "redirect_url",
+			"redirect_uri", "callback_url", "after", "next", "back",
+			"_pos", "_ss", "_v", "unt",
 		},
 		removeFragments:     true,
 		forceLowercase:      true,

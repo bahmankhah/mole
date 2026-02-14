@@ -246,6 +246,10 @@ func (e *Engine) Start(job *models.CrawlJob) error {
 	// Apply URL filters from job settings
 	if job.Settings != nil {
 		e.frontier.SetURLFilters(job.Settings.URLIncludePatterns, job.Settings.URLExcludePatterns)
+		// Apply any extra tracking params to the URL cleaner
+		if len(job.Settings.ExtraTrackingParams) > 0 {
+			e.urlCleaner.AddTrackingParams(job.Settings.ExtraTrackingParams)
+		}
 	} else {
 		e.frontier.SetURLFilters(nil, nil)
 	}
@@ -333,6 +337,9 @@ func (e *Engine) mergeJobSettings(s *models.JobSettings) {
 	if len(s.SkipExtensions) > 0 {
 		e.effectiveConfig.SkipExtensions = s.SkipExtensions
 	}
+	if s.SkipContentDuplicates != nil {
+		e.effectiveConfig.SkipContentDuplicates = *s.SkipContentDuplicates
+	}
 }
 
 // randomizedDelay returns a randomized delay based on the politeness delay.
@@ -411,6 +418,11 @@ func (e *Engine) Pause() {
 // Resume resumes the crawler
 func (e *Engine) Resume() {
 	if atomic.CompareAndSwapInt32(&e.state, int32(StatePaused), int32(StateRunning)) {
+		// Reset any URLs stuck in "processing" state back to pending.
+		// Workers that had grabbed URLs before the pause may have already
+		// finished, but others could still be in flight.
+		e.frontier.ResetProcessingURLs()
+
 		e.jobMu.Lock()
 		if e.currentJob != nil {
 			e.currentJob.Status = models.JobStatusRunning
@@ -431,9 +443,11 @@ func (e *Engine) watchForCompletion() {
 	// Wait for all workers to finish
 	e.wg.Wait()
 
+	currentState := atomic.LoadInt32(&e.state)
+
 	// Check if we were stopped manually (state would be StateStopping or StateIdle)
 	// If state is still Running, workers exited naturally due to empty frontier
-	if atomic.LoadInt32(&e.state) == int32(StateRunning) {
+	if currentState == int32(StateRunning) {
 		log.Printf("[Engine] All workers finished, marking job as completed")
 
 		// Cancel the context to stop the monitor goroutine
@@ -475,8 +489,10 @@ func (e *Engine) worker(id int) {
 		default:
 		}
 
-		// Check if paused
+		// Check if paused — reset emptyCount so workers don't exit
+		// while the crawler is intentionally idle.
 		if atomic.LoadInt32(&e.state) == int32(StatePaused) {
+			emptyCount = 0
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
@@ -890,7 +906,7 @@ func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string,
 	e.jobMu.RUnlock()
 
 	// If we have a doc hash, check if this exact content already exists for this job
-	if docHash != "" && crawlJobID != "" {
+	if docHash != "" && crawlJobID != "" && e.effectiveConfig.SkipContentDuplicates {
 		var dupCount int64
 		e.db.Model(&models.CrawledPage{}).
 			Where("crawl_job_id = ? AND doc_hash = ? AND is_archived = ?", crawlJobID, docHash, false).

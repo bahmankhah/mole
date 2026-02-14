@@ -50,9 +50,11 @@ type JobSettings struct {
 	UserAgent             *string  `json:"user_agent,omitempty"`
 	MaxRetries            *int     `json:"max_retries,omitempty"`
 	RespectRobotsTxt      *bool    `json:"respect_robots_txt,omitempty"`
+	SkipContentDuplicates *bool    `json:"skip_content_duplicates,omitempty"` // Skip pages whose body hash already seen
 	SkipExtensions        []string `json:"skip_extensions,omitempty"`
-	URLIncludePatterns    []string `json:"url_include_patterns,omitempty"` // Regex; if set, only matching URLs are crawled
-	URLExcludePatterns    []string `json:"url_exclude_patterns,omitempty"` // Regex; skipped if include is set
+	URLIncludePatterns    []string `json:"url_include_patterns,omitempty"`  // Regex; if set, only matching URLs are crawled
+	URLExcludePatterns    []string `json:"url_exclude_patterns,omitempty"`  // Regex; skipped if include is set
+	ExtraTrackingParams   []string `json:"extra_tracking_params,omitempty"` // Extra query params to strip from URLs
 }
 
 // Value implements driver.Valuer for GORM JSON storage

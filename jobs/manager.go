@@ -688,6 +688,9 @@ func (m *Manager) DuplicateJob(jobID string) (*models.CrawlJob, error) {
 		if s.URLExcludePatterns != nil {
 			s.URLExcludePatterns = append([]string(nil), src.Settings.URLExcludePatterns...)
 		}
+		if s.ExtraTrackingParams != nil {
+			s.ExtraTrackingParams = append([]string(nil), src.Settings.ExtraTrackingParams...)
+		}
 		settingsCopy = &s
 	}
 
@@ -717,6 +720,7 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 	maxPages := cfg.MaxPages
 	userAgent := cfg.UserAgent
 	maxRetries := cfg.MaxRetries
+	skipContentDup := cfg.SkipContentDuplicates
 
 	return &models.JobSettings{
 		MaxConcurrentRequests: &maxConcurrent,
@@ -726,6 +730,7 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 		MaxPages:              &maxPages,
 		UserAgent:             &userAgent,
 		MaxRetries:            &maxRetries,
+		SkipContentDuplicates: &skipContentDup,
 		SkipExtensions:        cfg.SkipExtensions,
 	}
 }

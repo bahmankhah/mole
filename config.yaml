@@ -20,6 +20,7 @@ crawler:
   user_agent: "ResolveCrawler/1.0 (+https://resolver.local)"
   max_retries: 3
   respect_robots_txt: false
+  skip_content_duplicates: true
   skip_extensions:
     # Images
     - .jpg

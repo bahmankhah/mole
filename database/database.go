@@ -63,22 +63,37 @@ func (d *Database) AutoMigrate() error {
 	}
 
 	// Create additional composite index for search performance (ignore if exists)
-	d.DB.Exec("CREATE INDEX idx_phrase_match_phrase_url ON phrase_matches(phrase(255), url(255))")
+	if !d.indexExists("phrase_matches", "idx_phrase_match_phrase_url") {
+		d.DB.Exec("CREATE INDEX idx_phrase_match_phrase_url ON phrase_matches(phrase(255), url(255))")
+	}
 
 	// Create composite index for doc_hash + crawl_job_id deduplication (ignore if exists)
-	d.DB.Exec("CREATE INDEX idx_doc_crawl_job ON crawled_pages(doc_hash, crawl_job_id)")
+	if !d.indexExists("crawled_pages", "idx_doc_crawl_job") {
+		d.DB.Exec("CREATE INDEX idx_doc_crawl_job ON crawled_pages(doc_hash, crawl_job_id)")
+	}
 
 	// Migration: drop the old global unique index on url_hash if it exists,
 	// since it's now a composite unique index (crawl_job_id, url_hash).
-	d.DB.Exec("DROP INDEX idx_crawled_pages_url_hash ON crawled_pages")
+	if d.indexExists("crawled_pages", "idx_crawled_pages_url_hash") {
+		d.DB.Exec("DROP INDEX idx_crawled_pages_url_hash ON crawled_pages")
+	}
 
 	return nil
 }
 
+// indexExists checks whether an index exists on a given table in the current database.
+func (d *Database) indexExists(table, indexName string) bool {
+	var count int64
+	d.DB.Raw(
+		"SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?",
+		table, indexName,
+	).Scan(&count)
+	return count > 0
+}
+
 // SeedDefaultPhrases inserts default search phrases if not exist
 func (d *Database) SeedDefaultPhrases() error {
-	defaultPhrases := []string{
-	}
+	defaultPhrases := []string{}
 
 	for _, phrase := range defaultPhrases {
 		var existing models.SearchPhrase

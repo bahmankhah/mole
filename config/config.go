@@ -36,6 +36,7 @@ type CrawlerConfig struct {
 	UserAgent             string        `yaml:"user_agent"`
 	MaxRetries            int           `yaml:"max_retries"`
 	RespectRobotsTxt      bool          `yaml:"respect_robots_txt"`
+	SkipContentDuplicates bool          `yaml:"skip_content_duplicates"` // Skip pages with same body hash
 	SkipExtensions        []string      `yaml:"skip_extensions"`
 }
 
@@ -139,6 +140,7 @@ func DefaultConfig() *Config {
 			UserAgent:             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 			MaxRetries:            3,
 			RespectRobotsTxt:      true,
+			SkipContentDuplicates: true,
 			SkipExtensions:        getDefaultSkipExtensions(),
 		},
 		Server: ServerConfig{

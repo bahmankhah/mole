@@ -585,8 +585,9 @@ func (h *Handler) UpdateJobSettings(c *gin.Context) {
 	if settings.MaxConcurrentRequests == nil && settings.RequestTimeoutSec == nil &&
 		settings.PolitenessDelayMs == nil && settings.MaxDepth == nil &&
 		settings.UserAgent == nil && settings.MaxRetries == nil &&
+		settings.SkipContentDuplicates == nil &&
 		len(settings.SkipExtensions) == 0 && len(settings.URLIncludePatterns) == 0 &&
-		len(settings.URLExcludePatterns) == 0 {
+		len(settings.URLExcludePatterns) == 0 && len(settings.ExtraTrackingParams) == 0 {
 		if err := h.jobManager.UpdateJobSettings(jobID, nil); err != nil {
 			c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
 			return
