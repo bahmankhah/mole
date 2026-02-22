@@ -276,6 +276,47 @@
                             </div>
                         </div>
 
+                        <div class="border border-gray-200 rounded-lg mb-6">
+                            <div class="bg-gray-50 px-4 py-3 border-b border-gray-200 rounded-t-lg">
+                                <h4 class="text-sm font-semibold text-gray-700">Headless Browser (JS Rendering)</h4>
+                            </div>
+                            <div class="p-4 space-y-4">
+                                <div class="bg-blue-50 border border-blue-200 rounded-md p-3">
+                                    <p class="text-xs text-blue-800"><strong>Note:</strong> When enabled, pages are fetched using a headless Chromium browser via Playwright. This is needed for JavaScript-rendered SPAs (e.g. IranDoc). Slower than plain HTTP but captures dynamically loaded content.</p>
+                                </div>
+                                <div class="flex items-start space-x-3">
+                                    <input type="checkbox" id="set-use-headless" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <div>
+                                        <label for="set-use-headless" class="text-sm font-medium text-gray-700">Use Headless Browser</label>
+                                        <p class="text-xs text-gray-400 mt-0.5">Fetch pages using headless Chromium instead of plain HTTP requests. Default: <span class="def-val" data-key="use_headless_browser"></span></p>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Wait Selector <span class="text-gray-400 text-xs">(CSS selector)</span></label>
+                                    <input type="text" id="set-headless-selector" placeholder="#content, .results-list, [data-loaded]" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono text-sm disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <p class="text-xs text-gray-400 mt-1">CSS selector to wait for before capturing the page HTML. Leave empty to wait for network idle only. Default: <span class="def-val" data-key="headless_wait_selector"></span></p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="border border-gray-200 rounded-lg mb-6">
+                            <div class="bg-gray-50 px-4 py-3 border-b border-gray-200 rounded-t-lg">
+                                <h4 class="text-sm font-semibold text-gray-700">Semantic Search (AI Embeddings)</h4>
+                            </div>
+                            <div class="p-4 space-y-4">
+                                <div class="bg-purple-50 border border-purple-200 rounded-md p-3">
+                                    <p class="text-xs text-purple-800"><strong>Note:</strong> When enabled, each crawled page is embedded using a multilingual sentence-transformer model (via Python + FAISS). This enables meaning-based semantic search across all crawled content. Adds overhead per page but allows searching by concept instead of exact keywords.</p>
+                                </div>
+                                <div class="flex items-start space-x-3">
+                                    <input type="checkbox" id="set-enable-semantic" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <div>
+                                        <label for="set-enable-semantic" class="text-sm font-medium text-gray-700">Enable Semantic Search</label>
+                                        <p class="text-xs text-gray-400 mt-0.5">Generate vector embeddings for crawled pages to enable AI-powered semantic search. Default: <span class="def-val" data-key="enable_semantic_search"></span></p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
                         {{if eq .job.Status "pending"}}
                         <div class="flex items-center justify-between">
                             <div class="flex items-center space-x-3">
@@ -317,6 +358,13 @@
             var dupCb=document.getElementById('set-skip-content-dup');
             if(s.skip_content_duplicates!=null&&s.skip_content_duplicates!=undefined){dupCb.checked=s.skip_content_duplicates;dupCb.indeterminate=false;}
             else{dupCb.checked=defaultSettings.skip_content_duplicates||false;dupCb.indeterminate=true;}
+            var headlessCb=document.getElementById('set-use-headless');
+            if(s.use_headless_browser!=null&&s.use_headless_browser!=undefined){headlessCb.checked=s.use_headless_browser;headlessCb.indeterminate=false;}
+            else{headlessCb.checked=defaultSettings.use_headless_browser||false;headlessCb.indeterminate=true;}
+            setVal('set-headless-selector',s.headless_wait_selector);
+            var semCb=document.getElementById('set-enable-semantic');
+            if(s.enable_semantic_search!=null&&s.enable_semantic_search!=undefined){semCb.checked=s.enable_semantic_search;semCb.indeterminate=false;}
+            else{semCb.checked=defaultSettings.enable_semantic_search||false;semCb.indeterminate=true;}
         }
         function setVal(id,v){var e=document.getElementById(id);if(e)e.value=(v!=null&&v!=undefined)?v:'';}
         function intVal(id){var v=document.getElementById(id).value.trim();return v===''?undefined:parseInt(v,10);}
@@ -337,6 +385,11 @@
             v=linesVal('set-extra-tracking');if(v!==undefined)p.extra_tracking_params=v;
             var dupCb=document.getElementById('set-skip-content-dup');
             if(!dupCb.indeterminate) p.skip_content_duplicates=dupCb.checked;
+            var headlessCb=document.getElementById('set-use-headless');
+            if(!headlessCb.indeterminate) p.use_headless_browser=headlessCb.checked;
+            v=strVal('set-headless-selector');if(v!==undefined)p.headless_wait_selector=v;
+            var semCb=document.getElementById('set-enable-semantic');
+            if(!semCb.indeterminate) p.enable_semantic_search=semCb.checked;
             return p;
         }
         function showAlert(msg,ok){
@@ -364,6 +417,13 @@
             var dupCb=document.getElementById('set-skip-content-dup');
             dupCb.checked=defaultSettings.skip_content_duplicates||false;
             dupCb.indeterminate=true;
+            var headlessCb=document.getElementById('set-use-headless');
+            headlessCb.checked=defaultSettings.use_headless_browser||false;
+            headlessCb.indeterminate=true;
+            document.getElementById('set-headless-selector').value='';
+            var semCb=document.getElementById('set-enable-semantic');
+            semCb.checked=defaultSettings.enable_semantic_search||false;
+            semCb.indeterminate=true;
         }
         async function resetToDefaultsAndSave(){
             if(!confirm('Reset all settings to global defaults? This will remove any custom configuration for this job.'))return;

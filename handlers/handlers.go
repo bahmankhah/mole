@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"html/template"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -586,6 +587,8 @@ func (h *Handler) UpdateJobSettings(c *gin.Context) {
 		settings.PolitenessDelayMs == nil && settings.MaxDepth == nil &&
 		settings.UserAgent == nil && settings.MaxRetries == nil &&
 		settings.SkipContentDuplicates == nil &&
+		settings.UseHeadlessBrowser == nil && settings.HeadlessWaitSelector == nil &&
+		settings.EnableSemanticSearch == nil &&
 		len(settings.SkipExtensions) == 0 && len(settings.URLIncludePatterns) == 0 &&
 		len(settings.URLExcludePatterns) == 0 && len(settings.ExtraTrackingParams) == 0 {
 		if err := h.jobManager.UpdateJobSettings(jobID, nil); err != nil {
@@ -613,6 +616,7 @@ func (h *Handler) GetDefaultSettings(c *gin.Context) {
 // SearchPage renders the search page
 func (h *Handler) SearchPage(c *gin.Context) {
 	query := c.Query("q")
+	mode := c.DefaultQuery("mode", "keyword") // "keyword" or "semantic"
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	if page < 1 {
 		page = 1
@@ -621,15 +625,29 @@ func (h *Handler) SearchPage(c *gin.Context) {
 	offset := (page - 1) * limit
 
 	var results []models.SearchResult
+	var semanticResults []models.SemanticSearchResult
 	var total int64
 	phraseExists := false
 
+	semanticStats := h.jobManager.GetSemanticSearchStats()
+
 	if query != "" {
-		var err error
-		results, total, err = h.jobManager.SearchPhraseMatches(query, limit, offset)
-		if err != nil {
-			results = nil
-			total = 0
+		if mode == "semantic" {
+			// Semantic vector search
+			var err error
+			semanticResults, err = h.jobManager.SemanticSearch(query, limit)
+			if err != nil {
+				semanticResults = nil
+			}
+			total = int64(len(semanticResults))
+		} else {
+			// Keyword search (existing n-gram matching)
+			var err error
+			results, total, err = h.jobManager.SearchPhraseMatches(query, limit, offset)
+			if err != nil {
+				results = nil
+				total = 0
+			}
 		}
 
 		// Check if the search query already exists as a phrase
@@ -648,24 +666,46 @@ func (h *Handler) SearchPage(c *gin.Context) {
 	}
 
 	c.HTML(http.StatusOK, "search.html", gin.H{
-		"query":        query,
-		"results":      results,
-		"total":        total,
-		"page":         page,
-		"totalPages":   totalPages,
-		"limit":        limit,
-		"phraseExists": phraseExists,
+		"query":           query,
+		"mode":            mode,
+		"results":         results,
+		"semanticResults": semanticResults,
+		"total":           total,
+		"page":            page,
+		"totalPages":      totalPages,
+		"limit":           limit,
+		"phraseExists":    phraseExists,
+		"semanticStats":   semanticStats,
 	})
 }
 
 // SearchAPI handles API search requests
 func (h *Handler) SearchAPI(c *gin.Context) {
 	query := c.Query("q")
+	mode := c.DefaultQuery("mode", "keyword")
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
 
 	if query == "" {
 		c.JSON(http.StatusBadRequest, Response{Success: false, Error: "query parameter 'q' is required"})
+		return
+	}
+
+	if mode == "semantic" {
+		results, err := h.jobManager.SemanticSearch(query, limit)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, Response{Success: false, Error: err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, Response{
+			Success: true,
+			Data: gin.H{
+				"results": results,
+				"total":   len(results),
+				"query":   query,
+				"mode":    "semantic",
+			},
+		})
 		return
 	}
 
@@ -683,6 +723,23 @@ func (h *Handler) SearchAPI(c *gin.Context) {
 			"limit":   limit,
 			"offset":  offset,
 			"query":   query,
+			"mode":    "keyword",
 		},
 	})
+}
+
+// RebuildSemanticIndex triggers a rebuild of the FAISS semantic search index
+func (h *Handler) RebuildSemanticIndex(c *gin.Context) {
+	go func() {
+		if err := h.jobManager.RebuildSemanticIndex(); err != nil {
+			log.Printf("[Handler] Failed to rebuild semantic index: %v", err)
+		}
+	}()
+	c.JSON(http.StatusOK, Response{Success: true, Message: "FAISS index rebuild started"})
+}
+
+// GetSemanticSearchStats returns semantic search stats
+func (h *Handler) GetSemanticSearchStats(c *gin.Context) {
+	stats := h.jobManager.GetSemanticSearchStats()
+	c.JSON(http.StatusOK, Response{Success: true, Data: stats})
 }

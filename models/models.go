@@ -55,6 +55,9 @@ type JobSettings struct {
 	URLIncludePatterns    []string `json:"url_include_patterns,omitempty"`  // Regex; if set, only matching URLs are crawled
 	URLExcludePatterns    []string `json:"url_exclude_patterns,omitempty"`  // Regex; skipped if include is set
 	ExtraTrackingParams   []string `json:"extra_tracking_params,omitempty"` // Extra query params to strip from URLs
+	UseHeadlessBrowser    *bool    `json:"use_headless_browser,omitempty"`  // Use headless browser for JS-rendered pages
+	HeadlessWaitSelector  *string  `json:"headless_wait_selector,omitempty"` // CSS selector to wait for before capturing
+	EnableSemanticSearch  *bool    `json:"enable_semantic_search,omitempty"` // Enable semantic vector search for this job
 }
 
 // Value implements driver.Valuer for GORM JSON storage
@@ -241,6 +244,32 @@ type PhraseWithStats struct {
 	CreatedAt  string `json:"created_at"`
 	MatchCount int64  `json:"match_count"`
 	URLCount   int64  `json:"url_count"`
+}
+
+// PageEmbedding stores the vector embedding for a crawled page
+type PageEmbedding struct {
+	ID         uint        `gorm:"primaryKey" json:"id"`
+	CrawlJobID string      `gorm:"type:varchar(36);index;not null" json:"crawl_job_id"`
+	PageID     uint        `gorm:"uniqueIndex;not null" json:"page_id"`
+	URL        string      `gorm:"type:varchar(2048);not null" json:"url"`
+	Title      string      `gorm:"type:varchar(512)" json:"title"`
+	Embedding  []byte      `gorm:"type:mediumblob" json:"-"` // float32 array serialized as bytes
+	TextHash   string      `gorm:"type:varchar(64)" json:"text_hash"` // to avoid re-embedding identical content
+	CreatedAt  time.Time   `json:"created_at"`
+	CrawlJob   CrawlJob    `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
+	Page       CrawledPage `gorm:"foreignKey:PageID;constraint:OnDelete:CASCADE" json:"-"`
+}
+
+// SemanticSearchResult represents a result from vector similarity search
+type SemanticSearchResult struct {
+	PageID       uint    `json:"page_id"`
+	URL          string  `json:"url"`
+	Title        string  `json:"title"`
+	Score        float64 `json:"score"`         // cosine similarity 0-1
+	ScorePercent float64 `json:"score_percent"` // Score * 100 for display
+	CrawlJobID   string  `json:"crawl_job_id"`
+	Domain       string  `json:"domain"`
+	Snippet      string  `json:"snippet,omitempty"`
 }
 
 // SearchResult represents a grouped search result for the search page

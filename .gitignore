@@ -1,0 +1,18 @@
+# Build output
+main
+
+# Python virtual environment
+scripts/.venv/
+
+# FAISS index data
+data/faiss/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

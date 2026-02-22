@@ -150,6 +150,10 @@ func main() {
 		// Search
 		api.GET("/search", handler.SearchAPI)
 
+		// Semantic search
+		api.POST("/semantic/rebuild", handler.RebuildSemanticIndex)
+		api.GET("/semantic/stats", handler.GetSemanticSearchStats)
+
 		// Search phrases
 		api.GET("/phrases", handler.GetPhrases)
 		api.POST("/phrases", handler.AddPhrase)

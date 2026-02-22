@@ -57,6 +57,7 @@ func (d *Database) AutoMigrate() error {
 		&models.FrontierURL{},
 		&models.SearchPhrase{},
 		&models.PhraseMatch{},
+		&models.PageEmbedding{},
 	)
 	if err != nil {
 		return err

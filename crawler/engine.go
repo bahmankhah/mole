@@ -1,18 +1,12 @@
 package crawler
 
 import (
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"math/rand"
-	"net"
-	"net/http"
-	"net/http/cookiejar"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,17 +31,18 @@ const (
 
 // Engine is the core crawler engine with DB-backed frontier
 type Engine struct {
-	config     config.CrawlerConfig
-	db         *gorm.DB
-	httpClient *http.Client
+	config  config.CrawlerConfig
+	db      *gorm.DB
+	fetcher modules.Fetcher
 
 	// Modules
-	urlCleaner     *modules.URLCleaner
-	linkExtractor  *modules.HTMLLinkExtractor
-	phraseDetector *modules.SimplePhraseDetector
-	sitemapParser  *modules.SitemapParser
-	robotsParser   *modules.RobotsParser
-	frontier       *modules.DBFrontier
+	urlCleaner       *modules.URLCleaner
+	linkExtractor    *modules.HTMLLinkExtractor
+	phraseDetector   *modules.SimplePhraseDetector
+	sitemapParser    *modules.SitemapParser
+	robotsParser     *modules.RobotsParser
+	frontier         *modules.DBFrontier
+	semanticSearcher *modules.SemanticSearcher
 
 	// State management
 	state      int32 // atomic
@@ -73,88 +68,16 @@ type Engine struct {
 	matchCount   int64
 }
 
-// chromeCipherSuites returns TLS cipher suites ordered to mimic Chrome's TLS fingerprint.
-var chromeCipherSuites = []uint16{
-	tls.TLS_AES_128_GCM_SHA256,
-	tls.TLS_AES_256_GCM_SHA384,
-	tls.TLS_CHACHA20_POLY1305_SHA256,
-	tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-	tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-	tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-	tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-	tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-	tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-	tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-	tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-	tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
-	tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
-	tls.TLS_RSA_WITH_AES_128_CBC_SHA,
-	tls.TLS_RSA_WITH_AES_256_CBC_SHA,
-}
-
-// userAgents is a pool of recent Chrome/Edge/Firefox User-Agents to rotate through.
-var userAgents = []string{
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
-	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
-}
-
-// newTransport creates an HTTP transport with a TLS config that mimics Chrome.
-func newTransport() *http.Transport {
-	return &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		MaxConnsPerHost:       20,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: 15 * time.Second,
-		ForceAttemptHTTP2:     true,
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: false,
-			MinVersion:         tls.VersionTLS12,
-			MaxVersion:         tls.VersionTLS13,
-			CipherSuites:       chromeCipherSuites,
-			CurvePreferences:   []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384},
-		},
-		DisableCompression: false,
+// newFetcher creates the appropriate Fetcher based on config.
+func newFetcher(cfg config.CrawlerConfig) modules.Fetcher {
+	if cfg.UseHeadlessBrowser {
+		return modules.NewHeadlessFetcher(cfg)
 	}
+	return modules.NewHTTPFetcher(cfg)
 }
 
 // NewEngine creates a new crawler engine
 func NewEngine(cfg config.CrawlerConfig, db *gorm.DB) *Engine {
-	// Create HTTP client with cookie jar, tuned transport, and browser-like behavior
-	jar, _ := cookiejar.New(nil)
-	client := &http.Client{
-		Timeout:   cfg.RequestTimeout,
-		Transport: newTransport(),
-		Jar:       jar,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return fmt.Errorf("too many redirects")
-			}
-			// Preserve browser headers on redirect
-			if len(via) > 0 {
-				for key, vals := range via[0].Header {
-					if _, exists := req.Header[key]; !exists {
-						for _, v := range vals {
-							req.Header.Add(key, v)
-						}
-					}
-				}
-			}
-			return nil
-		},
-	}
-
 	// Initialize modules
 	urlCleaner := modules.NewURLCleaner()
 	urlCleaner.Initialize()
@@ -176,19 +99,26 @@ func NewEngine(cfg config.CrawlerConfig, db *gorm.DB) *Engine {
 	frontier.Initialize()
 	frontier.SetSkipExtensions(cfg.SkipExtensions)
 
+	// Create the appropriate fetcher (HTTP or headless)
+	fetcher := newFetcher(cfg)
+
+	// Create semantic searcher
+	semanticSearcher := modules.NewSemanticSearcher(cfg, db)
+
 	return &Engine{
-		config:         cfg,
-		db:             db,
-		httpClient:     client,
-		urlCleaner:     urlCleaner,
-		linkExtractor:  linkExtractor,
-		phraseDetector: phraseDetector,
-		sitemapParser:  sitemapParser,
-		robotsParser:   robotsParser,
-		frontier:       frontier,
-		rng:            rand.New(rand.NewSource(time.Now().UnixNano())),
-		phraseIDMap:    make(map[string]uint),
-		robotRules:     make(map[string]*modules.RobotsResult),
+		config:           cfg,
+		db:               db,
+		fetcher:          fetcher,
+		urlCleaner:       urlCleaner,
+		linkExtractor:    linkExtractor,
+		phraseDetector:   phraseDetector,
+		sitemapParser:    sitemapParser,
+		robotsParser:     robotsParser,
+		frontier:         frontier,
+		semanticSearcher: semanticSearcher,
+		rng:              rand.New(rand.NewSource(time.Now().UnixNano())),
+		phraseIDMap:      make(map[string]uint),
+		robotRules:       make(map[string]*modules.RobotsResult),
 	}
 }
 
@@ -226,17 +156,8 @@ func (e *Engine) Start(job *models.CrawlJob) error {
 		e.mergeJobSettings(job.Settings)
 	}
 
-	// Recreate HTTP client with effective timeout so per-job overrides take effect
-	e.httpClient = &http.Client{
-		Timeout:   e.effectiveConfig.RequestTimeout,
-		Transport: newTransport(),
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return fmt.Errorf("too many redirects")
-			}
-			return nil
-		},
-	}
+	// Recreate fetcher with effective config so per-job overrides take effect
+	e.fetcher = newFetcher(e.effectiveConfig)
 
 	// Reset robots.txt rules for new job
 	e.robotRulesMu.Lock()
@@ -339,6 +260,15 @@ func (e *Engine) mergeJobSettings(s *models.JobSettings) {
 	}
 	if s.SkipContentDuplicates != nil {
 		e.effectiveConfig.SkipContentDuplicates = *s.SkipContentDuplicates
+	}
+	if s.UseHeadlessBrowser != nil {
+		e.effectiveConfig.UseHeadlessBrowser = *s.UseHeadlessBrowser
+	}
+	if s.HeadlessWaitSelector != nil {
+		e.effectiveConfig.HeadlessWaitSelector = *s.HeadlessWaitSelector
+	}
+	if s.EnableSemanticSearch != nil {
+		e.effectiveConfig.EnableSemanticSearch = *s.EnableSemanticSearch
 	}
 }
 
@@ -470,6 +400,17 @@ func (e *Engine) watchForCompletion() {
 		}
 		e.jobMu.Unlock()
 
+		// Rebuild FAISS index if semantic search was enabled
+		if e.effectiveConfig.EnableSemanticSearch {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+				defer cancel()
+				if err := e.semanticSearcher.RebuildIndex(ctx); err != nil {
+					log.Printf("[Engine] Failed to rebuild FAISS index: %v", err)
+				}
+			}()
+		}
+
 		atomic.StoreInt32(&e.state, int32(StateIdle))
 	}
 }
@@ -552,95 +493,33 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 
 	log.Printf("[Worker %d] >>> CRAWLING url=%s depth=%d", workerID, url, depth)
 
-	// Create request
-	req, err := http.NewRequestWithContext(e.ctx, "GET", url, nil)
-	if err != nil {
-		log.Printf("[Worker %d] Failed to create request for %s: %v", workerID, url, err)
+	// Fetch using the configured fetcher (HTTP or headless)
+	result := e.fetcher.Fetch(e.ctx, url)
+	if result.Error != nil {
+		log.Printf("[Worker %d] Failed to fetch %s: %v", workerID, url, result.Error)
+		_, _ = e.saveCrawledPage(url, result.StatusCode, result.ContentType, 0, depth, result.Error.Error(), startTime, result.Body)
 		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
 		return
 	}
 
-	// Pick a random User-Agent from the pool (or use the configured one if custom)
-	ua := e.effectiveConfig.UserAgent
-	if ua == "" || strings.Contains(ua, "Chrome/131.0.0.0") {
-		e.jobMu.RLock()
-		ua = userAgents[e.rng.Intn(len(userAgents))]
-		e.jobMu.RUnlock()
-	}
+	log.Printf("[Worker %d] <<< RESPONSE url=%s status=%d content-type=%q size=%d",
+		workerID, url, result.StatusCode, result.ContentType, len(result.Body))
 
-	// Set headers in the exact order Chrome sends them to avoid fingerprinting.
-	// Using req.Header map directly for ordering control.
-	req.Header = http.Header{}
-	req.Header.Set("Host", req.URL.Host)
-	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-	req.Header.Set("User-Agent", ua)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
-	req.Header.Set("Sec-Fetch-Site", "none")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-User", "?1")
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Cache-Control", "max-age=0")
-	// Note: Do NOT set Accept-Encoding manually. Go's Transport handles gzip
-	// automatically and decompresses transparently. Setting it manually disables
-	// automatic decompression.
+	contentType := result.ContentType
 
-	// Execute request
-	resp, err := e.httpClient.Do(req)
-	if err != nil {
-		log.Printf("[Worker %d] Failed to fetch %s: %v", workerID, url, err)
-		_, _ = e.saveCrawledPage(url, 0, "", 0, depth, err.Error(), startTime, nil)
-		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
-		return
-	}
-	defer resp.Body.Close()
-
-	log.Printf("[Worker %d] <<< RESPONSE url=%s status=%d content-encoding=%q content-type=%q content-length=%q",
-		workerID, url, resp.StatusCode,
-		resp.Header.Get("Content-Encoding"),
-		resp.Header.Get("Content-Type"),
-		resp.Header.Get("Content-Length"))
-
-	// Handle Content-Encoding in case the server sends compressed data
-	// even though the Transport didn't request it (safety net)
-	var bodyReader io.Reader = resp.Body
-	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
-		log.Printf("[Worker %d] Manually decompressing gzip for %s", workerID, url)
-		gzReader, gzErr := gzip.NewReader(resp.Body)
-		if gzErr == nil {
-			defer gzReader.Close()
-			bodyReader = gzReader
-		} else {
-			log.Printf("[Worker %d] gzip.NewReader failed for %s: %v", workerID, url, gzErr)
-		}
-	}
-
-	contentType := resp.Header.Get("Content-Type")
-
-	// Content-Type pre-check: skip binary content early to avoid reading large bodies
+	// Content-Type pre-check: skip binary content early
 	if !isProcessableContentType(contentType) {
 		log.Printf("[Worker %d] Skipping non-processable content type %q for %s", workerID, contentType, url)
-		_, _ = e.saveCrawledPage(url, resp.StatusCode, contentType, 0, depth, "", startTime, nil)
+		_, _ = e.saveCrawledPage(url, result.StatusCode, contentType, 0, depth, "", startTime, nil)
 		e.frontier.MarkCompleted(frontierURL.ID)
 		return
 	}
 
-	// Read response body
-	body, err := io.ReadAll(io.LimitReader(bodyReader, 10*1024*1024)) // 10MB limit
-	if err != nil {
-		log.Printf("[Worker %d] Failed to read body for %s: %v", workerID, url, err)
-		_, _ = e.saveCrawledPage(url, resp.StatusCode, contentType, 0, depth, err.Error(), startTime, nil)
-		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
-		return
-	}
-
+	body := result.Body
 	log.Printf("[Worker %d] BODY url=%s size=%d bytes, first100=%q", workerID, url, len(body), string(body[:min(100, len(body))]))
 
 	// Save crawled page (with title extraction for HTML)
-	page, created := e.saveCrawledPage(url, resp.StatusCode, contentType, int64(len(body)), depth, "", startTime, body)
+	page, created := e.saveCrawledPage(url, result.StatusCode, contentType, int64(len(body)), depth, "", startTime, body)
 	if created {
 		atomic.AddInt64(&e.crawledCount, 1)
 	}
@@ -688,6 +567,15 @@ func (e *Engine) processContent(workerID int, url string, body []byte, contentTy
 	// Process based on content type
 	if strings.Contains(contentType, "text/html") {
 		e.processHTML(url, body, depth)
+
+		// 4. Generate semantic embedding if enabled
+		if e.effectiveConfig.EnableSemanticSearch && page != nil && page.ID > 0 {
+			go func(p *models.CrawledPage, text string) {
+				if err := e.semanticSearcher.EmbedAndStore(e.ctx, p, text); err != nil {
+					log.Printf("[SemanticSearch] Failed to embed page %d (%s): %v", p.ID, p.URL, err)
+				}
+			}(page, textContent)
+		}
 	} else if strings.Contains(url, "sitemap") && strings.Contains(contentType, "xml") {
 		e.processSitemap(url, body, depth)
 	} else if strings.Contains(url, "robots.txt") {
@@ -1043,4 +931,9 @@ func (e *Engine) GetCurrentJob() *models.CrawlJob {
 	e.jobMu.RLock()
 	defer e.jobMu.RUnlock()
 	return e.currentJob
+}
+
+// GetSemanticSearcher returns the semantic searcher module
+func (e *Engine) GetSemanticSearcher() *modules.SemanticSearcher {
+	return e.semanticSearcher
 }

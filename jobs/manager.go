@@ -721,6 +721,9 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 	userAgent := cfg.UserAgent
 	maxRetries := cfg.MaxRetries
 	skipContentDup := cfg.SkipContentDuplicates
+	useHeadless := cfg.UseHeadlessBrowser
+	headlessSelector := cfg.HeadlessWaitSelector
+	enableSemantic := cfg.EnableSemanticSearch
 
 	return &models.JobSettings{
 		MaxConcurrentRequests: &maxConcurrent,
@@ -731,7 +734,53 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 		UserAgent:             &userAgent,
 		MaxRetries:            &maxRetries,
 		SkipContentDuplicates: &skipContentDup,
+		UseHeadlessBrowser:    &useHeadless,
+		HeadlessWaitSelector:  &headlessSelector,
+		EnableSemanticSearch:  &enableSemantic,
 		SkipExtensions:        cfg.SkipExtensions,
+	}
+}
+
+// SemanticSearch performs a vector-based semantic search across all crawled pages.
+func (m *Manager) SemanticSearch(query string, topK int) ([]models.SemanticSearchResult, error) {
+	searcher := m.engine.GetSemanticSearcher()
+	if searcher == nil {
+		return nil, fmt.Errorf("semantic search is not available")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	return searcher.Search(ctx, query, topK)
+}
+
+// RebuildSemanticIndex triggers a rebuild of the FAISS index.
+func (m *Manager) RebuildSemanticIndex() error {
+	searcher := m.engine.GetSemanticSearcher()
+	if searcher == nil {
+		return fmt.Errorf("semantic search is not available")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	return searcher.RebuildIndex(ctx)
+}
+
+// GetSemanticSearchStats returns semantic search statistics.
+func (m *Manager) GetSemanticSearchStats() map[string]interface{} {
+	searcher := m.engine.GetSemanticSearcher()
+	if searcher == nil {
+		return map[string]interface{}{
+			"available":       false,
+			"embedding_count": 0,
+			"has_index":       false,
+		}
+	}
+	return map[string]interface{}{
+		"available":       true,
+		"embedding_count": searcher.EmbeddingCount(),
+		"has_index":       searcher.HasIndex(),
 	}
 }
 

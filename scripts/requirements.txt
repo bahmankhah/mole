@@ -1,0 +1,10 @@
+# Python dependencies for Mole crawler scripts
+# Install: pip install -r scripts/requirements.txt
+
+# Headless browser support (headless_fetch.py)
+playwright>=1.40
+
+# Semantic search / embeddings (semantic_embed.py)
+sentence-transformers>=2.2
+faiss-cpu>=1.7
+numpy>=1.24
