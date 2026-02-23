@@ -21,6 +21,10 @@ crawler:
   max_retries: 3
   respect_robots_txt: false
   skip_content_duplicates: true
+  use_headless_browser: false
+  headless_wait_selector: ""
+  enable_semantic_search: false
+  embedding_model: "paraphrase-multilingual-MiniLM-L12-v2"
   skip_extensions:
     # Images
     - .jpg

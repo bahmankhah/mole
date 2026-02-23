@@ -459,22 +459,42 @@ func hashURL(url string) string {
 // Seed URLs bypass include/exclude URL pattern filters since they are explicitly
 // provided by the user as the starting point for the crawl.
 // Extra discovery seeds (robots.txt, sitemaps) are only added when the target
-// URL points to the domain root (e.g. https://example.com/ ).
+// URL points to the domain root (e.g. https://example.com/ ) AND has no
+// meaningful fragment (SPA route).
 func (f *DBFrontier) AddSeedURLs(targetURL string) error {
-	// Normalize the target URL first
-	normalized, err := f.urlCleaner.ProcessURL(targetURL)
+	// Check if the URL has a meaningful fragment (SPA route) BEFORE normalization
+	// strips it. Examples: https://example.com/#/search?q=foo
+	hasFragment := HasMeaningfulFragment(targetURL)
+
+	// Normalize the target URL — preserve fragment for SPA URLs
+	var normalized string
+	var err error
+	if hasFragment {
+		normalized, err = f.urlCleaner.ProcessURLKeepFragment(targetURL)
+	} else {
+		normalized, err = f.urlCleaner.ProcessURL(targetURL)
+	}
 	if err != nil {
 		normalized = targetURL // fallback to raw if normalization fails
 	}
 
-	// Add the target URL itself (bypass filters)
-	if err := f.addSeedURL(normalized, 0, ""); err != nil {
-		log.Printf("[%s] Warning: failed to add target URL: %v", f.Name(), err)
+	// Add the target URL itself (bypass filters).
+	// For fragment URLs we use addSeedURLDirect since the URL is already cleaned
+	// and we don't want ProcessURL to strip the fragment again.
+	if hasFragment {
+		if err := f.addSeedURLDirect(normalized, 0, ""); err != nil {
+			log.Printf("[%s] Warning: failed to add target URL: %v", f.Name(), err)
+		}
+	} else {
+		if err := f.addSeedURL(normalized, 0, ""); err != nil {
+			log.Printf("[%s] Warning: failed to add target URL: %v", f.Name(), err)
+		}
 	}
 
-	// Only add discovery seeds (robots.txt, sitemaps) if the target is a root URL.
-	// A root URL has no path or only "/".
-	if isRootURL(normalized) {
+	// Only add discovery seeds (robots.txt, sitemaps) if the target is a root
+	// URL AND does not have an SPA fragment. A URL like
+	// https://example.com/#/search?q=foo is NOT a root — it's a specific page.
+	if !hasFragment && isRootURL(normalized) {
 		// Derive the origin (scheme + host) for building seed URLs
 		origin := extractOrigin(normalized)
 
@@ -495,7 +515,58 @@ func (f *DBFrontier) AddSeedURLs(targetURL string) error {
 
 		log.Printf("[%s] Added seed URLs for %s (root domain, discovery seeds included)", f.Name(), normalized)
 	} else {
-		log.Printf("[%s] Added seed URL %s (non-root path, skipping discovery seeds)", f.Name(), normalized)
+		log.Printf("[%s] Added seed URL %s (non-root path or SPA fragment, skipping discovery seeds)", f.Name(), normalized)
+	}
+
+	return nil
+}
+
+// addSeedURLDirect adds a pre-cleaned URL to the frontier, bypassing URL
+// normalization. Used for SPA URLs with fragments that have already been
+// processed by ProcessURLKeepFragment.
+func (f *DBFrontier) addSeedURLDirect(cleanedURL string, depth int, parentURL string) error {
+	f.mu.Lock()
+	crawlJobID := f.crawlJobID
+	f.mu.Unlock()
+
+	if crawlJobID == "" {
+		return errors.New("no crawl job set")
+	}
+
+	urlHash := hashURL(cleanedURL)
+
+	// Check if already crawled
+	var crawledCount int64
+	f.db.Model(&models.CrawledPage{}).
+		Where("crawl_job_id = ? AND url_hash = ?", crawlJobID, urlHash).
+		Count(&crawledCount)
+	if crawledCount > 0 {
+		return nil
+	}
+
+	frontierURL := models.FrontierURL{
+		CrawlJobID:    crawlJobID,
+		URL:           cleanedURL,
+		URLHash:       urlHash,
+		NormalizedURL: cleanedURL,
+		Depth:         depth,
+		Priority:      0,
+		Status:        models.FrontierStatusPending,
+		ParentURL:     parentURL,
+	}
+
+	result := f.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "crawl_job_id"}, {Name: "url_hash"}},
+		DoNothing: true,
+	}).Create(&frontierURL)
+
+	if result.Error != nil {
+		log.Printf("[%s] DB error adding seed URL %s: %v", f.Name(), cleanedURL, result.Error)
+		return result.Error
+	}
+
+	if result.RowsAffected > 0 {
+		log.Printf("[%s] ADDED seed url=%s hash=%s depth=%d", f.Name(), cleanedURL, urlHash[:12], depth)
 	}
 
 	return nil

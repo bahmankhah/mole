@@ -277,8 +277,8 @@ func (f *HeadlessFetcher) Fetch(ctx context.Context, url string) *FetchResult {
 		args = append(args, "--user-agent", f.userAgent)
 	}
 
-	// Add extra context timeout buffer (script timeout + 15s for browser startup/teardown)
-	cmdTimeout := time.Duration(f.timeoutSec+15) * time.Second
+	// Add extra context timeout buffer (script timeout + 30s for browser startup/teardown + SPA rendering)
+	cmdTimeout := time.Duration(f.timeoutSec+30) * time.Second
 	cmdCtx, cancel := context.WithTimeout(ctx, cmdTimeout)
 	defer cancel()
 

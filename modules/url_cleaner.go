@@ -197,6 +197,42 @@ func (u *URLCleaner) sortedQueryString(values url.Values) string {
 	return strings.Join(parts, "&")
 }
 
+// ProcessURLKeepFragment normalizes and cleans a URL but preserves the fragment.
+// This is needed for SPA (Single Page Application) URLs where the fragment
+// contains routing information (e.g. https://example.com/#/search?q=foo).
+func (u *URLCleaner) ProcessURLKeepFragment(rawURL string) (string, error) {
+	// Parse first to extract the fragment before ProcessURL strips it
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return u.ProcessURL(rawURL)
+	}
+	fragment := parsed.Fragment
+
+	// Process normally (this will strip the fragment)
+	cleaned, err := u.ProcessURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+
+	// Re-attach the fragment if it was present
+	if fragment != "" {
+		cleaned = cleaned + "#" + fragment
+	}
+	return cleaned, nil
+}
+
+// HasMeaningfulFragment returns true if the URL contains a fragment that looks
+// like an SPA route (contains a path separator or query parameters).
+func HasMeaningfulFragment(rawURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Fragment == "" {
+		return false
+	}
+	f := parsed.Fragment
+	// SPA routes typically start with / or contain ? or &
+	return strings.HasPrefix(f, "/") || strings.Contains(f, "?") || strings.Contains(f, "&")
+}
+
 // HashURL creates a hash of a URL for deduplication
 func (u *URLCleaner) HashURL(normalizedURL string) string {
 	hash := sha256.Sum256([]byte(normalizedURL))
