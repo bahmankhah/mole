@@ -3,8 +3,10 @@ main
 
 # Python virtual environment
 scripts/.venv/
-scripts/.venv/__pycache__/
+scripts/.cookies/
 
+# Python cache
+__pycache__/
 # FAISS index data
 data/faiss/
 
