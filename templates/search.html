@@ -62,6 +62,9 @@
                     Index: {{if index . "has_index"}}ready{{else}}not built{{end}}
                 </span>
                 {{end}}
+                <button onclick="rebuildIndex()" class="ml-2 px-3 py-1 bg-purple-600 text-white rounded-full hover:bg-purple-700 transition text-xs font-medium">
+                    🔄 Rebuild Index
+                </button>
                 {{end}}
             </div>
 

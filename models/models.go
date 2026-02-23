@@ -52,12 +52,13 @@ type JobSettings struct {
 	RespectRobotsTxt      *bool    `json:"respect_robots_txt,omitempty"`
 	SkipContentDuplicates *bool    `json:"skip_content_duplicates,omitempty"` // Skip pages whose body hash already seen
 	SkipExtensions        []string `json:"skip_extensions,omitempty"`
-	URLIncludePatterns    []string `json:"url_include_patterns,omitempty"`  // Regex; if set, only matching URLs are crawled
-	URLExcludePatterns    []string `json:"url_exclude_patterns,omitempty"`  // Regex; skipped if include is set
-	ExtraTrackingParams   []string `json:"extra_tracking_params,omitempty"` // Extra query params to strip from URLs
-	UseHeadlessBrowser    *bool    `json:"use_headless_browser,omitempty"`  // Use headless browser for JS-rendered pages
+	URLIncludePatterns    []string `json:"url_include_patterns,omitempty"`   // Regex; if set, only matching URLs are crawled
+	URLExcludePatterns    []string `json:"url_exclude_patterns,omitempty"`   // Regex; skipped if include is set
+	ExtraTrackingParams   []string `json:"extra_tracking_params,omitempty"`  // Extra query params to strip from URLs
+	UseHeadlessBrowser    *bool    `json:"use_headless_browser,omitempty"`   // Use headless browser for JS-rendered pages
 	HeadlessWaitSelector  *string  `json:"headless_wait_selector,omitempty"` // CSS selector to wait for before capturing
 	EnableSemanticSearch  *bool    `json:"enable_semantic_search,omitempty"` // Enable semantic vector search for this job
+	SaveTextContent       *bool    `json:"save_text_content,omitempty"`      // Save extracted text content of pages
 }
 
 // Value implements driver.Valuer for GORM JSON storage
@@ -166,6 +167,7 @@ type CrawledPage struct {
 	CrawledAt     time.Time `json:"crawled_at"`
 	ResponseTime  int64     `json:"response_time_ms"`
 	ErrorMessage  string    `gorm:"type:text" json:"error_message,omitempty"`
+	TextContent   *string   `gorm:"type:longtext" json:"text_content,omitempty"`
 	IsArchived    bool      `gorm:"default:false;index" json:"is_archived"`
 	CrawlJob      CrawlJob  `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
 }
@@ -253,7 +255,7 @@ type PageEmbedding struct {
 	PageID     uint        `gorm:"uniqueIndex;not null" json:"page_id"`
 	URL        string      `gorm:"type:varchar(2048);not null" json:"url"`
 	Title      string      `gorm:"type:varchar(512)" json:"title"`
-	Embedding  []byte      `gorm:"type:mediumblob" json:"-"` // float32 array serialized as bytes
+	Embedding  []byte      `gorm:"type:mediumblob" json:"-"`          // float32 array serialized as bytes
 	TextHash   string      `gorm:"type:varchar(64)" json:"text_hash"` // to avoid re-embedding identical content
 	CreatedAt  time.Time   `json:"created_at"`
 	CrawlJob   CrawlJob    `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`

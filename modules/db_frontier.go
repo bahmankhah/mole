@@ -202,8 +202,14 @@ func (f *DBFrontier) addURLInternal(rawURL string, depth int, parentURL string, 
 		}
 	}
 
-	// Clean and normalize the URL
-	cleanedURL, err := f.urlCleaner.ProcessURL(rawURL)
+	// Clean and normalize the URL — preserve fragment for SPA URLs
+	var cleanedURL string
+	var err error
+	if HasMeaningfulFragment(rawURL) {
+		cleanedURL, err = f.urlCleaner.ProcessURLKeepFragment(rawURL)
+	} else {
+		cleanedURL, err = f.urlCleaner.ProcessURL(rawURL)
+	}
 	if err != nil {
 		return err
 	}

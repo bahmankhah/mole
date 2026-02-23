@@ -38,13 +38,15 @@ type CrawlerConfig struct {
 	RespectRobotsTxt      bool          `yaml:"respect_robots_txt"`
 	SkipContentDuplicates bool          `yaml:"skip_content_duplicates"` // Skip pages with same body hash
 	SkipExtensions        []string      `yaml:"skip_extensions"`
-	UseHeadlessBrowser    bool          `yaml:"use_headless_browser"`    // Use headless browser for JS-rendered pages
-	HeadlessScriptPath    string        `yaml:"headless_script_path"`    // Path to headless fetch script (auto-detected if empty)
-	HeadlessWaitSelector  string        `yaml:"headless_wait_selector"`  // CSS selector to wait for before capturing content
-	EnableSemanticSearch  bool          `yaml:"enable_semantic_search"`  // Enable vector-based semantic search
-	EmbeddingScriptPath   string        `yaml:"embedding_script_path"`   // Path to embedding Python script (auto-detected if empty)
-	EmbeddingModel        string        `yaml:"embedding_model"`         // Sentence-transformer model name
-	PythonPath            string        `yaml:"python_path"`             // Path to python3 binary (auto-detects venv if empty)
+	UseHeadlessBrowser    bool          `yaml:"use_headless_browser"`   // Use headless browser for JS-rendered pages
+	HeadlessScriptPath    string        `yaml:"headless_script_path"`   // Path to headless fetch script (auto-detected if empty)
+	HeadlessWaitSelector  string        `yaml:"headless_wait_selector"` // CSS selector to wait for before capturing content
+	HeadlessRenderWait    int           `yaml:"headless_render_wait"`   // Extra seconds to wait after network idle for SPA rendering (default 5)
+	EnableSemanticSearch  bool          `yaml:"enable_semantic_search"` // Enable vector-based semantic search
+	SaveTextContent       bool          `yaml:"save_text_content"`      // Save extracted text content of crawled pages
+	EmbeddingScriptPath   string        `yaml:"embedding_script_path"`  // Path to embedding Python script (auto-detected if empty)
+	EmbeddingModel        string        `yaml:"embedding_model"`        // Sentence-transformer model name
+	PythonPath            string        `yaml:"python_path"`            // Path to python3 binary (auto-detects venv if empty)
 }
 
 // ServerConfig holds web server settings
@@ -149,6 +151,7 @@ func DefaultConfig() *Config {
 			RespectRobotsTxt:      true,
 			SkipContentDuplicates: true,
 			SkipExtensions:        getDefaultSkipExtensions(),
+			HeadlessRenderWait:    5,
 			EmbeddingModel:        "paraphrase-multilingual-MiniLM-L12-v2",
 		},
 		Server: ServerConfig{

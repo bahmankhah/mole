@@ -252,6 +252,10 @@ func (u *URLCleaner) ResolveURL(baseURL, relativeURL string) (string, error) {
 	}
 
 	resolved := base.ResolveReference(relative)
+	// Preserve fragment for SPA URLs
+	if HasMeaningfulFragment(resolved.String()) {
+		return u.ProcessURLKeepFragment(resolved.String())
+	}
 	return u.ProcessURL(resolved.String())
 }
 

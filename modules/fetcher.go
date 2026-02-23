@@ -221,6 +221,8 @@ type HeadlessFetcher struct {
 	timeoutSec   int
 	waitSelector string
 	userAgent    string
+	renderWait   int    // extra seconds to wait after network idle for SPA rendering
+	cookieDir    string // directory for per-domain cookie persistence
 	pythonCmd    string // cached python executable path
 }
 
@@ -249,16 +251,23 @@ func NewHeadlessFetcher(cfg config.CrawlerConfig) *HeadlessFetcher {
 		timeoutSec = 30
 	}
 
+	renderWait := cfg.HeadlessRenderWait
+	if renderWait <= 0 {
+		renderWait = 5 // default 5 seconds
+	}
+
 	hf := &HeadlessFetcher{
 		scriptPath:   scriptPath,
 		timeoutSec:   timeoutSec,
 		waitSelector: cfg.HeadlessWaitSelector,
 		userAgent:    cfg.UserAgent,
+		renderWait:   renderWait,
+		cookieDir:    filepath.Join(filepath.Dir(scriptPath), ".cookies"),
 		pythonCmd:    FindPython(cfg.PythonPath),
 	}
 
-	log.Printf("[HeadlessFetcher] Initialized: script=%s, python=%s, timeout=%ds, waitSelector=%q",
-		hf.scriptPath, hf.pythonCmd, hf.timeoutSec, hf.waitSelector)
+	log.Printf("[HeadlessFetcher] Initialized: script=%s, python=%s, timeout=%ds, waitSelector=%q, renderWait=%ds, cookieDir=%s",
+		hf.scriptPath, hf.pythonCmd, hf.timeoutSec, hf.waitSelector, hf.renderWait, hf.cookieDir)
 
 	return hf
 }
@@ -269,16 +278,22 @@ func (f *HeadlessFetcher) Fetch(ctx context.Context, url string) *FetchResult {
 		f.scriptPath,
 		url,
 		"--timeout", fmt.Sprintf("%d", f.timeoutSec),
+		"--render-wait", fmt.Sprintf("%d", f.renderWait),
+		"--cookie-dir", f.cookieDir,
 	}
 	if f.waitSelector != "" {
 		args = append(args, "--wait-selector", f.waitSelector)
 	}
-	if f.userAgent != "" {
+	// Only pass user-agent to headless browser if it looks like a real browser UA.
+	// Bot-like UAs (e.g. "ResolveCrawler/1.0") defeat stealth measures and cause
+	// WAF/anti-bot systems to block with 403/503. The Python script already defaults
+	// to a realistic Chrome UA when none is provided.
+	if f.userAgent != "" && looksLikeBrowserUA(f.userAgent) {
 		args = append(args, "--user-agent", f.userAgent)
 	}
 
-	// Add extra context timeout buffer (script timeout + 15s for browser startup/teardown)
-	cmdTimeout := time.Duration(f.timeoutSec+15) * time.Second
+	// Add extra context timeout buffer: script timeout + render wait + SPA bootstrap/API waits + browser startup/teardown
+	cmdTimeout := time.Duration(f.timeoutSec+f.renderWait+60) * time.Second
 	cmdCtx, cancel := context.WithTimeout(ctx, cmdTimeout)
 	defer cancel()
 
@@ -358,6 +373,20 @@ func FindPython(configPath string) string {
 		}
 	}
 	return "python3" // fallback, will fail at runtime with a clear error
+}
+
+// looksLikeBrowserUA returns true if the User-Agent string resembles a real
+// browser (Chrome, Firefox, Safari, Edge). Bot-like UAs such as
+// "ResolveCrawler/1.0" return false.
+func looksLikeBrowserUA(ua string) bool {
+	ua = strings.ToLower(ua)
+	browserTokens := []string{"mozilla/", "chrome/", "firefox/", "safari/", "edg/", "opera/"}
+	for _, token := range browserTokens {
+		if strings.Contains(ua, token) {
+			return true
+		}
+	}
+	return false
 }
 
 // execDir returns the directory of the running executable.

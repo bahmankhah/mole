@@ -12,17 +12,18 @@ server:
   port: "5050"
 
 crawler:
-  max_concurrent_requests: 10
+  max_concurrent_requests: 4
   request_timeout: 30s
   politeness_delay: 0s
   teleport_probability: 0.2
   max_depth: 10
-  user_agent: "ResolveCrawler/1.0 (+https://resolver.local)"
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
   max_retries: 3
   respect_robots_txt: false
   skip_content_duplicates: true
-  use_headless_browser: false
+  use_headless_browser: true
   headless_wait_selector: ""
+  headless_render_wait: 10
   enable_semantic_search: false
   embedding_model: "paraphrase-multilingual-MiniLM-L12-v2"
   skip_extensions:

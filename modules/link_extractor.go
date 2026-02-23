@@ -261,8 +261,28 @@ func (e *HTMLLinkExtractor) resolveLink(baseURL, href string) string {
 	// Skip empty, javascript, mailto, tel links
 	if href == "" || strings.HasPrefix(href, "javascript:") ||
 		strings.HasPrefix(href, "mailto:") || strings.HasPrefix(href, "tel:") ||
-		strings.HasPrefix(href, "data:") || strings.HasPrefix(href, "#") {
+		strings.HasPrefix(href, "data:") {
 		return ""
+	}
+
+	// For fragment-only hrefs (start with #):
+	// Allow SPA routes (e.g. #/articles/..., #/search?q=...) but skip plain
+	// anchors (e.g. #top, #section-1) which are same-page references.
+	if strings.HasPrefix(href, "#") {
+		if !HasMeaningfulFragment(baseURL + href) {
+			return ""
+		}
+		// SPA route — resolve as full URL by prepending base origin
+		parsedBase, err := url.Parse(baseURL)
+		if err != nil {
+			return ""
+		}
+		fullURL := parsedBase.Scheme + "://" + parsedBase.Host + "/" + href
+		cleaned, err := e.urlCleaner.ProcessURLKeepFragment(fullURL)
+		if err != nil {
+			return ""
+		}
+		return cleaned
 	}
 
 	// Resolve relative URL

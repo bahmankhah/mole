@@ -317,6 +317,24 @@
                             </div>
                         </div>
 
+                        <div class="border border-gray-200 rounded-lg mb-6">
+                            <div class="bg-gray-50 px-4 py-3 border-b border-gray-200 rounded-t-lg">
+                                <h4 class="text-sm font-semibold text-gray-700">Content Storage</h4>
+                            </div>
+                            <div class="p-4 space-y-4">
+                                <div class="bg-amber-50 border border-amber-200 rounded-md p-3">
+                                    <p class="text-xs text-amber-800"><strong>Note:</strong> When enabled, the extracted text content of each crawled page is saved to the database. This applies to text-based responses only (HTML text extraction, plain text, XML). Can significantly increase database size for large crawls.</p>
+                                </div>
+                                <div class="flex items-start space-x-3">
+                                    <input type="checkbox" id="set-save-text-content" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <div>
+                                        <label for="set-save-text-content" class="text-sm font-medium text-gray-700">Save Text Content</label>
+                                        <p class="text-xs text-gray-400 mt-0.5">Store the extracted text content of each crawled page in the database. Default: <span class="def-val" data-key="save_text_content"></span></p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
                         {{if eq .job.Status "pending"}}
                         <div class="flex items-center justify-between">
                             <div class="flex items-center space-x-3">
@@ -365,6 +383,9 @@
             var semCb=document.getElementById('set-enable-semantic');
             if(s.enable_semantic_search!=null&&s.enable_semantic_search!=undefined){semCb.checked=s.enable_semantic_search;semCb.indeterminate=false;}
             else{semCb.checked=defaultSettings.enable_semantic_search||false;semCb.indeterminate=true;}
+            var textCb=document.getElementById('set-save-text-content');
+            if(s.save_text_content!=null&&s.save_text_content!=undefined){textCb.checked=s.save_text_content;textCb.indeterminate=false;}
+            else{textCb.checked=defaultSettings.save_text_content||false;textCb.indeterminate=true;}
         }
         function setVal(id,v){var e=document.getElementById(id);if(e)e.value=(v!=null&&v!=undefined)?v:'';}
         function intVal(id){var v=document.getElementById(id).value.trim();return v===''?undefined:parseInt(v,10);}
@@ -390,6 +411,8 @@
             v=strVal('set-headless-selector');if(v!==undefined)p.headless_wait_selector=v;
             var semCb=document.getElementById('set-enable-semantic');
             if(!semCb.indeterminate) p.enable_semantic_search=semCb.checked;
+            var textCb=document.getElementById('set-save-text-content');
+            if(!textCb.indeterminate) p.save_text_content=textCb.checked;
             return p;
         }
         function showAlert(msg,ok){
@@ -424,6 +447,9 @@
             var semCb=document.getElementById('set-enable-semantic');
             semCb.checked=defaultSettings.enable_semantic_search||false;
             semCb.indeterminate=true;
+            var textCb=document.getElementById('set-save-text-content');
+            textCb.checked=defaultSettings.save_text_content||false;
+            textCb.indeterminate=true;
         }
         async function resetToDefaultsAndSave(){
             if(!confirm('Reset all settings to global defaults? This will remove any custom configuration for this job.'))return;

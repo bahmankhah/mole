@@ -270,6 +270,9 @@ func (e *Engine) mergeJobSettings(s *models.JobSettings) {
 	if s.EnableSemanticSearch != nil {
 		e.effectiveConfig.EnableSemanticSearch = *s.EnableSemanticSearch
 	}
+	if s.SaveTextContent != nil {
+		e.effectiveConfig.SaveTextContent = *s.SaveTextContent
+	}
 }
 
 // randomizedDelay returns a randomized delay based on the politeness delay.
@@ -314,11 +317,14 @@ func (e *Engine) Stop() {
 
 	e.wg.Wait()
 
+	// Check if semantic search was enabled before clearing the job
+	shouldRebuildIndex := e.effectiveConfig.EnableSemanticSearch
+
 	// Update job status
 	e.jobMu.Lock()
 	if e.currentJob != nil {
 		now := time.Now()
-		e.currentJob.Status = models.JobStatusCompleted
+		e.currentJob.Status = models.JobStatusCancelled
 		e.currentJob.CompletedAt = &now
 		e.currentJob.CrawledURLs = int(atomic.LoadInt64(&e.crawledCount))
 		e.currentJob.FoundMatches = int(atomic.LoadInt64(&e.matchCount))
@@ -326,6 +332,17 @@ func (e *Engine) Stop() {
 		e.currentJob = nil
 	}
 	e.jobMu.Unlock()
+
+	// Rebuild FAISS index if semantic search was enabled (index pages crawled before cancellation)
+	if shouldRebuildIndex {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			if err := e.semanticSearcher.RebuildIndex(ctx); err != nil {
+				log.Printf("[Engine] Failed to rebuild FAISS index after stop: %v", err)
+			}
+		}()
+	}
 
 	atomic.StoreInt32(&e.state, int32(StateIdle))
 	log.Printf("[Engine] Stopped")
@@ -504,6 +521,17 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 
 	log.Printf("[Worker %d] <<< RESPONSE url=%s status=%d content-type=%q size=%d",
 		workerID, url, result.StatusCode, result.ContentType, len(result.Body))
+
+	// Treat server errors (502, 503, 429) as retriable — the server may be
+	// temporarily overloaded or issuing a challenge that failed.
+	if result.StatusCode == 429 || result.StatusCode == 502 || result.StatusCode == 503 {
+		log.Printf("[Worker %d] Retriable status %d for %s (retry %d/%d)",
+			workerID, result.StatusCode, url, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
+		_, _ = e.saveCrawledPage(url, result.StatusCode, result.ContentType, int64(len(result.Body)), depth,
+			fmt.Sprintf("HTTP %d", result.StatusCode), startTime, result.Body)
+		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
+		return
+	}
 
 	contentType := result.ContentType
 
@@ -776,7 +804,13 @@ func extractPathFromURL(rawURL string) string {
 
 // saveCrawledPage saves a crawled page to database
 func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string, contentLength int64, depth int, errorMsg string, startTime time.Time, body []byte) (*models.CrawledPage, bool) {
-	normalizedURL, _ := e.urlCleaner.ProcessURL(url)
+	// Use fragment-preserving normalization for SPA URLs
+	var normalizedURL string
+	if modules.HasMeaningfulFragment(url) {
+		normalizedURL, _ = e.urlCleaner.ProcessURLKeepFragment(url)
+	} else {
+		normalizedURL, _ = e.urlCleaner.ProcessURL(url)
+	}
 	urlHash := e.urlCleaner.HashURL(normalizedURL)
 
 	// Compute document content hash
@@ -786,6 +820,19 @@ func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string,
 		docHash = hex.EncodeToString(h[:])
 	}
 
+	// Detect unrendered SPA shells: when headless mode is active, pages that
+	// have an ng-app attribute but no ng-scope class are AngularJS apps where
+	// the framework never bootstrapped (CDN challenge, timeout, etc.).  These
+	// all hash to the same value.  Treat them as empty so content-dedup does
+	// not discard real pages later on.
+	isSPAShell := false
+	if e.effectiveConfig.UseHeadlessBrowser && len(body) > 0 {
+		bodyStr := string(body)
+		if strings.Contains(bodyStr, "ng-app=") && !strings.Contains(bodyStr, "ng-scope") {
+			isSPAShell = true
+		}
+	}
+
 	e.jobMu.RLock()
 	crawlJobID := ""
 	if e.currentJob != nil {
@@ -793,8 +840,10 @@ func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string,
 	}
 	e.jobMu.RUnlock()
 
-	// If we have a doc hash, check if this exact content already exists for this job
-	if docHash != "" && crawlJobID != "" && e.effectiveConfig.SkipContentDuplicates {
+	// If we have a doc hash, check if this exact content already exists for this job.
+	// Skip the dedup check for detected SPA shells – they all share the same
+	// server-side HTML shell and should not block unique rendered pages.
+	if docHash != "" && crawlJobID != "" && e.effectiveConfig.SkipContentDuplicates && !isSPAShell {
 		var dupCount int64
 		e.db.Model(&models.CrawledPage{}).
 			Where("crawl_job_id = ? AND doc_hash = ? AND is_archived = ?", crawlJobID, docHash, false).
@@ -824,11 +873,15 @@ func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string,
 		ErrorMessage:  errorMsg,
 	}
 
-	// Extract title from HTML content
+	// Extract title and optionally save raw fetched content
 	if len(body) > 0 && strings.Contains(contentType, "text/html") {
 		if title := e.linkExtractor.ExtractTitle(body); title != "" {
 			page.Title = title
 		}
+	}
+	if e.effectiveConfig.SaveTextContent && len(body) > 0 && strings.Contains(contentType, "text/") {
+		raw := string(body)
+		page.TextContent = &raw
 	}
 
 	result := e.db.Clauses(clause.OnConflict{
