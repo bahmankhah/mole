@@ -121,6 +121,22 @@ func (s *SemanticSearcher) callPython(ctx context.Context, req *embeddingRequest
 	cmd := exec.CommandContext(cmdCtx, s.pythonCmd, s.scriptPath)
 	cmd.Stdin = strings.NewReader(string(input))
 
+	// Inherit environment but strip proxy vars that can break model downloads.
+	// The ALL_PROXY=socks:// scheme is not supported by the requests library
+	// used internally by sentence-transformers / huggingface_hub.
+	filteredEnv := make([]string, 0, len(os.Environ()))
+	for _, env := range os.Environ() {
+		upper := strings.ToUpper(env)
+		if strings.HasPrefix(upper, "HTTP_PROXY=") ||
+			strings.HasPrefix(upper, "HTTPS_PROXY=") ||
+			strings.HasPrefix(upper, "ALL_PROXY=") ||
+			strings.HasPrefix(upper, "FTP_PROXY=") {
+			continue
+		}
+		filteredEnv = append(filteredEnv, env)
+	}
+	cmd.Env = filteredEnv
+
 	output, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {

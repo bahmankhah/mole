@@ -103,7 +103,7 @@ print(f'Model loaded — dimension: {model.get_sentence_embedding_dimension()}')
 # ---------- Verify ----------
 echo ""
 echo "==> Verifying installations ..."
-"$VPYTHON" -c "import playwright; print(f'  playwright           {playwright.__version__}')"
+"$VPYTHON" -c "from importlib.metadata import version; print(f'  playwright           {version(\"playwright\")}')"
 "$VPYTHON" -c "import sentence_transformers; print(f'  sentence-transformers {sentence_transformers.__version__}')"
 "$VPYTHON" -c "import faiss; print(f'  faiss-cpu            {faiss.__version__}')" 2>/dev/null \
     || "$VPYTHON" -c "import faiss; print('  faiss-cpu            OK')"
