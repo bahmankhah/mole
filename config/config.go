@@ -152,7 +152,7 @@ func DefaultConfig() *Config {
 			SkipContentDuplicates: true,
 			SkipExtensions:        getDefaultSkipExtensions(),
 			HeadlessRenderWait:    5,
-			EmbeddingModel:        "paraphrase-multilingual-MiniLM-L12-v2",
+			EmbeddingModel:        "intfloat/multilingual-e5-large",
 		},
 		Server: ServerConfig{
 			Port: "5050",

@@ -89,9 +89,19 @@ def _is_cdn_challenge(content: str, status_code: int = 200) -> bool:
         ):
             if sig in low:
                 return True
-    # Explicit openresty 503 pages can be larger if wrapped in HTML boilerplate
+    # Explicit openresty 503 pages can be larger if wrapped in HTML boilerplate.
+    # Also catch when the server sends HTTP 200 but the body is an openresty
+    # error page — this happens frequently with ArvanCloud CDN.
     if "503 service temporarily unavailable" in low and "openresty" in low:
         return True
+    if "service temporarily unavailable" in low and "openresty" in low:
+        return True
+    # Very small pages (< 500 bytes) with error-like titles are almost always
+    # CDN blocks, regardless of HTTP status code.
+    if len(content) < 500 and "<title>" in low:
+        for sig in ("503", "502", "403", "error", "unavailable", "blocked", "denied"):
+            if sig in low:
+                return True
     return False
 
 
@@ -101,9 +111,15 @@ def _is_spa_shell_unrendered(content: str) -> bool:
     Signs of an unrendered AngularJS/React/Vue page:
     - ng-app present but no ng-scope (AngularJS never compiled the DOM)
     - Multiple unresolved {{ }} template expressions
+    - ng-cloak still present (AngularJS hides elements until compiled)
     """
-    # AngularJS
+    # AngularJS — ng-scope is added by AngularJS when it compiles the DOM.
+    # If ng-app is present but ng-scope is missing, the framework never ran.
     if "ng-app=" in content and "ng-scope" not in content:
+        return True
+    # ng-cloak: AngularJS removes this attribute/class after compilation.
+    # If many ng-cloak elements remain, the app hasn't rendered.
+    if "ng-app=" in content and content.count("ng-cloak") > 2:
         return True
     # Unresolved template expressions (more than 3)
     if "{{" in content:
@@ -341,6 +357,18 @@ def fetch(url: str, timeout_ms: int, wait_selector: str | None, user_agent: str 
             except Exception:
                 pass
 
+            # Step 2b: For AngularJS apps, wait for the framework to bootstrap.
+            # AngularJS adds the 'ng-scope' class to the root element after
+            # compilation.  Poll for it with a generous timeout.
+            _is_angular = 'ng-app=' in page.content()
+            if _is_angular:
+                try:
+                    page.wait_for_selector(".ng-scope", timeout=min(timeout_ms, 15000))
+                except Exception:
+                    # Framework may not have bootstrapped yet; continue and
+                    # the unrendered-shell retry below will handle it.
+                    pass
+
             # Step 3: If the original URL had a hash fragment (SPA route), CDN
             # challenges or JS redirects may have stripped it during page load.
             # Check if the hash matches what we expect. If not, set it via JS.
@@ -361,6 +389,26 @@ def fetch(url: str, timeout_ms: int, wait_selector: str | None, user_agent: str 
                         page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 20000))
                     except Exception:
                         pass
+                    # For AngularJS: after hash change, wait for $digest cycle
+                    # to process the route and render the new view.
+                    if _is_angular:
+                        try:
+                            page.wait_for_function(
+                                """() => {
+                                    // Check that AngularJS has finished digesting
+                                    try {
+                                        var root = document.querySelector('[ng-app]') || document.querySelector('.ng-scope');
+                                        if (!root) return false;
+                                        var scope = angular.element(root).scope();
+                                        if (!scope) return false;
+                                        return !scope.$$phase;
+                                    } catch(e) { return true; }
+                                }""",
+                                timeout=10000,
+                            )
+                        except Exception:
+                            pass
+                        _time.sleep(2)  # extra time for API response + DOM update
 
             # Step 4: Final networkidle wait for any late API responses
             try:
@@ -391,11 +439,13 @@ def fetch(url: str, timeout_ms: int, wait_selector: str | None, user_agent: str 
             # This handles cases where the CDN served a stale response or
             # the framework load race was lost.
             if _is_spa_shell_unrendered(result["body"]):
-                for attempt in range(1, 3):  # up to 2 retries
+                for attempt in range(1, 4):  # up to 3 retries
                     sys.stderr.write(
                         f"[headless] SPA shell unrendered (attempt {attempt}), "
                         f"retrying {url}\n"
                     )
+                    # Increasing backoff: 2s, 4s, 6s between retries
+                    _time.sleep(attempt * 2)
                     try:
                         page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
                     except Exception:
@@ -408,6 +458,12 @@ def fetch(url: str, timeout_ms: int, wait_selector: str | None, user_agent: str 
                         page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 25000))
                     except Exception:
                         pass
+                    # Wait for AngularJS to bootstrap
+                    if 'ng-app=' in page.content():
+                        try:
+                            page.wait_for_selector(".ng-scope", timeout=min(timeout_ms, 15000))
+                        except Exception:
+                            pass
                     # Re-set hash fragment if needed
                     if has_fragment:
                         current_hash = page.evaluate("() => window.location.hash")
@@ -424,6 +480,11 @@ def fetch(url: str, timeout_ms: int, wait_selector: str | None, user_agent: str 
                     result["body"] = page.content()
                     if not _is_spa_shell_unrendered(result["body"]):
                         break  # successfully rendered
+
+            # Flag unrendered SPA shells in the result so Go can log/handle them
+            if _is_spa_shell_unrendered(result["body"]):
+                if not result["error"]:
+                    result["error"] = "SPA shell not rendered after retries"
 
             # Persist cookies for future fetches
             _save_storage_state(context, state_path)

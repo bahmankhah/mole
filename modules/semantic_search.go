@@ -151,7 +151,7 @@ func (s *SemanticSearcher) callPython(ctx context.Context, req *embeddingRequest
 func (s *SemanticSearcher) EmbedTexts(ctx context.Context, texts []string) ([][]float64, int, error) {
 	model := s.config.EmbeddingModel
 	if model == "" {
-		model = "paraphrase-multilingual-MiniLM-L12-v2"
+		model = "intfloat/multilingual-e5-large"
 	}
 
 	req := &embeddingRequest{
@@ -189,6 +189,11 @@ func (s *SemanticSearcher) EmbedAndStore(ctx context.Context, page *models.Crawl
 		words = words[:1000]
 	}
 	text := page.Title + ". " + strings.Join(words, " ")
+
+	// E5 models require "passage: " prefix for documents
+	if isE5Model(s.config.EmbeddingModel) {
+		text = "passage: " + text
+	}
 
 	// Compute hash to avoid re-embedding identical content
 	h := sha256.Sum256([]byte(text))
@@ -294,12 +299,18 @@ func (s *SemanticSearcher) Search(ctx context.Context, query string, topK int) (
 
 	model := s.config.EmbeddingModel
 	if model == "" {
-		model = "paraphrase-multilingual-MiniLM-L12-v2"
+		model = "intfloat/multilingual-e5-large"
+	}
+
+	// E5 models require "query: " prefix for search queries
+	searchQuery := query
+	if isE5Model(model) {
+		searchQuery = "query: " + query
 	}
 
 	req := &embeddingRequest{
 		Command:   "search",
-		Query:     query,
+		Query:     searchQuery,
 		Model:     model,
 		IndexPath: s.indexPath,
 		TopK:      topK,
@@ -423,4 +434,11 @@ func bytesToFloat64Slice(b []byte) []float64 {
 		v[i] = float64(math.Float32frombits(bits))
 	}
 	return v
+}
+
+// isE5Model returns true if the model name indicates an E5 family model,
+// which requires "query: " / "passage: " prefixes for embeddings.
+func isE5Model(modelName string) bool {
+	lower := strings.ToLower(modelName)
+	return strings.Contains(lower, "/e5-") || strings.Contains(lower, "-e5-")
 }

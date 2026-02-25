@@ -894,8 +894,41 @@ func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string,
 	}
 
 	if result.RowsAffected == 0 {
+		// Row already exists — update it if the new data is better
+		// (larger content or successful fetch replacing an error).
 		var existing models.CrawledPage
 		if err := e.db.Where("crawl_job_id = ? AND url_hash = ?", crawlJobID, urlHash).First(&existing).Error; err == nil {
+			shouldUpdate := false
+
+			// Prefer larger content (real page vs CDN error / empty shell)
+			if contentLength > existing.ContentLength {
+				shouldUpdate = true
+			}
+			// Prefer successful fetch over error
+			if errorMsg == "" && existing.ErrorMessage != "" {
+				shouldUpdate = true
+			}
+
+			if shouldUpdate {
+				updates := map[string]interface{}{
+					"status_code":    statusCode,
+					"content_type":   contentType,
+					"content_length": contentLength,
+					"doc_hash":       docHash,
+					"response_time":  page.ResponseTime,
+					"error_message":  errorMsg,
+					"crawled_at":     page.CrawledAt,
+				}
+				if page.Title != "" {
+					updates["title"] = page.Title
+				}
+				if page.TextContent != nil {
+					updates["text_content"] = *page.TextContent
+				}
+				e.db.Model(&existing).Updates(updates)
+				log.Printf("[Engine] Updated crawled page %d for %s (content_length %d -> %d)",
+					existing.ID, url, existing.ContentLength, contentLength)
+			}
 			return &existing, false
 		}
 		return page, false

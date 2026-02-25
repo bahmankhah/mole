@@ -272,7 +272,9 @@ func (f *DBFrontier) AddURLs(urls []string, depth int, parentURL string) (int, e
 	return added, nil
 }
 
-// GetNextURL retrieves the next URL to crawl using random surfer model
+// GetNextURL retrieves the next URL to crawl using random surfer model.
+// Uses a transaction with SELECT FOR UPDATE SKIP LOCKED to prevent race
+// conditions where multiple workers could pick the same URL.
 func (f *DBFrontier) GetNextURL() (*models.FrontierURL, error) {
 	f.mu.Lock()
 	crawlJobID := f.crawlJobID
@@ -282,25 +284,9 @@ func (f *DBFrontier) GetNextURL() (*models.FrontierURL, error) {
 		return nil, errors.New("no crawl job set")
 	}
 
-	// Check if we should teleport
-	shouldTeleport := f.rng.Float64() < f.teleportProbability
-
-	var frontierURL models.FrontierURL
-	var result *gorm.DB
-
-	// Always require pending URLs to proceed
-	var pendingCount int64
-	f.db.Model(&models.FrontierURL{}).
-		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
-		Count(&pendingCount)
-
-	if pendingCount == 0 {
-		return nil, errors.New("no pending URLs in frontier")
-	}
-
 	// Use a more efficient random selection than OFFSET which is O(n) in MySQL.
-	// Strategy: get the MIN and MAX ids of pending URLs, pick a random id in that range,
-	// then find the first pending URL with id >= that random value.
+	// Strategy: get the MIN and MAX ids of pending URLs, pick a random id in that
+	// range, then atomically claim the nearest pending URL with id >= that value.
 	var minID, maxID uint
 	f.db.Model(&models.FrontierURL{}).
 		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
@@ -313,28 +299,46 @@ func (f *DBFrontier) GetNextURL() (*models.FrontierURL, error) {
 		return nil, errors.New("no pending URLs in frontier")
 	}
 
-	// Pick a random ID in the range and find the nearest pending URL
-	_ = shouldTeleport
+	// Pick a random ID in the range
 	randomID := minID + uint(f.rng.Int63n(int64(maxID-minID+1)))
-	result = f.db.Where("crawl_job_id = ? AND status = ? AND id >= ?", crawlJobID, models.FrontierStatusPending, randomID).
-		Order("id ASC").
-		Limit(1).
-		First(&frontierURL)
 
-	// If no result (gap at the end), wrap around
-	if result.Error != nil {
-		result = f.db.Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
-			Order("id ASC").
-			Limit(1).
-			First(&frontierURL)
+	var frontierURL models.FrontierURL
+
+	// Atomically claim one URL using a transaction with row-level locking.
+	// FOR UPDATE locks the selected row; SKIP LOCKED means concurrent workers
+	// will skip rows already locked by another transaction, preventing duplicates.
+	err := f.db.Transaction(func(tx *gorm.DB) error {
+		// Try from randomID upward first
+		result := tx.
+			Raw("SELECT * FROM frontier_urls WHERE crawl_job_id = ? AND status = ? AND id >= ? ORDER BY id ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+				crawlJobID, models.FrontierStatusPending, randomID).
+			Scan(&frontierURL)
+
+		if result.Error != nil || frontierURL.ID == 0 {
+			// Wrap around — try from the beginning
+			result = tx.
+				Raw("SELECT * FROM frontier_urls WHERE crawl_job_id = ? AND status = ? ORDER BY id ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+					crawlJobID, models.FrontierStatusPending).
+				Scan(&frontierURL)
+		}
+
+		if result.Error != nil {
+			return result.Error
+		}
+		if frontierURL.ID == 0 {
+			return errors.New("no pending URLs in frontier")
+		}
+
+		// Update status to processing within the same transaction
+		return tx.Model(&frontierURL).Updates(map[string]interface{}{
+			"status":     models.FrontierStatusProcessing,
+			"updated_at": time.Now(),
+		}).Error
+	})
+
+	if err != nil {
+		return nil, err
 	}
-
-	if result.Error != nil {
-		return nil, result.Error
-	}
-
-	// Mark as processing
-	f.db.Model(&frontierURL).Update("status", models.FrontierStatusProcessing)
 
 	return &frontierURL, nil
 }
