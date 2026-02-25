@@ -103,6 +103,7 @@
                 <nav class="flex space-x-8 px-6">
                     <button onclick="showTab('matches')" class="tab-btn py-4 text-sm font-medium tab-active" data-tab="matches">Phrase Matches ({{.matchTotal}})</button>
                     <button onclick="showTab('pages')" class="tab-btn py-4 text-sm font-medium text-gray-500 hover:text-gray-700" data-tab="pages">Crawled Pages ({{.pageTotal}})</button>
+                    <button onclick="showTab('extracted')" class="tab-btn py-4 text-sm font-medium text-gray-500 hover:text-gray-700" data-tab="extracted">📝 Extracted Words (<span id="extracted-count">…</span>)</button>
                     <button onclick="showTab('settings')" class="tab-btn py-4 text-sm font-medium text-gray-500 hover:text-gray-700" data-tab="settings">⚙ Settings</button>
                 </nav>
             </div>
@@ -178,6 +179,39 @@
                 <div id="pages-empty" class="text-center py-12 text-gray-500 hidden">
                     <p class="text-lg">No pages crawled yet</p>
                     <p class="text-sm mt-2">Start the crawler to begin fetching pages</p>
+                </div>
+            </div>
+
+            <!-- ── Extracted Words Tab ── -->
+            <div id="tab-extracted" class="tab-content p-6 hidden">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <span class="text-sm text-gray-600">Total: <span id="extracted-total">0</span> words extracted from this crawl</span>
+                    </div>
+                    <div class="flex items-center space-x-4">
+                        <input type="text" id="extracted-filter" oninput="filterExtracted()" placeholder="Filter words…" class="px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none w-48">
+                        <div class="flex items-center space-x-2">
+                            <button id="extracted-prev-btn" onclick="loadExtracted('prev')" disabled class="px-3 py-2 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed text-sm">← Prev</button>
+                            <span class="text-sm text-gray-600">Page <span id="extracted-current-page">1</span>/<span id="extracted-total-pages">1</span></span>
+                            <button id="extracted-next-btn" onclick="loadExtracted('next')" disabled class="px-3 py-2 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed text-sm">Next →</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="extracted-table-container" class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Word</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Extracted At</th>
+                            </tr>
+                        </thead>
+                        <tbody id="extracted-tbody" class="divide-y divide-gray-200"></tbody>
+                    </table>
+                </div>
+                <div id="extracted-empty" class="text-center py-12 text-gray-500 hidden">
+                    <p class="text-lg">No extracted words yet</p>
+                    <p class="text-sm mt-2">Enable "Word Extraction" in Settings and run the crawl to auto-extract words from page content</p>
                 </div>
             </div>
 
@@ -319,6 +353,31 @@
 
                         <div class="border border-gray-200 rounded-lg mb-6">
                             <div class="bg-gray-50 px-4 py-3 border-b border-gray-200 rounded-t-lg">
+                                <h4 class="text-sm font-semibold text-gray-700">Word Extraction</h4>
+                            </div>
+                            <div class="p-4 space-y-4">
+                                <div class="bg-teal-50 border border-teal-200 rounded-md p-3">
+                                    <p class="text-xs text-teal-800"><strong>Note:</strong> When enabled, individual words are automatically extracted from each crawled page (after normalization, stop-word removal, and lowercasing) and stored as search phrases linked to this job. This builds a per-crawl inverted index for keyword discovery.</p>
+                                </div>
+                                <div class="flex items-start space-x-3">
+                                    <input type="checkbox" id="set-enable-word-extraction" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <div>
+                                        <label for="set-enable-word-extraction" class="text-sm font-medium text-gray-700">Enable Word Extraction</label>
+                                        <p class="text-xs text-gray-400 mt-0.5">Automatically extract and index individual words from crawled pages. Default: <span class="def-val" data-key="enable_word_extraction"></span></p>
+                                    </div>
+                                </div>
+                                <div class="flex items-start space-x-3">
+                                    <input type="checkbox" id="set-use-crawl-phrases-only" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <div>
+                                        <label for="set-use-crawl-phrases-only" class="text-sm font-medium text-gray-700">Use Crawl Phrases Only</label>
+                                        <p class="text-xs text-gray-400 mt-0.5">Only match against extracted words from this crawl (ignore manual search phrases). Default: <span class="def-val" data-key="use_crawl_phrases_only"></span></p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="border border-gray-200 rounded-lg mb-6">
+                            <div class="bg-gray-50 px-4 py-3 border-b border-gray-200 rounded-t-lg">
                                 <h4 class="text-sm font-semibold text-gray-700">Content Storage</h4>
                             </div>
                             <div class="p-4 space-y-4">
@@ -386,6 +445,12 @@
             var textCb=document.getElementById('set-save-text-content');
             if(s.save_text_content!=null&&s.save_text_content!=undefined){textCb.checked=s.save_text_content;textCb.indeterminate=false;}
             else{textCb.checked=defaultSettings.save_text_content||false;textCb.indeterminate=true;}
+            var wordCb=document.getElementById('set-enable-word-extraction');
+            if(s.enable_word_extraction!=null&&s.enable_word_extraction!=undefined){wordCb.checked=s.enable_word_extraction;wordCb.indeterminate=false;}
+            else{wordCb.checked=defaultSettings.enable_word_extraction||false;wordCb.indeterminate=true;}
+            var crawlOnlyCb=document.getElementById('set-use-crawl-phrases-only');
+            if(s.use_crawl_phrases_only!=null&&s.use_crawl_phrases_only!=undefined){crawlOnlyCb.checked=s.use_crawl_phrases_only;crawlOnlyCb.indeterminate=false;}
+            else{crawlOnlyCb.checked=defaultSettings.use_crawl_phrases_only!=null?defaultSettings.use_crawl_phrases_only:true;crawlOnlyCb.indeterminate=true;}
         }
         function setVal(id,v){var e=document.getElementById(id);if(e)e.value=(v!=null&&v!=undefined)?v:'';}
         function intVal(id){var v=document.getElementById(id).value.trim();return v===''?undefined:parseInt(v,10);}
@@ -413,6 +478,10 @@
             if(!semCb.indeterminate) p.enable_semantic_search=semCb.checked;
             var textCb=document.getElementById('set-save-text-content');
             if(!textCb.indeterminate) p.save_text_content=textCb.checked;
+            var wordCb=document.getElementById('set-enable-word-extraction');
+            if(!wordCb.indeterminate) p.enable_word_extraction=wordCb.checked;
+            var crawlOnlyCb=document.getElementById('set-use-crawl-phrases-only');
+            if(!crawlOnlyCb.indeterminate) p.use_crawl_phrases_only=crawlOnlyCb.checked;
             return p;
         }
         function showAlert(msg,ok){
@@ -450,6 +519,12 @@
             var textCb=document.getElementById('set-save-text-content');
             textCb.checked=defaultSettings.save_text_content||false;
             textCb.indeterminate=true;
+            var wordCb=document.getElementById('set-enable-word-extraction');
+            wordCb.checked=defaultSettings.enable_word_extraction||false;
+            wordCb.indeterminate=true;
+            var crawlOnlyCb=document.getElementById('set-use-crawl-phrases-only');
+            crawlOnlyCb.checked=defaultSettings.use_crawl_phrases_only!=null?defaultSettings.use_crawl_phrases_only:true;
+            crawlOnlyCb.indeterminate=true;
         }
         async function resetToDefaultsAndSave(){
             if(!confirm('Reset all settings to global defaults? This will remove any custom configuration for this job.'))return;
@@ -500,6 +575,60 @@
             else{icon.classList.remove('text-green-500');icon.classList.add('text-gray-400');text.textContent='Auto-refresh: Off';btn.classList.remove('bg-green-50','border-green-300');if(pagesState.interval){clearInterval(pagesState.interval);pagesState.interval=null;}}
         };
 
+        /* ── Extracted Words Tab ── */
+        var extractedState = { jobId:'{{.job.ID}}', currentPage:1, pageSize:50, total:0, filter:'', debounce:null };
+
+        function renderExtracted(phrases){
+            var tb=document.getElementById('extracted-tbody'),empty=document.getElementById('extracted-empty'),tc=document.getElementById('extracted-table-container');
+            if(!phrases||!phrases.length){tb.innerHTML='';tc.classList.add('hidden');empty.classList.remove('hidden');return;}
+            tc.classList.remove('hidden');empty.classList.add('hidden');
+            tb.innerHTML=phrases.map(function(p){
+                var d=p.created_at?new Date(p.created_at):null;
+                var ts=d?d.toLocaleDateString('en-US',{month:'short',day:'2-digit'})+' '+d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}):'-';
+                var active=p.is_active!==false;
+                return '<tr class="hover:bg-gray-50"><td class="px-4 py-3"><span class="px-2 py-1 bg-indigo-100 text-indigo-800 rounded text-sm font-medium">'+escHtml(p.phrase)+'</span></td><td class="px-4 py-3"><span class="px-2 py-0.5 rounded text-xs font-medium '+(active?'bg-green-100 text-green-800':'bg-gray-100 text-gray-500')+'">'+(active?'Active':'Inactive')+'</span></td><td class="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">'+ts+'</td></tr>';
+            }).join('');
+        }
+        function escHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+        function updateExtractedControls(){
+            var tp=Math.ceil(extractedState.total/extractedState.pageSize)||1;
+            document.getElementById('extracted-current-page').textContent=extractedState.currentPage;
+            document.getElementById('extracted-total-pages').textContent=tp;
+            document.getElementById('extracted-total').textContent=extractedState.total;
+            document.getElementById('extracted-count').textContent=extractedState.total;
+            document.getElementById('extracted-prev-btn').disabled=extractedState.currentPage<=1;
+            document.getElementById('extracted-next-btn').disabled=extractedState.currentPage>=tp;
+        }
+        async function fetchExtracted(){
+            var off=(extractedState.currentPage-1)*extractedState.pageSize;
+            var url='/api/jobs/'+extractedState.jobId+'/extracted-phrases?limit='+extractedState.pageSize+'&offset='+off;
+            if(extractedState.filter) url+='&search='+encodeURIComponent(extractedState.filter);
+            try{
+                var r=await fetch(url);
+                var d=await r.json();
+                if(d.success&&d.data){
+                    var phrases=d.data.phrases||[];
+                    extractedState.total=d.data.total||0;
+                    renderExtracted(phrases);
+                    updateExtractedControls();
+                }
+            }catch(e){console.error('fetchExtracted',e);}
+        }
+        window.loadExtracted=function(dir){
+            var tp=Math.ceil(extractedState.total/extractedState.pageSize)||1;
+            if(dir==='prev'&&extractedState.currentPage>1)extractedState.currentPage--;
+            else if(dir==='next'&&extractedState.currentPage<tp)extractedState.currentPage++;
+            fetchExtracted();
+        };
+        window.filterExtracted=function(){
+            clearTimeout(extractedState.debounce);
+            extractedState.debounce=setTimeout(function(){
+                extractedState.filter=document.getElementById('extracted-filter').value.trim();
+                extractedState.currentPage=1;
+                fetchExtracted();
+            },300);
+        };
+
         /* ── Actions ── */
         async function apiCall(m,u,d){var o={method:m,headers:{'Content-Type':'application/json'}};if(d)o.body=JSON.stringify(d);return(await fetch(u,o)).json();}
         window.duplicateJob=async function(id){var r=await apiCall('POST','/api/jobs/'+id+'/duplicate');if(r.success&&r.data){window.location.href='/jobs/'+r.data.id;}else{alert('Failed to duplicate: '+(r.error||'Unknown error'));}};
@@ -509,7 +638,7 @@
         window.resumeJob=async function(){await apiCall('POST','/api/jobs/resume');location.reload();};
         window.discoverSubdomains=async function(id){await apiCall('POST','/api/jobs/'+id+'/subdomains/discover');alert('Subdomain discovery started!');};
 
-        document.addEventListener('DOMContentLoaded',function(){fetchPages();populateSettings();});
+        document.addEventListener('DOMContentLoaded',function(){fetchPages();fetchExtracted();populateSettings();});
     </script>
 </body>
 </html>

@@ -47,11 +47,11 @@
             <!-- Search Mode Toggle -->
             <div class="flex items-center gap-2 mb-4">
                 <span class="text-sm text-gray-600 mr-2">Mode:</span>
-                <a href="/search?q={{.query}}&mode=keyword"
+                <a href="/search?q={{.query}}&mode=keyword&crawl_job_id={{.crawlJobID}}"
                    class="px-4 py-1.5 rounded-full text-sm font-medium transition {{if eq .mode "keyword"}}mode-active{{else}}mode-inactive hover:bg-gray-50{{end}}">
                     🔤 Keyword
                 </a>
-                <a href="/search?q={{.query}}&mode=semantic"
+                <a href="/search?q={{.query}}&mode=semantic&crawl_job_id={{.crawlJobID}}"
                    class="px-4 py-1.5 rounded-full text-sm font-medium transition {{if eq .mode "semantic"}}mode-active{{else}}mode-inactive hover:bg-gray-50{{end}}">
                     🧠 Semantic
                 </a>
@@ -70,6 +70,12 @@
 
             <form method="GET" action="/search" class="flex gap-4">
                 <input type="hidden" name="mode" value="{{.mode}}">
+                <select name="crawl_job_id" class="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white min-w-[180px]">
+                    <option value="">All Crawls</option>
+                    {{range .crawlJobs}}
+                    <option value="{{.ID}}" {{if eq $.crawlJobID .ID}}selected{{end}}>{{.Domain}} ({{truncate .ID 8}})</option>
+                    {{end}}
+                </select>
                 <input type="text" name="q" value="{{.query}}"
                     placeholder="{{if eq .mode "semantic"}}Describe what you're looking for...{{else}}Search for phrases, URLs, domains...{{end}}"
                     class="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-lg"
@@ -164,24 +170,34 @@
                 <div class="bg-white rounded-lg shadow p-5 hover:shadow-md transition">
                     <div class="flex items-start justify-between">
                         <div class="flex-1 min-w-0">
-                            <div class="flex items-center gap-2 mb-2">
-                                <span class="inline-block px-2 py-0.5 rounded text-xs font-medium
+                            <div class="flex items-center gap-2 mb-2 flex-wrap">
+                                <span class="text-sm text-gray-500">{{.Domain}}</span>
+                                {{if gt .Occurrences 1}}
+                                <span class="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">{{.Occurrences}} total occurrences</span>
+                                {{end}}
+                                <span class="text-xs bg-purple-50 text-purple-600 px-2 py-0.5 rounded-full font-mono">score: {{printf "%.3f" .Score}}</span>
+                            </div>
+                            <!-- Matched phrases -->
+                            <div class="flex items-center gap-2 mb-2 flex-wrap">
+                                {{range .MatchedPhrases}}
+                                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium
                                     {{if eq .MatchType "content"}}match-content text-yellow-800
                                     {{else if eq .MatchType "url"}}match-url text-blue-800
                                     {{else if eq .MatchType "anchor"}}match-anchor text-green-800
                                     {{else}}bg-gray-100 text-gray-800{{end}}">
-                                    {{.MatchType}}
+                                    {{.Phrase}}
+                                    {{if gt .Occurrences 1}}<span class="opacity-60">({{.Occurrences}})</span>{{end}}
                                 </span>
-                                <span class="text-sm text-gray-500">{{.Domain}}</span>
-                                {{if gt .Occurrences 1}}
-                                <span class="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">{{.Occurrences}} occurrences</span>
                                 {{end}}
                             </div>
-                            <h3 class="font-semibold text-indigo-600 mb-1">{{.Phrase}}</h3>
                             <a href="{{.URL}}" target="_blank" class="text-sm text-blue-500 hover:underline break-all">{{.URL}}</a>
                             {{if .Context}}
                             <p class="text-gray-600 text-sm mt-2 line-clamp-2">{{.Context}}</p>
                             {{end}}
+                            <!-- Score bar -->
+                            <div class="w-full bg-gray-100 rounded-full mt-2 h-1">
+                                <div class="score-bar bg-indigo-500" style="width: {{printf "%.0f" .ScorePercent}}%;"></div>
+                            </div>
                         </div>
                         <div class="ml-4 text-right flex-shrink-0">
                             {{if .FoundAt}}
@@ -200,7 +216,7 @@
             {{if gt .totalPages 1}}
             <div class="mt-8 flex items-center justify-center gap-2">
                 {{if gt .page 1}}
-                <a href="/search?q={{.query}}&mode=keyword&page={{subtract .page 1}}"
+                <a href="/search?q={{.query}}&mode=keyword&crawl_job_id={{.crawlJobID}}&page={{subtract .page 1}}"
                     class="px-4 py-2 bg-white rounded-lg shadow hover:bg-gray-50 transition text-sm">
                     ← Previous
                 </a>
@@ -211,7 +227,7 @@
                 </span>
 
                 {{if lt .page .totalPages}}
-                <a href="/search?q={{.query}}&mode=keyword&page={{add .page 1}}"
+                <a href="/search?q={{.query}}&mode=keyword&crawl_job_id={{.crawlJobID}}&page={{add .page 1}}"
                     class="px-4 py-2 bg-white rounded-lg shadow hover:bg-gray-50 transition text-sm">
                     Next →
                 </a>
@@ -225,7 +241,7 @@
                 <div class="text-6xl mb-4">🔍</div>
                 <h2 class="text-xl font-semibold text-gray-700 mb-2">No results found</h2>
                 <p class="text-gray-500">No phrase matches found for "<span class="font-semibold">{{.query}}</span>".</p>
-                <p class="text-gray-400 text-sm mt-2">Try a different search term, start a crawl job first, or switch to <a href="/search?q={{.query}}&mode=semantic" class="text-indigo-500 hover:underline">semantic search</a>.</p>
+                <p class="text-gray-400 text-sm mt-2">Try a different search term, start a crawl job first, or switch to <a href="/search?q={{.query}}&mode=semantic&crawl_job_id={{.crawlJobID}}" class="text-indigo-500 hover:underline">semantic search</a>.</p>
             </div>
             {{end}}
         {{end}}
@@ -289,7 +305,9 @@
         const btn = event.target;
         btn.disabled = true;
         btn.textContent = 'Rebuilding...';
-        fetch('/api/semantic/rebuild', { method: 'POST' })
+        const crawlJobID = document.querySelector('select[name="crawl_job_id"]')?.value || '';
+        const url = '/api/semantic/rebuild' + (crawlJobID ? '?crawl_job_id=' + encodeURIComponent(crawlJobID) : '');
+        fetch(url, { method: 'POST' })
         .then(res => res.json())
         .then(data => {
             if (data.success) {

@@ -167,8 +167,17 @@ func (p *SimplePhraseDetector) GetPhrases() []string {
 // Pre-compiled regex for whitespace normalization
 var contentWhitespaceRegex = regexp.MustCompile(`[\s]+`)
 
-// normalizeContent prepares content for phrase detection
+// punctuationToSpaceRegex replaces common punctuation and non-letter/non-digit
+// marks with spaces so tokens separated by commas, periods, slashes etc. are
+// not concatenated during normalisation.  Covers both ASCII and common
+// Unicode punctuation (e.g. Persian comma ، and Arabic semicolon ؛).
+var punctuationToSpaceRegex = regexp.MustCompile(`[,،;؛.·•:!?/\\|()[\]{}<>@#$%^&*_=+~` + "`" + `"""''«»‹›—–\-\x{200c}\x{200d}\x{00ad}\x{2000}-\x{200a}]+`)
+
+// normalizeContent prepares content for phrase detection.
+// Punctuation marks are first replaced with spaces so that adjacent tokens
+// (e.g. "hello,world" or "هوش،مصنوعی") become separate words, then
+// excessive whitespace is collapsed.
 func normalizeContent(content string) string {
-	// Remove excessive whitespace but preserve structure
+	content = punctuationToSpaceRegex.ReplaceAllString(content, " ")
 	return contentWhitespaceRegex.ReplaceAllString(content, " ")
 }

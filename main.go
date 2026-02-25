@@ -74,6 +74,12 @@ func main() {
 		"subtract": func(a, b int) int {
 			return a - b
 		},
+		"truncate": func(s string, n int) string {
+			if len(s) <= n {
+				return s
+			}
+			return s[:n]
+		},
 		"pages": func(current, total int) []int {
 			var p []int
 			start := current - 2
@@ -143,6 +149,9 @@ func main() {
 
 		// Crawled pages
 		api.GET("/jobs/:id/pages", handler.GetCrawledPages)
+
+		// Extracted phrases per job
+		api.GET("/jobs/:id/extracted-phrases", handler.GetJobExtractedPhrases)
 
 		// Phrase matches
 		api.GET("/matches", handler.GetMatches)

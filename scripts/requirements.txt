@@ -8,3 +8,7 @@ playwright>=1.40
 sentence-transformers>=2.2
 faiss-cpu>=1.7
 numpy>=1.24
+
+# Stemming & lemmatization (stem_lemma.py)
+hazm>=0.9
+nltk>=3.8

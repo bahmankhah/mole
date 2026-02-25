@@ -59,6 +59,11 @@ type JobSettings struct {
 	HeadlessWaitSelector  *string  `json:"headless_wait_selector,omitempty"` // CSS selector to wait for before capturing
 	EnableSemanticSearch  *bool    `json:"enable_semantic_search,omitempty"` // Enable semantic vector search for this job
 	SaveTextContent       *bool    `json:"save_text_content,omitempty"`      // Save extracted text content of pages
+	EnableWordExtraction  *bool    `json:"enable_word_extraction,omitempty"` // Extract words and build inverted index
+	EnableStemming        *bool    `json:"enable_stemming,omitempty"`        // Stem/lemmatise words during indexing and search
+	EnableLemmatization   *bool    `json:"enable_lemmatization,omitempty"`   // Use lemmatization vs pure stemming
+	DefaultLanguage       *string  `json:"default_language,omitempty"`       // Language for stemming: "fa" or "en"
+	UseCrawlPhrasesOnly   *bool    `json:"use_crawl_phrases_only,omitempty"` // true = only match crawl-extracted words; false = also match manual phrases
 }
 
 // Value implements driver.Valuer for GORM JSON storage
@@ -218,10 +223,12 @@ type PhraseMatch struct {
 
 // SearchPhrase represents a phrase to search for during crawling
 type SearchPhrase struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Phrase    string    `gorm:"type:varchar(255);uniqueIndex;not null" json:"phrase"`
-	IsActive  bool      `gorm:"default:true" json:"is_active"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	Phrase     string    `gorm:"type:varchar(255);uniqueIndex;not null" json:"phrase"`
+	IsActive   bool      `gorm:"default:true" json:"is_active"`
+	CrawlJobID *string   `gorm:"type:varchar(36);index" json:"crawl_job_id,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	CrawlJob   *CrawlJob `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:SET NULL" json:"-"`
 }
 
 // CrawlStats holds statistics for a crawl job
@@ -240,12 +247,13 @@ type CrawlStats struct {
 
 // PhraseWithStats represents a search phrase with its match count for the phrases listing page
 type PhraseWithStats struct {
-	ID         uint   `json:"id"`
-	Phrase     string `json:"phrase"`
-	IsActive   bool   `json:"is_active"`
-	CreatedAt  string `json:"created_at"`
-	MatchCount int64  `json:"match_count"`
-	URLCount   int64  `json:"url_count"`
+	ID         uint    `json:"id"`
+	Phrase     string  `json:"phrase"`
+	IsActive   bool    `json:"is_active"`
+	CreatedAt  string  `json:"created_at"`
+	MatchCount int64   `json:"match_count"`
+	URLCount   int64   `json:"url_count"`
+	CrawlJobID *string `json:"crawl_job_id,omitempty"`
 }
 
 // PageEmbedding stores the vector embedding for a crawled page
@@ -275,13 +283,24 @@ type SemanticSearchResult struct {
 }
 
 // SearchResult represents a grouped search result for the search page
-type SearchResult struct {
+// MatchedPhrase describes one phrase that matched on a page.
+type MatchedPhrase struct {
 	Phrase      string `json:"phrase"`
-	URL         string `json:"url"`
 	MatchType   string `json:"match_type"`
 	Context     string `json:"context"`
 	Occurrences int    `json:"occurrences"`
-	CrawlJobID  string `json:"crawl_job_id"`
-	Domain      string `json:"domain"`
-	FoundAt     string `json:"found_at"`
+}
+
+type SearchResult struct {
+	URL            string          `json:"url"`
+	Domain         string          `json:"domain"`
+	CrawlJobID     string          `json:"crawl_job_id"`
+	FoundAt        string          `json:"found_at"`
+	Score          float64         `json:"score"`           // TF-IDF relevance score
+	ScorePercent   float64         `json:"score_percent"`   // Score normalised to 0-100 for display
+	MatchedPhrases []MatchedPhrase `json:"matched_phrases"` // All phrases that matched on this page
+	Phrase         string          `json:"phrase"`          // Primary (best) matched phrase – for backwards compat
+	MatchType      string          `json:"match_type"`      // Primary match type
+	Context        string          `json:"context"`         // Primary context
+	Occurrences    int             `json:"occurrences"`     // Total occurrences across all phrases
 }

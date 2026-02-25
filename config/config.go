@@ -43,10 +43,15 @@ type CrawlerConfig struct {
 	HeadlessWaitSelector  string        `yaml:"headless_wait_selector"` // CSS selector to wait for before capturing content
 	HeadlessRenderWait    int           `yaml:"headless_render_wait"`   // Extra seconds to wait after network idle for SPA rendering (default 5)
 	EnableSemanticSearch  bool          `yaml:"enable_semantic_search"` // Enable vector-based semantic search
+	EnableWordExtraction  bool          `yaml:"enable_word_extraction"` // Extract words and build inverted index during crawl
 	SaveTextContent       bool          `yaml:"save_text_content"`      // Save extracted text content of crawled pages
 	EmbeddingScriptPath   string        `yaml:"embedding_script_path"`  // Path to embedding Python script (auto-detected if empty)
 	EmbeddingModel        string        `yaml:"embedding_model"`        // Sentence-transformer model name
 	PythonPath            string        `yaml:"python_path"`            // Path to python3 binary (auto-detects venv if empty)
+	DefaultLanguage       string        `yaml:"default_language"`       // Default language for stemming: "fa" or "en" (default "fa")
+	EnableStemming        bool          `yaml:"enable_stemming"`        // Stem/lemmatise words during indexing and search
+	EnableLemmatization   bool          `yaml:"enable_lemmatization"`   // Use lemmatization (more accurate) vs pure stemming
+	UseCrawlPhrasesOnly   bool          `yaml:"use_crawl_phrases_only"` // true = match only extracted words from this crawl; false = also match manual search phrases
 }
 
 // ServerConfig holds web server settings
@@ -152,7 +157,12 @@ func DefaultConfig() *Config {
 			SkipContentDuplicates: true,
 			SkipExtensions:        getDefaultSkipExtensions(),
 			HeadlessRenderWait:    5,
+			EnableWordExtraction:  false,
 			EmbeddingModel:        "intfloat/multilingual-e5-large",
+			DefaultLanguage:       "fa",
+			EnableStemming:        true,
+			EnableLemmatization:   true,
+			UseCrawlPhrasesOnly:   true,
 		},
 		Server: ServerConfig{
 			Port: "5050",

@@ -39,6 +39,8 @@ type Engine struct {
 	urlCleaner       *modules.URLCleaner
 	linkExtractor    *modules.HTMLLinkExtractor
 	phraseDetector   *modules.SimplePhraseDetector
+	wordExtractor    *modules.WordExtractor
+	stemmer          *modules.Stemmer
 	sitemapParser    *modules.SitemapParser
 	robotsParser     *modules.RobotsParser
 	frontier         *modules.DBFrontier
@@ -105,6 +107,14 @@ func NewEngine(cfg config.CrawlerConfig, db *gorm.DB) *Engine {
 	// Create semantic searcher
 	semanticSearcher := modules.NewSemanticSearcher(cfg, db)
 
+	// Create stemmer (used by word extractor and search)
+	stemmer := modules.NewStemmer(cfg)
+	stemmer.Initialize()
+
+	// Create word extractor (with stemmer for stemming/lemmatization)
+	wordExtractor := modules.NewWordExtractor(db, stemmer)
+	wordExtractor.Initialize()
+
 	return &Engine{
 		config:           cfg,
 		db:               db,
@@ -112,6 +122,8 @@ func NewEngine(cfg config.CrawlerConfig, db *gorm.DB) *Engine {
 		urlCleaner:       urlCleaner,
 		linkExtractor:    linkExtractor,
 		phraseDetector:   phraseDetector,
+		wordExtractor:    wordExtractor,
+		stemmer:          stemmer,
 		sitemapParser:    sitemapParser,
 		robotsParser:     robotsParser,
 		frontier:         frontier,
@@ -122,21 +134,32 @@ func NewEngine(cfg config.CrawlerConfig, db *gorm.DB) *Engine {
 	}
 }
 
-// LoadPhrases loads search phrases from database
+// LoadPhrases loads manually-added search phrases from database.
+// Auto-extracted words (crawl_job_id IS NOT NULL) are handled by the
+// word extractor module and are not loaded into the regex phrase detector.
+//
+// When UseCrawlPhrasesOnly is true the manual phrases are skipped entirely
+// — only the word-extractor's extracted phrases will be used for matching.
 func (e *Engine) LoadPhrases() error {
+	// Clear and rebuild
+	e.phraseIDMap = make(map[string]uint)
+
+	if e.effectiveConfig.UseCrawlPhrasesOnly {
+		log.Printf("[Engine] UseCrawlPhrasesOnly=true — skipping manual search phrases")
+		return nil
+	}
+
 	var phrases []models.SearchPhrase
-	if err := e.db.Where("is_active = ?", true).Find(&phrases).Error; err != nil {
+	if err := e.db.Where("is_active = ? AND crawl_job_id IS NULL", true).Find(&phrases).Error; err != nil {
 		return err
 	}
 
-	// Clear and rebuild
-	e.phraseIDMap = make(map[string]uint)
 	for _, p := range phrases {
 		e.phraseDetector.AddPhrase(p.Phrase)
-		e.phraseIDMap[p.Phrase] = p.ID
+		e.phraseIDMap[strings.ToLower(p.Phrase)] = p.ID
 	}
 
-	log.Printf("[Engine] Loaded %d search phrases", len(phrases))
+	log.Printf("[Engine] Loaded %d manual search phrases", len(phrases))
 	return nil
 }
 
@@ -270,8 +293,23 @@ func (e *Engine) mergeJobSettings(s *models.JobSettings) {
 	if s.EnableSemanticSearch != nil {
 		e.effectiveConfig.EnableSemanticSearch = *s.EnableSemanticSearch
 	}
+	if s.EnableWordExtraction != nil {
+		e.effectiveConfig.EnableWordExtraction = *s.EnableWordExtraction
+	}
 	if s.SaveTextContent != nil {
 		e.effectiveConfig.SaveTextContent = *s.SaveTextContent
+	}
+	if s.EnableStemming != nil {
+		e.effectiveConfig.EnableStemming = *s.EnableStemming
+	}
+	if s.EnableLemmatization != nil {
+		e.effectiveConfig.EnableLemmatization = *s.EnableLemmatization
+	}
+	if s.DefaultLanguage != nil {
+		e.effectiveConfig.DefaultLanguage = *s.DefaultLanguage
+	}
+	if s.UseCrawlPhrasesOnly != nil {
+		e.effectiveConfig.UseCrawlPhrasesOnly = *s.UseCrawlPhrasesOnly
 	}
 }
 
@@ -513,10 +551,19 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	// Fetch using the configured fetcher (HTTP or headless)
 	result := e.fetcher.Fetch(e.ctx, url)
 	if result.Error != nil {
-		log.Printf("[Worker %d] Failed to fetch %s: %v", workerID, url, result.Error)
-		_, _ = e.saveCrawledPage(url, result.StatusCode, result.ContentType, 0, depth, result.Error.Error(), startTime, result.Body)
-		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
-		return
+		// If the headless browser returned an error but also delivered real
+		// content (e.g. "SPA shell not rendered after retries" yet the body
+		// is >1KB with a 200 status), treat it as a soft warning and continue
+		// processing.  The content is usually usable even if imperfect.
+		hasUsableBody := result.StatusCode == 200 && len(result.Body) > 1024
+		if !hasUsableBody {
+			log.Printf("[Worker %d] Failed to fetch %s: %v", workerID, url, result.Error)
+			_, _ = e.saveCrawledPage(url, result.StatusCode, result.ContentType, 0, depth, result.Error.Error(), startTime, result.Body)
+			e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
+			return
+		}
+		log.Printf("[Worker %d] Soft error fetching %s (continuing with %d bytes): %v",
+			workerID, url, len(result.Body), result.Error)
 	}
 
 	log.Printf("[Worker %d] <<< RESPONSE url=%s status=%d content-type=%q size=%d",
@@ -569,33 +616,55 @@ func (e *Engine) processContent(workerID int, url string, body []byte, contentTy
 
 	// Only match phrases and embed on successful responses
 	if isSuccessful {
-		// 1. Check for phrase matches in page content
-		matches := e.phraseDetector.DetectPhrases(textContent)
+		// 0. Extract individual words and build inverted index (if enabled)
+		if e.effectiveConfig.EnableWordExtraction && page != nil && page.ID > 0 {
+			crawlJobID := ""
+			e.jobMu.RLock()
+			if e.currentJob != nil {
+				crawlJobID = e.currentJob.ID
+			}
+			e.jobMu.RUnlock()
 
-		for _, match := range matches {
-			e.savePhraseMatch(page.ID, url, match.Phrase, match.Context, match.Occurrences, models.MatchTypeContent)
-			atomic.AddInt64(&e.matchCount, 1)
-			log.Printf("[Worker %d] Found phrase '%s' in content of %s (%d occurrences)",
-				workerID, match.Phrase, url, match.Occurrences)
+			res, err := e.wordExtractor.ExtractAndStore(textContent, crawlJobID, page.ID, url, e.phraseIDMap)
+			if err != nil {
+				log.Printf("[Worker %d] Word extraction error for %s: %v", workerID, url, err)
+			} else if res != nil && res.MatchesStored > 0 {
+				atomic.AddInt64(&e.matchCount, int64(res.MatchesStored))
+				log.Printf("[Worker %d] Indexed %d words from %s (%d new phrases)",
+					workerID, res.MatchesStored, url, res.NewPhrases)
+			}
 		}
 
-		// 2. Check for phrase matches in URL
-		urlMatches := e.phraseDetector.DetectPhrasesInURL(url)
-		for _, match := range urlMatches {
-			e.savePhraseMatch(page.ID, url, match.Phrase, match.Context, match.Occurrences, models.MatchTypeURL)
-			atomic.AddInt64(&e.matchCount, 1)
-			log.Printf("[Worker %d] Found phrase '%s' in URL %s (%d occurrences)",
-				workerID, match.Phrase, url, match.Occurrences)
-		}
+		// 1-3. Manual phrase detection (skipped when UseCrawlPhrasesOnly is true)
+		if !e.effectiveConfig.UseCrawlPhrasesOnly {
+			// 1. Check for phrase matches in page content
+			matches := e.phraseDetector.DetectPhrases(textContent)
 
-		// 3. Check for phrase matches in anchor text pointing to this page
-		if anchorText != "" {
-			anchorMatches := e.phraseDetector.DetectPhrasesInAnchor(anchorText)
-			for _, match := range anchorMatches {
-				e.savePhraseMatch(page.ID, url, match.Phrase, "Anchor: "+match.Context, match.Occurrences, models.MatchTypeAnchor)
+			for _, match := range matches {
+				e.savePhraseMatch(page.ID, url, match.Phrase, match.Context, match.Occurrences, models.MatchTypeContent)
 				atomic.AddInt64(&e.matchCount, 1)
-				log.Printf("[Worker %d] Found phrase '%s' in anchor text for %s (%d occurrences)",
+				log.Printf("[Worker %d] Found phrase '%s' in content of %s (%d occurrences)",
 					workerID, match.Phrase, url, match.Occurrences)
+			}
+
+			// 2. Check for phrase matches in URL
+			urlMatches := e.phraseDetector.DetectPhrasesInURL(url)
+			for _, match := range urlMatches {
+				e.savePhraseMatch(page.ID, url, match.Phrase, match.Context, match.Occurrences, models.MatchTypeURL)
+				atomic.AddInt64(&e.matchCount, 1)
+				log.Printf("[Worker %d] Found phrase '%s' in URL %s (%d occurrences)",
+					workerID, match.Phrase, url, match.Occurrences)
+			}
+
+			// 3. Check for phrase matches in anchor text pointing to this page
+			if anchorText != "" {
+				anchorMatches := e.phraseDetector.DetectPhrasesInAnchor(anchorText)
+				for _, match := range anchorMatches {
+					e.savePhraseMatch(page.ID, url, match.Phrase, "Anchor: "+match.Context, match.Occurrences, models.MatchTypeAnchor)
+					atomic.AddInt64(&e.matchCount, 1)
+					log.Printf("[Worker %d] Found phrase '%s' in anchor text for %s (%d occurrences)",
+						workerID, match.Phrase, url, match.Occurrences)
+				}
 			}
 		}
 	}
@@ -957,7 +1026,7 @@ func (e *Engine) savePhraseMatch(pageID uint, url, phrase, context string, occur
 
 	// Resolve search phrase ID
 	var searchPhraseID *uint
-	if id, ok := e.phraseIDMap[phrase]; ok {
+	if id, ok := e.phraseIDMap[strings.ToLower(phrase)]; ok {
 		searchPhraseID = &id
 	}
 
@@ -1031,4 +1100,14 @@ func (e *Engine) GetCurrentJob() *models.CrawlJob {
 // GetSemanticSearcher returns the semantic searcher module
 func (e *Engine) GetSemanticSearcher() *modules.SemanticSearcher {
 	return e.semanticSearcher
+}
+
+// GetStemmer returns the stemmer module (may be nil/disabled).
+func (e *Engine) GetStemmer() *modules.Stemmer {
+	return e.stemmer
+}
+
+// GetWordExtractor returns the word extractor module.
+func (e *Engine) GetWordExtractor() *modules.WordExtractor {
+	return e.wordExtractor
 }
