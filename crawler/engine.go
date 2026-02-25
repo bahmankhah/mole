@@ -556,48 +556,57 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	e.frontier.MarkCompleted(frontierURL.ID)
 
 	// Process content based on type
-	e.processContent(workerID, url, body, contentType, depth, page, frontierURL.AnchorText)
+	e.processContent(workerID, url, body, contentType, result.StatusCode, depth, page, frontierURL.AnchorText)
 }
 
-// processContent processes fetched content
-func (e *Engine) processContent(workerID int, url string, body []byte, contentType string, depth int, page *models.CrawledPage, anchorText string) {
-	// 1. Check for phrase matches in page content
+// processContent processes fetched content.
+// Phrase matching and semantic embedding are only performed for successful (2xx)
+// responses to avoid indexing error pages (404, 403, etc.).
+func (e *Engine) processContent(workerID int, url string, body []byte, contentType string, statusCode int, depth int, page *models.CrawledPage, anchorText string) {
+	isSuccessful := statusCode >= 200 && statusCode < 300
+
 	textContent := e.linkExtractor.ExtractTextContent(body)
-	matches := e.phraseDetector.DetectPhrases(textContent)
 
-	for _, match := range matches {
-		e.savePhraseMatch(page.ID, url, match.Phrase, match.Context, match.Occurrences, models.MatchTypeContent)
-		atomic.AddInt64(&e.matchCount, 1)
-		log.Printf("[Worker %d] Found phrase '%s' in content of %s (%d occurrences)",
-			workerID, match.Phrase, url, match.Occurrences)
-	}
+	// Only match phrases and embed on successful responses
+	if isSuccessful {
+		// 1. Check for phrase matches in page content
+		matches := e.phraseDetector.DetectPhrases(textContent)
 
-	// 2. Check for phrase matches in URL
-	urlMatches := e.phraseDetector.DetectPhrasesInURL(url)
-	for _, match := range urlMatches {
-		e.savePhraseMatch(page.ID, url, match.Phrase, match.Context, match.Occurrences, models.MatchTypeURL)
-		atomic.AddInt64(&e.matchCount, 1)
-		log.Printf("[Worker %d] Found phrase '%s' in URL %s (%d occurrences)",
-			workerID, match.Phrase, url, match.Occurrences)
-	}
-
-	// 3. Check for phrase matches in anchor text pointing to this page
-	if anchorText != "" {
-		anchorMatches := e.phraseDetector.DetectPhrasesInAnchor(anchorText)
-		for _, match := range anchorMatches {
-			e.savePhraseMatch(page.ID, url, match.Phrase, "Anchor: "+match.Context, match.Occurrences, models.MatchTypeAnchor)
+		for _, match := range matches {
+			e.savePhraseMatch(page.ID, url, match.Phrase, match.Context, match.Occurrences, models.MatchTypeContent)
 			atomic.AddInt64(&e.matchCount, 1)
-			log.Printf("[Worker %d] Found phrase '%s' in anchor text for %s (%d occurrences)",
+			log.Printf("[Worker %d] Found phrase '%s' in content of %s (%d occurrences)",
 				workerID, match.Phrase, url, match.Occurrences)
+		}
+
+		// 2. Check for phrase matches in URL
+		urlMatches := e.phraseDetector.DetectPhrasesInURL(url)
+		for _, match := range urlMatches {
+			e.savePhraseMatch(page.ID, url, match.Phrase, match.Context, match.Occurrences, models.MatchTypeURL)
+			atomic.AddInt64(&e.matchCount, 1)
+			log.Printf("[Worker %d] Found phrase '%s' in URL %s (%d occurrences)",
+				workerID, match.Phrase, url, match.Occurrences)
+		}
+
+		// 3. Check for phrase matches in anchor text pointing to this page
+		if anchorText != "" {
+			anchorMatches := e.phraseDetector.DetectPhrasesInAnchor(anchorText)
+			for _, match := range anchorMatches {
+				e.savePhraseMatch(page.ID, url, match.Phrase, "Anchor: "+match.Context, match.Occurrences, models.MatchTypeAnchor)
+				atomic.AddInt64(&e.matchCount, 1)
+				log.Printf("[Worker %d] Found phrase '%s' in anchor text for %s (%d occurrences)",
+					workerID, match.Phrase, url, match.Occurrences)
+			}
 		}
 	}
 
-	// Process based on content type
+	// Process based on content type — link extraction still runs for non-2xx
+	// pages since navigation links on error pages can still be useful.
 	if strings.Contains(contentType, "text/html") {
 		e.processHTML(url, body, depth)
 
-		// 4. Generate semantic embedding if enabled
-		if e.effectiveConfig.EnableSemanticSearch && page != nil && page.ID > 0 {
+		// 4. Generate semantic embedding if enabled (only for successful pages)
+		if isSuccessful && e.effectiveConfig.EnableSemanticSearch && page != nil && page.ID > 0 {
 			go func(p *models.CrawledPage, text string) {
 				if err := e.semanticSearcher.EmbedAndStore(e.ctx, p, text); err != nil {
 					log.Printf("[SemanticSearch] Failed to embed page %d (%s): %v", p.ID, p.URL, err)

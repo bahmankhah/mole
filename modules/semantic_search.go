@@ -252,17 +252,46 @@ func (s *SemanticSearcher) RebuildIndex(ctx context.Context) error {
 		return nil
 	}
 
-	// Convert to format expected by the Python script
+	// Convert to format expected by the Python script.
+	// Filter out embeddings with mismatched dimensions — this can happen when
+	// the embedding model was changed. All vectors must have the same length.
+	// Determine the expected dimension by finding the most common vector size,
+	// which corresponds to the current model's embeddings.
+	dimCounts := make(map[int]int)
+	for _, emb := range embeddings {
+		vecLen := len(emb.Embedding) / 4 // float32 = 4 bytes each
+		if vecLen > 0 {
+			dimCounts[vecLen]++
+		}
+	}
+	expectedDim := 0
+	maxCount := 0
+	for dim, count := range dimCounts {
+		if count > maxCount {
+			maxCount = count
+			expectedDim = dim
+		}
+	}
+
 	data := make([]embeddingDataItem, 0, len(embeddings))
+	skippedDim := 0
 	for _, emb := range embeddings {
 		vec := bytesToFloat64Slice(emb.Embedding)
 		if len(vec) == 0 {
+			continue
+		}
+		if expectedDim > 0 && len(vec) != expectedDim {
+			skippedDim++
 			continue
 		}
 		data = append(data, embeddingDataItem{
 			ID:     emb.PageID,
 			Vector: vec,
 		})
+	}
+
+	if skippedDim > 0 {
+		log.Printf("[SemanticSearch] Skipped %d embeddings with mismatched dimensions (expected %d)", skippedDim, expectedDim)
 	}
 
 	req := &embeddingRequest{
