@@ -123,6 +123,11 @@ func (m *Manager) CreateJobWithSettings(targetURL string, maxDepth int, settings
 	return job, nil
 }
 
+// UpdateJobSeedURLs saves the expanded seed URLs for a job.
+func (m *Manager) UpdateJobSeedURLs(jobID string, seeds models.StringSlice) error {
+	return m.db.Model(&models.CrawlJob{}).Where("id = ?", jobID).Update("seed_urls", seeds).Error
+}
+
 // StartJob starts a crawl job
 func (m *Manager) StartJob(jobID string) error {
 	m.mu.Lock()
@@ -1009,6 +1014,11 @@ func (m *Manager) SearchPhraseMatches(query string, crawlJobID string, limit, of
 		Context     string
 		Occurrences int
 		Score       float64
+		TF          float64
+		IDF         float64
+		TFIDF       float64
+		MatchBoost  float64
+		ExactBoost  float64
 	}
 	type pageResult struct {
 		URL        string
@@ -1056,21 +1066,24 @@ func (m *Manager) SearchPhraseMatches(query string, crawlJobID string, limit, of
 			idf = 0
 		}
 
-		tfidf := tf * idf
+		baseTFIDF := tf * idf
 
 		// Match-type boost
+		matchBoost := 1.0
 		switch r.MatchType {
 		case string(models.MatchTypeURL):
-			tfidf *= 2.0
+			matchBoost = 2.0
 		case string(models.MatchTypeAnchor):
-			tfidf *= 1.5
+			matchBoost = 1.5
 		}
 
-		// Exact-match boost: if this phrase exactly equals one of the
-		// query n-grams, it gets a ×3 boost.
+		// Exact-match boost
+		exactBoost := 1.0
 		if ngramSet[r.Phrase] {
-			tfidf *= 3.0
+			exactBoost = 3.0
 		}
+
+		finalScore := baseTFIDF * matchBoost * exactBoost
 
 		// Track which query n-gram this phrase satisfies (for multi-term bonus)
 		for _, ng := range ngrams {
@@ -1084,15 +1097,20 @@ func (m *Manager) SearchPhraseMatches(query string, crawlJobID string, limit, of
 		pi, pExists := pr.Phrases[pKey]
 		if !pExists {
 			pi = &phraseInfo{
-				Phrase:    r.Phrase,
-				MatchType: r.MatchType,
-				Context:   r.Context,
+				Phrase:     r.Phrase,
+				MatchType:  r.MatchType,
+				Context:    r.Context,
+				MatchBoost: matchBoost,
+				ExactBoost: exactBoost,
 			}
 			pr.Phrases[pKey] = pi
 		}
 		pi.Occurrences += r.Occurrences
-		pi.Score += tfidf
-		pr.TotalScore += tfidf
+		pi.TF += tf
+		pi.IDF = idf // same for all rows of same phrase
+		pi.TFIDF += baseTFIDF
+		pi.Score += finalScore
+		pr.TotalScore += finalScore
 	}
 
 	// Apply multi-term bonus: pages matching more distinct query n-grams
@@ -1147,10 +1165,18 @@ func (m *Manager) SearchPhraseMatches(query string, crawlJobID string, limit, of
 				MatchType:   pi.MatchType,
 				Context:     pi.Context,
 				Occurrences: pi.Occurrences,
+				TF:          math.Round(pi.TF*1000) / 1000,
+				IDF:         math.Round(pi.IDF*1000) / 1000,
+				TFIDF:       math.Round(pi.TFIDF*1000) / 1000,
+				MatchBoost:  pi.MatchBoost,
+				ExactBoost:  pi.ExactBoost,
+				PhraseScore: math.Round(pi.Score*1000) / 1000,
 			})
 		}
 		sort.Slice(mpList, func(i, j int) bool {
-			// Sort by: exact match first, then occurrences
+			if mpList[i].PhraseScore != mpList[j].PhraseScore {
+				return mpList[i].PhraseScore > mpList[j].PhraseScore
+			}
 			iExact := ngramSet[mpList[i].Phrase]
 			jExact := ngramSet[mpList[j].Phrase]
 			if iExact != jExact {
@@ -1168,13 +1194,33 @@ func (m *Manager) SearchPhraseMatches(query string, crawlJobID string, limit, of
 			totalOcc += mp.Occurrences
 		}
 
+		// Multi-term bonus info
+		k := len(pr.MatchedNgrams)
+		multiTermBonus := 1.0
+		if k > 1 {
+			multiTermBonus = 1.0 + 0.5*float64(k-1)
+		}
+
+		// rawScore = sum of phrase scores before multi-term bonus
+		rawScore := 0.0
+		for _, mp := range mpList {
+			rawScore += mp.PhraseScore
+		}
+
 		results = append(results, models.SearchResult{
-			URL:            pr.URL,
-			Domain:         pr.Domain,
-			CrawlJobID:     pr.CrawlJobID,
-			FoundAt:        pr.FoundAt.Format("2006-01-02 15:04:05"),
-			Score:          math.Round(pr.TotalScore*1000) / 1000,
-			ScorePercent:   math.Round(pct*10) / 10,
+			URL:          pr.URL,
+			Domain:       pr.Domain,
+			CrawlJobID:   pr.CrawlJobID,
+			FoundAt:      pr.FoundAt.Format("2006-01-02 15:04:05"),
+			Score:        math.Round(pr.TotalScore*1000) / 1000,
+			ScorePercent: math.Round(pct*10) / 10,
+			ScoreDetail: models.ScoreBreakdown{
+				TotalDocs:      totalDocs,
+				MatchedTerms:   k,
+				MultiTermBonus: math.Round(multiTermBonus*1000) / 1000,
+				RawScore:       math.Round(rawScore*1000) / 1000,
+				FinalScore:     math.Round(pr.TotalScore*1000) / 1000,
+			},
 			MatchedPhrases: mpList,
 			Phrase:         primary.Phrase,
 			MatchType:      primary.MatchType,

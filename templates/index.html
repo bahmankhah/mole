@@ -69,13 +69,31 @@
                 <!-- Create Crawl Job Form -->
                 <div class="bg-white rounded-lg shadow p-6 mb-6">
                     <h2 class="text-xl font-semibold mb-4">🕷️ Create Crawl Job</h2>
-                    <form action="/api/jobs" method="POST" class="space-y-4">
+                    <form id="crawl-form" action="/api/jobs" method="POST" class="space-y-4">
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-1">URL or Domain</label>
-                            <input type="text" name="target_url" placeholder="https://example.com/page or example.com" required
-                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500">
-                            <p class="text-xs text-gray-500 mt-1">Enter a full URL or just a domain name</p>
+                            <input type="text" name="target_url" id="target-url-input" placeholder="https://example.com/page or example.com" required
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500" oninput="onURLInput()">
+                            <p class="text-xs text-gray-500 mt-1">Enter a full URL or domain. Use <code class="bg-gray-100 px-1 rounded">&#123;&#123;VAR&#125;&#125;</code> for template variables.</p>
                         </div>
+
+                        <!-- Advanced: URL Template Variables -->
+                        <div id="tpl-section" class="hidden">
+                            <div class="border border-indigo-200 bg-indigo-50 rounded-lg p-4 space-y-3">
+                                <div class="flex items-center justify-between">
+                                    <h3 class="text-sm font-semibold text-indigo-700">Template Variables</h3>
+                                    <span id="tpl-seed-count" class="text-xs text-indigo-500 font-mono"></span>
+                                </div>
+                                <p class="text-xs text-gray-600">Define values for each variable. Use commas for lists, dash for ranges (e.g. <code class="bg-white px-1 rounded">1,hamster,5-10</code>).</p>
+                                <div id="tpl-vars" class="space-y-2"></div>
+                                <!-- Preview -->
+                                <div id="tpl-preview-wrap" class="hidden">
+                                    <button type="button" onclick="togglePreview()" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Preview expanded URLs ▾</button>
+                                    <div id="tpl-preview" class="hidden mt-2 max-h-40 overflow-y-auto bg-white border rounded p-2 text-xs text-gray-600 font-mono space-y-0.5"></div>
+                                </div>
+                            </div>
+                        </div>
+
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-1">Max Depth</label>
                             <input type="number" name="max_depth" value="10" min="1" max="50"
@@ -454,6 +472,134 @@
                 });
         }, 5000);
         {{end}}
+
+        /* ── URL Template Variables ── */
+        var tplVarRe = /\{\{(\w+)\}\}/g;
+        var prevVarNames = [];
+
+        function onURLInput() {
+            var url = document.getElementById('target-url-input').value;
+            var names = [];
+            var seen = {};
+            var m;
+            tplVarRe.lastIndex = 0;
+            while ((m = tplVarRe.exec(url)) !== null) {
+                if (!seen[m[1]]) { seen[m[1]] = true; names.push(m[1]); }
+            }
+            var sec = document.getElementById('tpl-section');
+            if (names.length === 0) {
+                sec.classList.add('hidden');
+                prevVarNames = [];
+                return;
+            }
+            sec.classList.remove('hidden');
+
+            // Only rebuild inputs if var names changed
+            if (JSON.stringify(names) !== JSON.stringify(prevVarNames)) {
+                prevVarNames = names;
+                renderVarInputs(names);
+            }
+        }
+
+        function renderVarInputs(names) {
+            var container = document.getElementById('tpl-vars');
+            container.innerHTML = '';
+            names.forEach(function(name) {
+                var row = document.createElement('div');
+                row.className = 'flex items-center gap-2';
+                row.innerHTML =
+                    '<span class="text-xs font-mono text-indigo-700 bg-white px-2 py-1 rounded border border-indigo-200 whitespace-nowrap min-w-[4rem] text-center">' +
+                    '{{"{{"}}'  + escH(name) + '{{"}}"}}' +
+                    '</span>' +
+                    '<input type="text" name="var_' + escH(name) + '" placeholder="e.g. 1,hamster,5-10" ' +
+                    'class="flex-1 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500" ' +
+                    'oninput="updatePreview()">';
+                container.appendChild(row);
+            });
+            updatePreview();
+        }
+
+        function escH(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+        // Client-side expansion for preview
+        function expandValueExpr(expr) {
+            if (!expr.trim()) return [];
+            var parts = expr.split(',');
+            var result = [];
+            parts.forEach(function(p) {
+                p = p.trim();
+                if (!p) return;
+                var rangeMatch = p.match(/^(\d+)-(\d+)$/);
+                if (rangeMatch) {
+                    var a = parseInt(rangeMatch[1]), b = parseInt(rangeMatch[2]);
+                    if (a <= b) { for (var i = a; i <= b; i++) result.push(String(i)); }
+                    else { for (var i = a; i >= b; i--) result.push(String(i)); }
+                } else {
+                    result.push(p);
+                }
+            });
+            return result;
+        }
+
+        function updatePreview() {
+            var url = document.getElementById('target-url-input').value;
+            var names = prevVarNames;
+            var wrap = document.getElementById('tpl-preview-wrap');
+            var countEl = document.getElementById('tpl-seed-count');
+
+            if (names.length === 0) { wrap.classList.add('hidden'); countEl.textContent = ''; return; }
+
+            // Get values for each var
+            var vars = {};
+            var anyFilled = false;
+            names.forEach(function(name) {
+                var input = document.querySelector('input[name="var_' + name + '"]');
+                var vals = input ? expandValueExpr(input.value) : [];
+                vars[name] = vals;
+                if (vals.length > 0) anyFilled = true;
+            });
+
+            if (!anyFilled) { wrap.classList.add('hidden'); countEl.textContent = ''; return; }
+
+            // Check if all vars have values
+            var allFilled = names.every(function(n) { return vars[n].length > 0; });
+            if (!allFilled) {
+                wrap.classList.add('hidden');
+                countEl.textContent = '';
+                return;
+            }
+
+            // Cartesian product
+            var combos = [url];
+            names.forEach(function(name) {
+                var next = [];
+                combos.forEach(function(u) {
+                    vars[name].forEach(function(val) {
+                        next.push(u.split('{{"{{"}}'  + name + '{{"}}"}}').join(val));
+                    });
+                });
+                combos = next;
+            });
+
+            countEl.textContent = combos.length + ' seed URL' + (combos.length !== 1 ? 's' : '');
+            wrap.classList.remove('hidden');
+
+            // Show preview (limit to 20 in preview)
+            var previewEl = document.getElementById('tpl-preview');
+            var limit = 20;
+            var html = combos.slice(0, limit).map(function(u) {
+                return '<div class="truncate">' + escH(u) + '</div>';
+            }).join('');
+            if (combos.length > limit) {
+                html += '<div class="text-gray-400 italic">... and ' + (combos.length - limit) + ' more</div>';
+            }
+            previewEl.innerHTML = html;
+        }
+
+        function togglePreview() {
+            var el = document.getElementById('tpl-preview');
+            el.classList.toggle('hidden');
+        }
     </script>
 </body>
 </html>

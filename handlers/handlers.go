@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/resolver/crawler/jobs"
 	"github.com/resolver/crawler/models"
+	"github.com/resolver/crawler/modules"
 )
 
 // Handler holds all HTTP handlers
@@ -58,18 +60,40 @@ func (h *Handler) Index(c *gin.Context) {
 	})
 }
 
-// CreateJob creates a new crawl job
+// CreateJob creates a new crawl job.
+// Supports URL templates with {{VAR}} placeholders.
+// When template_vars is provided, the URL is expanded into multiple seed URLs.
 func (h *Handler) CreateJob(c *gin.Context) {
 	var req struct {
-		TargetURL string              `json:"target_url" form:"target_url"`
-		Domain    string              `json:"domain" form:"domain"`
-		MaxDepth  int                 `json:"max_depth" form:"max_depth"`
-		Settings  *models.JobSettings `json:"settings"`
+		TargetURL    string              `json:"target_url" form:"target_url"`
+		Domain       string              `json:"domain" form:"domain"`
+		MaxDepth     int                 `json:"max_depth" form:"max_depth"`
+		Settings     *models.JobSettings `json:"settings"`
+		TemplateVars map[string]string   `json:"template_vars"` // var_name → value expression (e.g. "1,hamster,5-10")
 	}
 
-	if err := c.ShouldBind(&req); err != nil {
-		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
-		return
+	contentType := c.GetHeader("Content-Type")
+	isForm := strings.Contains(contentType, "application/x-www-form-urlencoded") ||
+		strings.Contains(contentType, "multipart/form-data")
+
+	if isForm {
+		req.TargetURL = c.PostForm("target_url")
+		req.Domain = c.PostForm("domain")
+		req.MaxDepth, _ = strconv.Atoi(c.PostForm("max_depth"))
+
+		// Parse template_vars from form: keys like "var_NAME" → value expression.
+		req.TemplateVars = make(map[string]string)
+		for key, vals := range c.Request.PostForm {
+			if strings.HasPrefix(key, "var_") && len(vals) > 0 && strings.TrimSpace(vals[0]) != "" {
+				varName := strings.TrimPrefix(key, "var_")
+				req.TemplateVars[varName] = vals[0]
+			}
+		}
+	} else {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+			return
+		}
 	}
 
 	// Use target_url if provided, otherwise fall back to domain
@@ -86,15 +110,63 @@ func (h *Handler) CreateJob(c *gin.Context) {
 		req.MaxDepth = 10
 	}
 
+	// ── Expand URL template if it contains {{VAR}} placeholders ──
+	var seedURLs models.StringSlice
+	if modules.HasTemplateVars(target) && len(req.TemplateVars) > 0 {
+		// Expand each variable's value expression.
+		expandedVars := make(map[string][]string, len(req.TemplateVars))
+		for name, expr := range req.TemplateVars {
+			vals, err := modules.ExpandValueExpr(expr)
+			if err != nil {
+				errMsg := fmt.Sprintf("error expanding variable {{%s}}: %v", name, err)
+				if isForm {
+					c.Redirect(http.StatusFound, "/?error="+errMsg)
+					return
+				}
+				c.JSON(http.StatusBadRequest, Response{Success: false, Error: errMsg})
+				return
+			}
+			if len(vals) == 0 {
+				errMsg := fmt.Sprintf("variable {{%s}} has no values", name)
+				if isForm {
+					c.Redirect(http.StatusFound, "/?error="+errMsg)
+					return
+				}
+				c.JSON(http.StatusBadRequest, Response{Success: false, Error: errMsg})
+				return
+			}
+			expandedVars[name] = vals
+		}
+
+		urls, err := modules.ExpandTemplateURL(target, expandedVars, 50000)
+		if err != nil {
+			if isForm {
+				c.Redirect(http.StatusFound, "/?error="+err.Error())
+				return
+			}
+			c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+			return
+		}
+		seedURLs = urls
+		log.Printf("[Handler] URL template expanded to %d seed URLs", len(seedURLs))
+	}
+
 	job, err := h.jobManager.CreateJobWithSettings(target, req.MaxDepth, req.Settings)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Success: false, Error: err.Error()})
 		return
 	}
 
+	// Attach seed URLs if template was expanded
+	if len(seedURLs) > 0 {
+		job.SeedURLs = seedURLs
+		if err := h.jobManager.UpdateJobSeedURLs(job.ID, seedURLs); err != nil {
+			log.Printf("[Handler] Warning: failed to save seed URLs: %v", err)
+		}
+	}
+
 	// Check if request is from a form submission
-	contentType := c.GetHeader("Content-Type")
-	if contentType == "application/x-www-form-urlencoded" || c.GetHeader("Accept") == "text/html" {
+	if isForm || c.GetHeader("Accept") == "text/html" {
 		c.Redirect(http.StatusFound, "/jobs/"+job.ID)
 		return
 	}

@@ -335,9 +335,17 @@ func (e *Engine) randomizedDelay() time.Duration {
 
 // addSeedURLs adds initial seed URLs for the job
 func (e *Engine) addSeedURLs(job *models.CrawlJob) error {
-	// Add the target URL and its basic resources
-	e.frontier.AddSeedURLs(job.TargetURL)
+	// If the job has explicit seed URLs (from template expansion), use those.
+	if len(job.SeedURLs) > 0 {
+		for _, seed := range job.SeedURLs {
+			e.frontier.AddSeedURLs(seed)
+		}
+		log.Printf("[Engine] Added %d seed URLs for job %s, frontier size: %d", len(job.SeedURLs), job.ID, e.frontier.PendingCount())
+		return nil
+	}
 
+	// Default: single target URL as seed.
+	e.frontier.AddSeedURLs(job.TargetURL)
 	log.Printf("[Engine] Added seed URLs for %s, frontier size: %d", job.TargetURL, e.frontier.PendingCount())
 	return nil
 }

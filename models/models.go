@@ -66,6 +66,37 @@ type JobSettings struct {
 	UseCrawlPhrasesOnly   *bool    `json:"use_crawl_phrases_only,omitempty"` // true = only match crawl-extracted words; false = also match manual phrases
 }
 
+// StringSlice is a JSON-serialised []string for GORM columns.
+type StringSlice []string
+
+func (ss StringSlice) Value() (driver.Value, error) {
+	if ss == nil {
+		return nil, nil
+	}
+	b, err := json.Marshal(ss)
+	if err != nil {
+		return nil, err
+	}
+	return string(b), nil
+}
+
+func (ss *StringSlice) Scan(value interface{}) error {
+	if value == nil {
+		*ss = nil
+		return nil
+	}
+	var bytes []byte
+	switch v := value.(type) {
+	case string:
+		bytes = []byte(v)
+	case []byte:
+		bytes = v
+	default:
+		return fmt.Errorf("cannot scan %T into StringSlice", value)
+	}
+	return json.Unmarshal(bytes, ss)
+}
+
 // Value implements driver.Valuer for GORM JSON storage
 func (s JobSettings) Value() (driver.Value, error) {
 	b, err := json.Marshal(s)
@@ -119,6 +150,7 @@ type CrawlJob struct {
 	DiscoveryJobID string       `gorm:"type:varchar(36);index" json:"discovery_job_id,omitempty"`
 	TargetURL      string       `gorm:"type:varchar(512);not null" json:"target_url"`
 	Domain         string       `gorm:"type:varchar(255);index;not null" json:"domain"`
+	SeedURLs       StringSlice  `gorm:"type:json" json:"seed_urls,omitempty"`
 	Status         JobStatus    `gorm:"type:varchar(20);index;default:'pending'" json:"status"`
 	TotalURLs      int          `gorm:"default:0" json:"total_urls"`
 	CrawledURLs    int          `gorm:"default:0" json:"crawled_urls"`
@@ -285,10 +317,25 @@ type SemanticSearchResult struct {
 // SearchResult represents a grouped search result for the search page
 // MatchedPhrase describes one phrase that matched on a page.
 type MatchedPhrase struct {
-	Phrase      string `json:"phrase"`
-	MatchType   string `json:"match_type"`
-	Context     string `json:"context"`
-	Occurrences int    `json:"occurrences"`
+	Phrase      string  `json:"phrase"`
+	MatchType   string  `json:"match_type"`
+	Context     string  `json:"context"`
+	Occurrences int     `json:"occurrences"`
+	TF          float64 `json:"tf"`
+	IDF         float64 `json:"idf"`
+	TFIDF       float64 `json:"tfidf"`
+	MatchBoost  float64 `json:"match_boost"`
+	ExactBoost  float64 `json:"exact_boost"`
+	PhraseScore float64 `json:"phrase_score"` // final score contribution from this phrase
+}
+
+// ScoreBreakdown explains how the total score was computed.
+type ScoreBreakdown struct {
+	TotalDocs      int64   `json:"total_docs"`       // N in IDF formula
+	MatchedTerms   int     `json:"matched_terms"`    // K distinct query n-grams matched
+	MultiTermBonus float64 `json:"multi_term_bonus"` // multiplier from K>1
+	RawScore       float64 `json:"raw_score"`        // score before multi-term bonus
+	FinalScore     float64 `json:"final_score"`      // score after multi-term bonus
 }
 
 type SearchResult struct {
@@ -298,6 +345,7 @@ type SearchResult struct {
 	FoundAt        string          `json:"found_at"`
 	Score          float64         `json:"score"`           // TF-IDF relevance score
 	ScorePercent   float64         `json:"score_percent"`   // Score normalised to 0-100 for display
+	ScoreDetail    ScoreBreakdown  `json:"score_detail"`    // Detailed score breakdown
 	MatchedPhrases []MatchedPhrase `json:"matched_phrases"` // All phrases that matched on this page
 	Phrase         string          `json:"phrase"`          // Primary (best) matched phrase – for backwards compat
 	MatchType      string          `json:"match_type"`      // Primary match type
