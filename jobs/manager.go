@@ -724,6 +724,7 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 	useHeadless := cfg.UseHeadlessBrowser
 	headlessSelector := cfg.HeadlessWaitSelector
 	enableSemantic := cfg.EnableSemanticSearch
+	afterCrawlScript := cfg.AfterCrawlScript
 
 	return &models.JobSettings{
 		MaxConcurrentRequests: &maxConcurrent,
@@ -737,6 +738,7 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 		UseHeadlessBrowser:    &useHeadless,
 		HeadlessWaitSelector:  &headlessSelector,
 		EnableSemanticSearch:  &enableSemantic,
+		AfterCrawlScript:      &afterCrawlScript,
 		SkipExtensions:        cfg.SkipExtensions,
 	}
 }

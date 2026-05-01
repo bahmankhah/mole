@@ -1,12 +1,16 @@
 package crawler
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -272,6 +276,9 @@ func (e *Engine) mergeJobSettings(s *models.JobSettings) {
 	}
 	if s.SaveTextContent != nil {
 		e.effectiveConfig.SaveTextContent = *s.SaveTextContent
+	}
+	if s.AfterCrawlScript != nil {
+		e.effectiveConfig.AfterCrawlScript = *s.AfterCrawlScript
 	}
 }
 
@@ -557,6 +564,17 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 
 	// Process content based on type
 	e.processContent(workerID, url, body, contentType, depth, page, frontierURL.AnchorText)
+
+	// Run after-crawl custom script if enabled and script exists
+	if e.effectiveConfig.AfterCrawlScript {
+		e.jobMu.RLock()
+		jobID := ""
+		if e.currentJob != nil {
+			jobID = e.currentJob.ID
+		}
+		e.jobMu.RUnlock()
+		go e.runAfterCrawlScript(url, result.StatusCode, contentType, depth, body, jobID)
+	}
 }
 
 // processContent processes fetched content
@@ -994,6 +1012,64 @@ func (e *Engine) monitor() {
 			}
 			e.jobMu.Unlock()
 		}
+	}
+}
+
+// afterCrawlPayload is the JSON structure passed to after_crawl.py via stdin.
+type afterCrawlPayload struct {
+	URL         string `json:"url"`
+	StatusCode  int    `json:"status_code"`
+	ContentType string `json:"content_type"`
+	Depth       int    `json:"depth"`
+	Body        string `json:"body"`
+	JobID       string `json:"job_id"`
+}
+
+// runAfterCrawlScript executes scripts/after_crawl.py with the crawled page data.
+// The script receives a JSON payload on stdin and its stdout/stderr are logged.
+// Errors are non-fatal; they are logged and the crawl continues.
+func (e *Engine) runAfterCrawlScript(url string, statusCode int, contentType string, depth int, body []byte, jobID string) {
+	const scriptPath = "scripts/after_crawl.py"
+
+	if _, err := os.Stat(scriptPath); err != nil {
+		log.Printf("[AfterCrawl] Script not found at %s, skipping", scriptPath)
+		return
+	}
+
+	pythonCmd := modules.FindPython(e.effectiveConfig.PythonPath)
+
+	payload := afterCrawlPayload{
+		URL:         url,
+		StatusCode:  statusCode,
+		ContentType: contentType,
+		Depth:       depth,
+		Body:        string(body),
+		JobID:       jobID,
+	}
+	input, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[AfterCrawl] Failed to marshal payload for %s: %v", url, err)
+		return
+	}
+
+	cmdCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, pythonCmd, scriptPath)
+	cmd.Stdin = bytes.NewReader(input)
+
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			log.Printf("[AfterCrawl] Script error for %s: %s", url, string(exitErr.Stderr))
+		} else {
+			log.Printf("[AfterCrawl] Failed to run script for %s: %v", url, err)
+		}
+		return
+	}
+
+	if len(out) > 0 {
+		log.Printf("[AfterCrawl] %s => %s", url, strings.TrimSpace(string(out)))
 	}
 }
 

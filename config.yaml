@@ -25,6 +25,7 @@ crawler:
   headless_wait_selector: ""
   headless_render_wait: 10
   enable_semantic_search: false
+  after_crawl_script: false
   # embedding_model: "paraphrase-multilingual-MiniLM-L12-v2"
   embedding_model: "intfloat/multilingual-e5-large"
   skip_extensions:

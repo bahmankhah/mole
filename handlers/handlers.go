@@ -588,7 +588,7 @@ func (h *Handler) UpdateJobSettings(c *gin.Context) {
 		settings.UserAgent == nil && settings.MaxRetries == nil &&
 		settings.SkipContentDuplicates == nil &&
 		settings.UseHeadlessBrowser == nil && settings.HeadlessWaitSelector == nil &&
-		settings.EnableSemanticSearch == nil &&
+		settings.EnableSemanticSearch == nil && settings.AfterCrawlScript == nil &&
 		len(settings.SkipExtensions) == 0 && len(settings.URLIncludePatterns) == 0 &&
 		len(settings.URLExcludePatterns) == 0 && len(settings.ExtraTrackingParams) == 0 {
 		if err := h.jobManager.UpdateJobSettings(jobID, nil); err != nil {

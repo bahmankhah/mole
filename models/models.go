@@ -59,6 +59,7 @@ type JobSettings struct {
 	HeadlessWaitSelector  *string  `json:"headless_wait_selector,omitempty"` // CSS selector to wait for before capturing
 	EnableSemanticSearch  *bool    `json:"enable_semantic_search,omitempty"` // Enable semantic vector search for this job
 	SaveTextContent       *bool    `json:"save_text_content,omitempty"`      // Save extracted text content of pages
+	AfterCrawlScript      *bool    `json:"after_crawl_script,omitempty"`     // Run scripts/after_crawl.py after each successfully crawled page
 }
 
 // Value implements driver.Valuer for GORM JSON storage
