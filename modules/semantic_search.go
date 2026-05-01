@@ -237,13 +237,34 @@ func (s *SemanticSearcher) EmbedAndStore(ctx context.Context, page *models.Crawl
 
 // RebuildIndex reads all embeddings from the database and builds a FAISS index.
 func (s *SemanticSearcher) RebuildIndex(ctx context.Context) error {
+	return s.rebuildIndex(ctx, s.indexPath, "")
+}
+
+// RebuildIndexForCrawlJob builds a FAISS index using only the embeddings
+// that belong to the specified crawl job.
+func (s *SemanticSearcher) RebuildIndexForCrawlJob(ctx context.Context, crawlJobID string) error {
+	return s.rebuildIndex(ctx, s.indexPathForCrawlJob(crawlJobID), crawlJobID)
+}
+
+// indexPathForCrawlJob returns the FAISS index file path for a specific crawl job.
+func (s *SemanticSearcher) indexPathForCrawlJob(crawlJobID string) string {
+	return filepath.Join(filepath.Dir(s.indexPath), fmt.Sprintf("pages_%s.index", crawlJobID))
+}
+
+// rebuildIndex is the internal workhorse. If crawlJobID is empty, all embeddings
+// are indexed; otherwise only those matching the given job.
+func (s *SemanticSearcher) rebuildIndex(ctx context.Context, indexPath string, crawlJobID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	log.Println("[SemanticSearch] Rebuilding FAISS index...")
+	log.Printf("[SemanticSearch] Rebuilding FAISS index (crawlJob=%q, path=%s)...", crawlJobID, indexPath)
 
 	var embeddings []models.PageEmbedding
-	if err := s.db.Find(&embeddings).Error; err != nil {
+	q := s.db.Model(&models.PageEmbedding{})
+	if crawlJobID != "" {
+		q = q.Where("crawl_job_id = ?", crawlJobID)
+	}
+	if err := q.Find(&embeddings).Error; err != nil {
 		return fmt.Errorf("load embeddings: %w", err)
 	}
 
@@ -252,11 +273,36 @@ func (s *SemanticSearcher) RebuildIndex(ctx context.Context) error {
 		return nil
 	}
 
-	// Convert to format expected by the Python script
+	// Convert to format expected by the Python script.
+	// Filter out embeddings with mismatched dimensions — this can happen when
+	// the embedding model was changed. All vectors must have the same length.
+	// Determine the expected dimension by finding the most common vector size,
+	// which corresponds to the current model's embeddings.
+	dimCounts := make(map[int]int)
+	for _, emb := range embeddings {
+		vecLen := len(emb.Embedding) / 4 // float32 = 4 bytes each
+		if vecLen > 0 {
+			dimCounts[vecLen]++
+		}
+	}
+	expectedDim := 0
+	maxCount := 0
+	for dim, count := range dimCounts {
+		if count > maxCount {
+			maxCount = count
+			expectedDim = dim
+		}
+	}
+
 	data := make([]embeddingDataItem, 0, len(embeddings))
+	skippedDim := 0
 	for _, emb := range embeddings {
 		vec := bytesToFloat64Slice(emb.Embedding)
 		if len(vec) == 0 {
+			continue
+		}
+		if expectedDim > 0 && len(vec) != expectedDim {
+			skippedDim++
 			continue
 		}
 		data = append(data, embeddingDataItem{
@@ -265,9 +311,13 @@ func (s *SemanticSearcher) RebuildIndex(ctx context.Context) error {
 		})
 	}
 
+	if skippedDim > 0 {
+		log.Printf("[SemanticSearch] Skipped %d embeddings with mismatched dimensions (expected %d)", skippedDim, expectedDim)
+	}
+
 	req := &embeddingRequest{
 		Command:        "index",
-		IndexPath:      s.indexPath,
+		IndexPath:      indexPath,
 		EmbeddingsData: data,
 	}
 
@@ -288,13 +338,31 @@ func (s *SemanticSearcher) RebuildIndex(ctx context.Context) error {
 	return nil
 }
 
-// Search performs a semantic search and returns ranked results.
+// Search performs a semantic search across all embeddings.
 func (s *SemanticSearcher) Search(ctx context.Context, query string, topK int) ([]models.SemanticSearchResult, error) {
+	return s.search(ctx, query, topK, s.indexPath)
+}
+
+// SearchForCrawlJob performs a semantic search restricted to a single crawl job.
+// If the per-crawl index does not exist yet, it is built on demand.
+func (s *SemanticSearcher) SearchForCrawlJob(ctx context.Context, query string, topK int, crawlJobID string) ([]models.SemanticSearchResult, error) {
+	idxPath := s.indexPathForCrawlJob(crawlJobID)
+	if _, err := os.Stat(idxPath); os.IsNotExist(err) {
+		log.Printf("[SemanticSearch] Per-crawl index not found for %s, building...", crawlJobID)
+		if err := s.RebuildIndexForCrawlJob(ctx, crawlJobID); err != nil {
+			return nil, fmt.Errorf("build crawl index: %w", err)
+		}
+	}
+	return s.search(ctx, query, topK, idxPath)
+}
+
+// search is the internal implementation that queries a given FAISS index file.
+func (s *SemanticSearcher) search(ctx context.Context, query string, topK int, indexPath string) ([]models.SemanticSearchResult, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if _, err := os.Stat(s.indexPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("FAISS index not built yet. Crawl some pages with semantic search enabled first")
+	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("FAISS index not built yet at %s", indexPath)
 	}
 
 	model := s.config.EmbeddingModel
@@ -312,7 +380,7 @@ func (s *SemanticSearcher) Search(ctx context.Context, query string, topK int) (
 		Command:   "search",
 		Query:     searchQuery,
 		Model:     model,
-		IndexPath: s.indexPath,
+		IndexPath: indexPath,
 		TopK:      topK,
 	}
 
@@ -410,6 +478,19 @@ func (s *SemanticSearcher) EmbeddingCount() int64 {
 	var count int64
 	s.db.Model(&models.PageEmbedding{}).Count(&count)
 	return count
+}
+
+// EmbeddingCountForCrawlJob returns the number of stored embeddings for a specific crawl job.
+func (s *SemanticSearcher) EmbeddingCountForCrawlJob(crawlJobID string) int64 {
+	var count int64
+	s.db.Model(&models.PageEmbedding{}).Where("crawl_job_id = ?", crawlJobID).Count(&count)
+	return count
+}
+
+// HasIndexForCrawlJob returns true if a per-crawl FAISS index file exists.
+func (s *SemanticSearcher) HasIndexForCrawlJob(crawlJobID string) bool {
+	_, err := os.Stat(s.indexPathForCrawlJob(crawlJobID))
+	return err == nil
 }
 
 // --- Helpers for serializing float64 slices as float32 bytes ---

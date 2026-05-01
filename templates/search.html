@@ -47,11 +47,11 @@
             <!-- Search Mode Toggle -->
             <div class="flex items-center gap-2 mb-4">
                 <span class="text-sm text-gray-600 mr-2">Mode:</span>
-                <a href="/search?q={{.query}}&mode=keyword"
+                <a href="/search?q={{.query}}&mode=keyword&crawl_job_id={{.crawlJobID}}"
                    class="px-4 py-1.5 rounded-full text-sm font-medium transition {{if eq .mode "keyword"}}mode-active{{else}}mode-inactive hover:bg-gray-50{{end}}">
                     🔤 Keyword
                 </a>
-                <a href="/search?q={{.query}}&mode=semantic"
+                <a href="/search?q={{.query}}&mode=semantic&crawl_job_id={{.crawlJobID}}"
                    class="px-4 py-1.5 rounded-full text-sm font-medium transition {{if eq .mode "semantic"}}mode-active{{else}}mode-inactive hover:bg-gray-50{{end}}">
                     🧠 Semantic
                 </a>
@@ -70,6 +70,12 @@
 
             <form method="GET" action="/search" class="flex gap-4">
                 <input type="hidden" name="mode" value="{{.mode}}">
+                <select name="crawl_job_id" class="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white min-w-[180px]">
+                    <option value="">All Crawls</option>
+                    {{range .crawlJobs}}
+                    <option value="{{.ID}}" {{if eq $.crawlJobID .ID}}selected{{end}}>{{.Domain}} ({{truncate .ID 8}})</option>
+                    {{end}}
+                </select>
                 <input type="text" name="q" value="{{.query}}"
                     placeholder="{{if eq .mode "semantic"}}Describe what you're looking for...{{else}}Search for phrases, URLs, domains...{{end}}"
                     class="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-lg"
@@ -160,47 +166,96 @@
             {{if .results}}
             <!-- Results List -->
             <div class="space-y-4">
-                {{range .results}}
+                {{range $idx, $r := .results}}
                 <div class="bg-white rounded-lg shadow p-5 hover:shadow-md transition">
                     <div class="flex items-start justify-between">
                         <div class="flex-1 min-w-0">
-                            <div class="flex items-center gap-2 mb-2">
-                                <span class="inline-block px-2 py-0.5 rounded text-xs font-medium
-                                    {{if eq .MatchType "content"}}match-content text-yellow-800
-                                    {{else if eq .MatchType "url"}}match-url text-blue-800
-                                    {{else if eq .MatchType "anchor"}}match-anchor text-green-800
-                                    {{else}}bg-gray-100 text-gray-800{{end}}">
-                                    {{.MatchType}}
-                                </span>
-                                <span class="text-sm text-gray-500">{{.Domain}}</span>
-                                {{if gt .Occurrences 1}}
-                                <span class="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">{{.Occurrences}} occurrences</span>
+                            <div class="flex items-center gap-2 mb-2 flex-wrap">
+                                <span class="text-sm text-gray-500">{{$r.Domain}}</span>
+                                {{if gt $r.Occurrences 1}}
+                                <span class="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">{{$r.Occurrences}} total occurrences</span>
                                 {{end}}
+                                <button onclick="showScoreDetail({{$idx}})" class="text-xs bg-purple-50 text-purple-600 px-2 py-0.5 rounded-full font-mono cursor-pointer hover:bg-purple-100 transition border border-transparent hover:border-purple-300">score: {{printf "%.3f" $r.Score}} &#9432;</button>
                             </div>
-                            <h3 class="font-semibold text-indigo-600 mb-1">{{.Phrase}}</h3>
-                            <a href="{{.URL}}" target="_blank" class="text-sm text-blue-500 hover:underline break-all">{{.URL}}</a>
-                            {{if .Context}}
-                            <p class="text-gray-600 text-sm mt-2 line-clamp-2">{{.Context}}</p>
+                            <!-- Matched phrases (collapsible) -->
+                            <div class="relative mb-2" id="phrases-wrap-{{$idx}}">
+                                <div class="flex items-center gap-1.5 flex-wrap overflow-hidden" id="phrases-{{$idx}}" style="max-height:1.75rem;">
+                                    {{range $r.MatchedPhrases}}
+                                    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap
+                                        {{if eq .MatchType "content"}}match-content text-yellow-800
+                                        {{else if eq .MatchType "url"}}match-url text-blue-800
+                                        {{else if eq .MatchType "anchor"}}match-anchor text-green-800
+                                        {{else}}bg-gray-100 text-gray-800{{end}}">
+                                        {{.Phrase}}
+                                        {{if gt .Occurrences 1}}<span class="opacity-60">({{.Occurrences}})</span>{{end}}
+                                    </span>
+                                    {{end}}
+                                </div>
+                                <button class="hidden text-xs text-indigo-600 hover:text-indigo-800 mt-1 font-medium" id="phrases-toggle-{{$idx}}" onclick="togglePhrases({{$idx}})">+ Show more</button>
+                            </div>
+                            <a href="{{$r.URL}}" target="_blank" class="text-sm text-blue-500 hover:underline break-all">{{$r.URL}}</a>
+                            {{if $r.Context}}
+                            <p class="text-gray-600 text-sm mt-2 line-clamp-2">{{$r.Context}}</p>
                             {{end}}
+                            <!-- Score bar -->
+                            <div class="w-full bg-gray-100 rounded-full mt-2 h-1">
+                                <div class="score-bar bg-indigo-500" style="width: {{printf "%.0f" $r.ScorePercent}}%;"></div>
+                            </div>
                         </div>
                         <div class="ml-4 text-right flex-shrink-0">
-                            {{if .FoundAt}}
-                            <div class="text-xs text-gray-400">{{.FoundAt}}</div>
+                            {{if $r.FoundAt}}
+                            <div class="text-xs text-gray-400">{{$r.FoundAt}}</div>
                             {{end}}
-                            {{if .CrawlJobID}}
-                            <a href="/jobs/{{.CrawlJobID}}?format=html" class="text-xs text-indigo-500 hover:underline">View Job</a>
+                            {{if $r.CrawlJobID}}
+                            <a href="/jobs/{{$r.CrawlJobID}}?format=html" class="text-xs text-indigo-500 hover:underline">View Job</a>
                             {{end}}
                         </div>
                     </div>
                 </div>
+                <!-- Hidden data for score detail modal -->
+                <script>
+                if(!window._scoreData) window._scoreData=[];
+                window._scoreData[{{$idx}}]={
+                    url:{{$r.URL}},
+                    score:{{$r.Score}},
+                    detail:{
+                        totalDocs:{{$r.ScoreDetail.TotalDocs}},
+                        matchedTerms:{{$r.ScoreDetail.MatchedTerms}},
+                        multiTermBonus:{{$r.ScoreDetail.MultiTermBonus}},
+                        rawScore:{{$r.ScoreDetail.RawScore}},
+                        finalScore:{{$r.ScoreDetail.FinalScore}}
+                    },
+                    phrases:[{{range $pi, $mp := $r.MatchedPhrases}}{{if $pi}},{{end}}{
+                        phrase:{{$mp.Phrase}},
+                        matchType:{{$mp.MatchType}},
+                        occurrences:{{$mp.Occurrences}},
+                        tf:{{$mp.TF}},
+                        idf:{{$mp.IDF}},
+                        tfidf:{{$mp.TFIDF}},
+                        matchBoost:{{$mp.MatchBoost}},
+                        exactBoost:{{$mp.ExactBoost}},
+                        phraseScore:{{$mp.PhraseScore}}
+                    }{{end}}]
+                };
+                </script>
                 {{end}}
+            </div>
+
+            <!-- Score Detail Bottomsheet -->
+            <div id="score-modal-overlay" class="fixed inset-0 bg-black/40 z-40 hidden" onclick="closeScoreDetail()"></div>
+            <div id="score-modal" class="fixed bottom-0 left-0 right-0 z-50 bg-white rounded-t-2xl shadow-2xl transform translate-y-full transition-transform duration-300 max-h-[80vh] overflow-y-auto">
+                <div class="sticky top-0 bg-white rounded-t-2xl border-b px-6 py-4 flex items-center justify-between">
+                    <h3 class="text-lg font-bold text-gray-800">Score Breakdown</h3>
+                    <button onclick="closeScoreDetail()" class="text-gray-400 hover:text-gray-600 text-2xl leading-none">&times;</button>
+                </div>
+                <div id="score-modal-body" class="px-6 py-4"></div>
             </div>
 
             <!-- Pagination -->
             {{if gt .totalPages 1}}
             <div class="mt-8 flex items-center justify-center gap-2">
                 {{if gt .page 1}}
-                <a href="/search?q={{.query}}&mode=keyword&page={{subtract .page 1}}"
+                <a href="/search?q={{.query}}&mode=keyword&crawl_job_id={{.crawlJobID}}&page={{subtract .page 1}}"
                     class="px-4 py-2 bg-white rounded-lg shadow hover:bg-gray-50 transition text-sm">
                     ← Previous
                 </a>
@@ -211,7 +266,7 @@
                 </span>
 
                 {{if lt .page .totalPages}}
-                <a href="/search?q={{.query}}&mode=keyword&page={{add .page 1}}"
+                <a href="/search?q={{.query}}&mode=keyword&crawl_job_id={{.crawlJobID}}&page={{add .page 1}}"
                     class="px-4 py-2 bg-white rounded-lg shadow hover:bg-gray-50 transition text-sm">
                     Next →
                 </a>
@@ -225,7 +280,7 @@
                 <div class="text-6xl mb-4">🔍</div>
                 <h2 class="text-xl font-semibold text-gray-700 mb-2">No results found</h2>
                 <p class="text-gray-500">No phrase matches found for "<span class="font-semibold">{{.query}}</span>".</p>
-                <p class="text-gray-400 text-sm mt-2">Try a different search term, start a crawl job first, or switch to <a href="/search?q={{.query}}&mode=semantic" class="text-indigo-500 hover:underline">semantic search</a>.</p>
+                <p class="text-gray-400 text-sm mt-2">Try a different search term, start a crawl job first, or switch to <a href="/search?q={{.query}}&mode=semantic&crawl_job_id={{.crawlJobID}}" class="text-indigo-500 hover:underline">semantic search</a>.</p>
             </div>
             {{end}}
         {{end}}
@@ -259,7 +314,135 @@
             const len = input.value.length;
             input.setSelectionRange(len, len);
         }
+        // Check each phrase container for overflow and show toggle button
+        document.querySelectorAll('[id^="phrases-"]').forEach(function(el) {
+            var m = el.id.match(/^phrases-(\d+)$/);
+            if (!m) return;
+            var idx = m[1];
+            if (el.scrollHeight > el.clientHeight + 2) {
+                var btn = document.getElementById('phrases-toggle-' + idx);
+                if (btn) btn.classList.remove('hidden');
+            }
+        });
     });
+
+    // Toggle phrase badges expand/collapse
+    function togglePhrases(idx) {
+        var el = document.getElementById('phrases-' + idx);
+        var btn = document.getElementById('phrases-toggle-' + idx);
+        if (!el || !btn) return;
+        if (el.style.maxHeight === 'none') {
+            el.style.maxHeight = '1.75rem';
+            btn.textContent = '+ Show more';
+        } else {
+            el.style.maxHeight = 'none';
+            btn.textContent = '- Show less';
+        }
+    }
+
+    // Score detail bottomsheet
+    function showScoreDetail(idx) {
+        var d = window._scoreData && window._scoreData[idx];
+        if (!d) return;
+        var body = document.getElementById('score-modal-body');
+
+        var html = '<div class="mb-4">';
+        html += '<div class="text-sm text-gray-500 mb-1 truncate">' + escH(d.url) + '</div>';
+        html += '<div class="flex items-center gap-3 mb-3">';
+        html += '<span class="text-2xl font-bold text-indigo-600">' + d.score + '</span>';
+        html += '<span class="text-sm text-gray-400">final score</span>';
+        html += '</div>';
+
+        // Summary formula
+        html += '<div class="bg-gray-50 rounded-lg p-3 mb-4 font-mono text-xs text-gray-700 overflow-x-auto">';
+        html += '<span class="text-gray-400">formula:</span> ';
+        html += 'Final = (&Sigma; TF&times;IDF&times;MatchBoost&times;ExactBoost) &times; MultiTermBonus<br>';
+        html += 'Final = ' + d.detail.rawScore + ' &times; ' + d.detail.multiTermBonus + ' = <strong>' + d.detail.finalScore + '</strong>';
+        html += '</div>';
+
+        // Overall stats
+        html += '<div class="grid grid-cols-3 gap-3 mb-4">';
+        html += statCard('Total Docs (N)', d.detail.totalDocs);
+        html += statCard('Matched Terms', d.detail.matchedTerms);
+        html += statCard('Multi-Term Bonus', '&times;' + d.detail.multiTermBonus);
+        html += '</div>';
+        html += '</div>';
+
+        // Per-phrase breakdown table
+        html += '<h4 class="font-semibold text-gray-700 mb-2 text-sm">Per-Phrase Breakdown</h4>';
+        html += '<div class="overflow-x-auto">';
+        html += '<table class="w-full text-xs border-collapse">';
+        html += '<thead><tr class="bg-gray-50 text-gray-500 text-left">';
+        html += '<th class="px-2 py-1.5 font-medium">Phrase</th>';
+        html += '<th class="px-2 py-1.5 font-medium">Type</th>';
+        html += '<th class="px-2 py-1.5 font-medium text-right">Occ</th>';
+        html += '<th class="px-2 py-1.5 font-medium text-right">TF</th>';
+        html += '<th class="px-2 py-1.5 font-medium text-right">IDF</th>';
+        html += '<th class="px-2 py-1.5 font-medium text-right">TF&times;IDF</th>';
+        html += '<th class="px-2 py-1.5 font-medium text-right">Match&times;</th>';
+        html += '<th class="px-2 py-1.5 font-medium text-right">Exact&times;</th>';
+        html += '<th class="px-2 py-1.5 font-medium text-right font-bold">Score</th>';
+        html += '</tr></thead><tbody>';
+
+        for (var i = 0; i < d.phrases.length; i++) {
+            var p = d.phrases[i];
+            var cls = i % 2 === 0 ? '' : 'bg-gray-50';
+            var typeCls = p.matchType === 'url' ? 'text-blue-700 bg-blue-50' : p.matchType === 'anchor' ? 'text-green-700 bg-green-50' : 'text-yellow-700 bg-yellow-50';
+            html += '<tr class="' + cls + ' border-t border-gray-100">';
+            html += '<td class="px-2 py-1.5 font-medium text-gray-800 max-w-[10rem] truncate">' + escH(p.phrase) + '</td>';
+            html += '<td class="px-2 py-1.5"><span class="px-1.5 py-0.5 rounded text-[10px] font-medium ' + typeCls + '">' + p.matchType + '</span></td>';
+            html += '<td class="px-2 py-1.5 text-right text-gray-600">' + p.occurrences + '</td>';
+            html += '<td class="px-2 py-1.5 text-right text-gray-600">' + p.tf + '</td>';
+            html += '<td class="px-2 py-1.5 text-right text-gray-600">' + p.idf + '</td>';
+            html += '<td class="px-2 py-1.5 text-right text-gray-600">' + p.tfidf + '</td>';
+            html += '<td class="px-2 py-1.5 text-right">' + (p.matchBoost > 1 ? '<span class="text-orange-600 font-medium">&times;' + p.matchBoost + '</span>' : '<span class="text-gray-400">&times;1</span>') + '</td>';
+            html += '<td class="px-2 py-1.5 text-right">' + (p.exactBoost > 1 ? '<span class="text-green-600 font-medium">&times;' + p.exactBoost + '</span>' : '<span class="text-gray-400">&times;1</span>') + '</td>';
+            html += '<td class="px-2 py-1.5 text-right font-bold text-indigo-600">' + p.phraseScore + '</td>';
+            html += '</tr>';
+
+            // Show formula for this phrase
+            html += '<tr class="' + cls + '">';
+            html += '<td colspan="9" class="px-2 pb-1.5 pt-0">';
+            html += '<span class="text-[10px] font-mono text-gray-400">';
+            html += 'TF=1+log10(' + p.occurrences + ')=' + p.tf;
+            html += ' &middot; IDF=log10(' + d.detail.totalDocs + '/df)=' + p.idf;
+            html += ' &middot; ' + p.tf + '&times;' + p.idf + '=' + p.tfidf;
+            if (p.matchBoost > 1) html += ' &times;' + p.matchBoost + '(' + p.matchType + ')';
+            if (p.exactBoost > 1) html += ' &times;' + p.exactBoost + '(exact)';
+            html += ' = ' + p.phraseScore;
+            html += '</span></td></tr>';
+        }
+        html += '</tbody></table></div>';
+
+        // Explanation
+        html += '<div class="mt-4 p-3 bg-indigo-50 rounded-lg text-xs text-indigo-800 leading-relaxed">';
+        html += '<strong>How scoring works:</strong><br>';
+        html += '<strong>TF</strong> = 1 + log<sub>10</sub>(occurrences) &mdash; how often the phrase appears on this page<br>';
+        html += '<strong>IDF</strong> = log<sub>10</sub>(N / df) &mdash; rarity across all pages (N=' + d.detail.totalDocs + ')<br>';
+        html += '<strong>Match Boost</strong>: URL match &times;2, Anchor match &times;1.5<br>';
+        html += '<strong>Exact Boost</strong>: Phrase exactly matches query term &times;3<br>';
+        html += '<strong>Multi-Term Bonus</strong>: Pages matching K query terms get &times;(1 + 0.5&times;(K-1))';
+        html += '</div>';
+
+        body.innerHTML = html;
+        document.getElementById('score-modal-overlay').classList.remove('hidden');
+        setTimeout(function() {
+            document.getElementById('score-modal').style.transform = 'translateY(0)';
+        }, 10);
+    }
+
+    function closeScoreDetail() {
+        document.getElementById('score-modal').style.transform = 'translateY(100%)';
+        setTimeout(function() {
+            document.getElementById('score-modal-overlay').classList.add('hidden');
+        }, 300);
+    }
+
+    function statCard(label, value) {
+        return '<div class="bg-white border rounded-lg p-2 text-center"><div class="text-lg font-bold text-gray-800">' + value + '</div><div class="text-[10px] text-gray-500 mt-0.5">' + label + '</div></div>';
+    }
+
+    function escH(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
     // Add phrase via API and hide suggestion
     function addPhrase(phrase) {
@@ -289,7 +472,9 @@
         const btn = event.target;
         btn.disabled = true;
         btn.textContent = 'Rebuilding...';
-        fetch('/api/semantic/rebuild', { method: 'POST' })
+        const crawlJobID = document.querySelector('select[name="crawl_job_id"]')?.value || '';
+        const url = '/api/semantic/rebuild' + (crawlJobID ? '?crawl_job_id=' + encodeURIComponent(crawlJobID) : '');
+        fetch(url, { method: 'POST' })
         .then(res => res.json())
         .then(data => {
             if (data.success) {

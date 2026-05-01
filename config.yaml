@@ -27,8 +27,13 @@ crawler:
   headless_render_wait: 10
   enable_semantic_search: false
   after_crawl_script: false
+  enable_word_extraction: false
   # embedding_model: "paraphrase-multilingual-MiniLM-L12-v2"
   embedding_model: "intfloat/multilingual-e5-large"
+  default_language: fa
+  enable_stemming: true
+  enable_lemmatization: true
+  use_crawl_phrases_only: true
   skip_extensions:
     # Images
     - .jpg

@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"math"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +24,8 @@ type Manager struct {
 	db               *gorm.DB
 	config           *config.Config
 	engine           *crawler.Engine
+	stemmer          *modules.Stemmer
+	wordExtractor    *modules.WordExtractor
 	subdomainScanner *modules.SubdomainScanner
 
 	mu              sync.Mutex
@@ -39,6 +43,8 @@ func NewManager(db *gorm.DB, cfg *config.Config, engine *crawler.Engine) *Manage
 		db:               db,
 		config:           cfg,
 		engine:           engine,
+		stemmer:          engine.GetStemmer(),
+		wordExtractor:    engine.GetWordExtractor(),
 		subdomainScanner: scanner,
 	}
 
@@ -115,6 +121,11 @@ func (m *Manager) CreateJobWithSettings(targetURL string, maxDepth int, settings
 
 	log.Printf("[JobManager] Created job %s for URL %s (domain: %s)", job.ID, fullURL, domain)
 	return job, nil
+}
+
+// UpdateJobSeedURLs saves the expanded seed URLs for a job.
+func (m *Manager) UpdateJobSeedURLs(jobID string, seeds models.StringSlice) error {
+	return m.db.Model(&models.CrawlJob{}).Where("id = ?", jobID).Update("seed_urls", seeds).Error
 }
 
 // StartJob starts a crawl job
@@ -597,6 +608,7 @@ func (m *Manager) GetSearchPhrasesWithStats() ([]models.PhraseWithStats, error) 
 			sp.phrase,
 			sp.is_active,
 			sp.created_at,
+			sp.crawl_job_id,
 			COALESCE(stats.match_count, 0) AS match_count,
 			COALESCE(stats.url_count, 0) AS url_count
 		FROM search_phrases sp
@@ -618,8 +630,23 @@ func (m *Manager) GetSearchPhrasesWithStats() ([]models.PhraseWithStats, error) 
 	return results, nil
 }
 
-// AddSearchPhrase adds a new search phrase
+// AddSearchPhrase adds a new search phrase.
+// If the phrase already exists (e.g. auto-extracted), it is promoted to a
+// manually-added phrase (crawl_job_id set to NULL).
 func (m *Manager) AddSearchPhrase(phrase string) (*models.SearchPhrase, error) {
+	// Check if the phrase already exists.
+	var existing models.SearchPhrase
+	err := m.db.Where("phrase = ?", phrase).First(&existing).Error
+	if err == nil {
+		// Promote to manual phrase if it was auto-extracted.
+		if existing.CrawlJobID != nil {
+			m.db.Exec("UPDATE search_phrases SET crawl_job_id = NULL, is_active = ? WHERE id = ?", true, existing.ID)
+			existing.CrawlJobID = nil
+			existing.IsActive = true
+		}
+		return &existing, nil
+	}
+
 	sp := &models.SearchPhrase{
 		Phrase:   phrase,
 		IsActive: true,
@@ -638,6 +665,40 @@ func (m *Manager) UpdateSearchPhrase(id uint, isActive bool) error {
 // DeleteSearchPhrase deletes a search phrase
 func (m *Manager) DeleteSearchPhrase(id uint) error {
 	return m.db.Delete(&models.SearchPhrase{}, "id = ?", id).Error
+}
+
+// GetJobExtractedPhrases returns search phrases that were actually found (have
+// PhraseMatch records) in the given crawl job, with pagination.
+// This uses the phrase_matches table to determine which phrases belong to the
+// crawl, rather than relying on search_phrases.crawl_job_id (which only records
+// the crawl that first created the phrase row).
+func (m *Manager) GetJobExtractedPhrases(crawlJobID string, search string, limit, offset int) ([]models.SearchPhrase, int64, error) {
+	var phrases []models.SearchPhrase
+	var total int64
+
+	// Subquery: distinct phrase IDs found in this crawl job's matches.
+	subq := m.db.Model(&models.PhraseMatch{}).
+		Select("DISTINCT search_phrase_id").
+		Where("crawl_job_id = ? AND search_phrase_id IS NOT NULL", crawlJobID)
+
+	q := m.db.Model(&models.SearchPhrase{}).Where("id IN (?)", subq)
+	if search != "" {
+		q = q.Where("phrase LIKE ?", "%"+search+"%")
+	}
+	q.Count(&total)
+
+	dq := m.db.Where("id IN (?)", subq)
+	if search != "" {
+		dq = dq.Where("phrase LIKE ?", "%"+search+"%")
+	}
+	if err := dq.Order("created_at DESC").
+		Limit(limit).
+		Offset(offset).
+		Find(&phrases).Error; err != nil {
+		return nil, 0, err
+	}
+
+	return phrases, total, nil
 }
 
 // GetActiveJob returns the currently active job
@@ -725,6 +786,8 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 	headlessSelector := cfg.HeadlessWaitSelector
 	enableSemantic := cfg.EnableSemanticSearch
 	afterCrawlScript := cfg.AfterCrawlScript
+	enableWordExtraction := cfg.EnableWordExtraction
+	useCrawlPhrasesOnly := cfg.UseCrawlPhrasesOnly
 
 	return &models.JobSettings{
 		MaxConcurrentRequests: &maxConcurrent,
@@ -739,12 +802,15 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 		HeadlessWaitSelector:  &headlessSelector,
 		EnableSemanticSearch:  &enableSemantic,
 		AfterCrawlScript:      &afterCrawlScript,
+		EnableWordExtraction:  &enableWordExtraction,
+		UseCrawlPhrasesOnly:   &useCrawlPhrasesOnly,
 		SkipExtensions:        cfg.SkipExtensions,
 	}
 }
 
 // SemanticSearch performs a vector-based semantic search across all crawled pages.
-func (m *Manager) SemanticSearch(query string, topK int) ([]models.SemanticSearchResult, error) {
+// If crawlJobID is non-empty only embeddings from that job are searched.
+func (m *Manager) SemanticSearch(query string, topK int, crawlJobID string) ([]models.SemanticSearchResult, error) {
 	searcher := m.engine.GetSemanticSearcher()
 	if searcher == nil {
 		return nil, fmt.Errorf("semantic search is not available")
@@ -753,11 +819,20 @@ func (m *Manager) SemanticSearch(query string, topK int) ([]models.SemanticSearc
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
+	if crawlJobID != "" {
+		return searcher.SearchForCrawlJob(ctx, query, topK, crawlJobID)
+	}
 	return searcher.Search(ctx, query, topK)
 }
 
 // RebuildSemanticIndex triggers a rebuild of the FAISS index.
 func (m *Manager) RebuildSemanticIndex() error {
+	return m.RebuildSemanticIndexForCrawlJob("")
+}
+
+// RebuildSemanticIndexForCrawlJob rebuilds the FAISS index.
+// If crawlJobID is empty the global index is rebuilt; otherwise a per-crawl index.
+func (m *Manager) RebuildSemanticIndexForCrawlJob(crawlJobID string) error {
 	searcher := m.engine.GetSemanticSearcher()
 	if searcher == nil {
 		return fmt.Errorf("semantic search is not available")
@@ -766,6 +841,9 @@ func (m *Manager) RebuildSemanticIndex() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
+	if crawlJobID != "" {
+		return searcher.RebuildIndexForCrawlJob(ctx, crawlJobID)
+	}
 	return searcher.RebuildIndex(ctx)
 }
 
@@ -786,66 +864,371 @@ func (m *Manager) GetSemanticSearchStats() map[string]interface{} {
 	}
 }
 
-// SearchPhraseMatches searches phrase matches using n-gram matching
-func (m *Manager) SearchPhraseMatches(query string, limit, offset int) ([]models.SearchResult, int64, error) {
+// SearchPhraseMatches performs TF-IDF ranked keyword search over phrase_matches.
+//
+// Scoring model (per page):
+//   - TF(t,d) = 1 + log10(occurrences)          (log-scaled term frequency)
+//   - IDF(t)  = log10(N / df(t))                (inverse document frequency)
+//   - score   = Σ TF(t,d) × IDF(t)              summed across ALL matched query terms
+//   - Exact-match boost: if the indexed phrase exactly equals a query n-gram → ×3
+//   - Match-type boost: URL matches ×2, anchor matches ×1.5
+//   - Multi-term bonus: pages matching K distinct query n-grams get ×(1 + 0.5*(K-1))
+//
+// Results are grouped by page URL — each result lists ALL matched phrases.
+// If crawlJobID is non-empty, results are restricted to that crawl job.
+func (m *Manager) SearchPhraseMatches(query string, crawlJobID string, limit, offset int) ([]models.SearchResult, int64, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, 0, fmt.Errorf("search query cannot be empty")
 	}
 
-	// Generate n-grams from the query
-	words := strings.Fields(query)
-	ngrams := generateNgrams(words)
+	// Normalise query using the same pipeline as the word extractor
+	// (lowercase, strip punctuation, remove stop words, stem).
+	var words []string
+	if m.wordExtractor != nil {
+		words = m.wordExtractor.NormalizeQueryTokens(query)
+	} else {
+		words = strings.Fields(strings.ToLower(query))
+		if m.stemmer != nil && m.stemmer.Enabled() && len(words) > 0 {
+			words = m.stemmer.StemTokens(words)
+		}
+	}
 
+	ngrams := generateNgrams(words)
 	if len(ngrams) == 0 {
 		return nil, 0, nil
 	}
 
-	// Build query conditions for each n-gram
-	var conditions []string
-	var args []interface{}
-	for _, ngram := range ngrams {
-		conditions = append(conditions, "pm.phrase LIKE ?")
-		args = append(args, "%"+ngram+"%")
+	// Build a set of query n-grams for exact-match detection.
+	ngramSet := make(map[string]bool, len(ngrams))
+	for _, ng := range ngrams {
+		ngramSet[ng] = true
 	}
 
-	whereClause := strings.Join(conditions, " OR ")
+	// ── 1. Total document count (N) for IDF ──────────────────────────
+	var totalDocs int64
+	docCountQ := m.db.Model(&models.CrawledPage{}).Where("is_archived = ?", false)
+	if crawlJobID != "" {
+		docCountQ = docCountQ.Where("crawl_job_id = ?", crawlJobID)
+	}
+	docCountQ.Count(&totalDocs)
+	if totalDocs == 0 {
+		totalDocs = 1
+	}
 
-	// Count total distinct results
-	var total int64
-	countSQL := fmt.Sprintf(`
-		SELECT COUNT(*) FROM (
-			SELECT DISTINCT pm.url, pm.phrase, pm.match_type
-			FROM phrase_matches pm
-			WHERE pm.is_archived = 0 AND (%s)
-		) AS sub
-	`, whereClause)
-	m.db.Raw(countSQL, args...).Scan(&total)
+	// ── 2. Fetch matching phrase_match rows ──────────────────────────
+	var conditions []string
+	var ngramArgs []interface{}
+	for _, ngram := range ngrams {
+		conditions = append(conditions, "pm.phrase LIKE ?")
+		ngramArgs = append(ngramArgs, ngram+"%")
+	}
+	ngramClause := strings.Join(conditions, " OR ")
 
-	// Get results with grouping to avoid duplicates, ordered by total occurrences
+	baseFilter := "pm.is_archived = 0"
+	var baseArgs []interface{}
+	if crawlJobID != "" {
+		baseFilter += " AND pm.crawl_job_id = ?"
+		baseArgs = append(baseArgs, crawlJobID)
+	}
+
+	allArgs := append(baseArgs, ngramArgs...)
+
 	selectSQL := fmt.Sprintf(`
 		SELECT 
 			pm.phrase,
 			pm.url,
 			pm.match_type,
 			pm.context,
-			SUM(pm.occurrences) as occurrences,
+			pm.occurrences,
 			pm.crawl_job_id,
+			pm.page_id,
 			COALESCE(cj.domain, '') as domain,
-			MAX(pm.found_at) as found_at
+			pm.found_at
 		FROM phrase_matches pm
 		LEFT JOIN crawl_jobs cj ON pm.crawl_job_id = cj.id
-		WHERE pm.is_archived = 0 AND (%s)
-		GROUP BY pm.url, pm.phrase, pm.match_type, pm.context, pm.crawl_job_id, cj.domain
-		ORDER BY occurrences DESC, found_at DESC
-		LIMIT ? OFFSET ?
-	`, whereClause)
+		WHERE %s AND (%s)
+	`, baseFilter, ngramClause)
 
-	args = append(args, limit, offset)
+	type rawMatch struct {
+		Phrase      string    `gorm:"column:phrase"`
+		URL         string    `gorm:"column:url"`
+		MatchType   string    `gorm:"column:match_type"`
+		Context     string    `gorm:"column:context"`
+		Occurrences int       `gorm:"column:occurrences"`
+		CrawlJobID  string    `gorm:"column:crawl_job_id"`
+		PageID      uint      `gorm:"column:page_id"`
+		Domain      string    `gorm:"column:domain"`
+		FoundAt     time.Time `gorm:"column:found_at"`
+	}
 
-	var results []models.SearchResult
-	if err := m.db.Raw(selectSQL, args...).Scan(&results).Error; err != nil {
+	var rows []rawMatch
+	if err := m.db.Raw(selectSQL, allArgs...).Scan(&rows).Error; err != nil {
 		return nil, 0, err
+	}
+
+	if len(rows) == 0 {
+		return nil, 0, nil
+	}
+
+	// ── 3. Compute document frequency (df) per phrase ────────────────
+	phraseSet := make(map[string]struct{})
+	for _, r := range rows {
+		phraseSet[r.Phrase] = struct{}{}
+	}
+	phraseList := make([]string, 0, len(phraseSet))
+	for p := range phraseSet {
+		phraseList = append(phraseList, p)
+	}
+
+	type dfRow struct {
+		Phrase string `gorm:"column:phrase"`
+		Df     int64  `gorm:"column:df"`
+	}
+	dfMap := make(map[string]int64, len(phraseList))
+
+	for i := 0; i < len(phraseList); i += 500 {
+		end := i + 500
+		if end > len(phraseList) {
+			end = len(phraseList)
+		}
+		chunk := phraseList[i:end]
+
+		var dfRows []dfRow
+		dfSQL := "SELECT phrase, COUNT(DISTINCT page_id) as df FROM phrase_matches WHERE phrase IN ? AND is_archived = 0"
+		dfArgs := []interface{}{chunk}
+		if crawlJobID != "" {
+			dfSQL += " AND crawl_job_id = ?"
+			dfArgs = append(dfArgs, crawlJobID)
+		}
+		dfSQL += " GROUP BY phrase"
+		m.db.Raw(dfSQL, dfArgs...).Scan(&dfRows)
+		for _, d := range dfRows {
+			dfMap[d.Phrase] = d.Df
+		}
+	}
+
+	// ── 4. Group by URL, aggregate scores across ALL matched phrases ─
+	// Each page gets a combined score from every matched phrase.
+	type phraseInfo struct {
+		Phrase      string
+		MatchType   string
+		Context     string
+		Occurrences int
+		Score       float64
+		TF          float64
+		IDF         float64
+		TFIDF       float64
+		MatchBoost  float64
+		ExactBoost  float64
+	}
+	type pageResult struct {
+		URL        string
+		Domain     string
+		CrawlJobID string
+		FoundAt    time.Time
+		TotalScore float64
+		// key: phrase+"|"+matchType to deduplicate
+		Phrases map[string]*phraseInfo
+		// track which query n-grams matched (for multi-term bonus)
+		MatchedNgrams map[string]bool
+	}
+
+	pageMap := make(map[string]*pageResult)
+
+	for _, r := range rows {
+		pr, exists := pageMap[r.URL]
+		if !exists {
+			pr = &pageResult{
+				URL:           r.URL,
+				Domain:        r.Domain,
+				CrawlJobID:    r.CrawlJobID,
+				FoundAt:       r.FoundAt,
+				Phrases:       make(map[string]*phraseInfo),
+				MatchedNgrams: make(map[string]bool),
+			}
+			pageMap[r.URL] = pr
+		}
+		if r.FoundAt.After(pr.FoundAt) {
+			pr.FoundAt = r.FoundAt
+		}
+
+		// TF-IDF score for this (phrase, page) pair
+		tf := 1.0
+		if r.Occurrences > 1 {
+			tf = 1.0 + math.Log10(float64(r.Occurrences))
+		}
+
+		df := dfMap[r.Phrase]
+		if df < 1 {
+			df = 1
+		}
+		idf := math.Log10(float64(totalDocs) / float64(df))
+		if idf < 0 {
+			idf = 0
+		}
+
+		baseTFIDF := tf * idf
+
+		// Match-type boost
+		matchBoost := 1.0
+		switch r.MatchType {
+		case string(models.MatchTypeURL):
+			matchBoost = 2.0
+		case string(models.MatchTypeAnchor):
+			matchBoost = 1.5
+		}
+
+		// Exact-match boost
+		exactBoost := 1.0
+		if ngramSet[r.Phrase] {
+			exactBoost = 3.0
+		}
+
+		finalScore := baseTFIDF * matchBoost * exactBoost
+
+		// Track which query n-gram this phrase satisfies (for multi-term bonus)
+		for _, ng := range ngrams {
+			if strings.HasPrefix(r.Phrase, ng) {
+				pr.MatchedNgrams[ng] = true
+			}
+		}
+
+		// Accumulate into page-level phrase info
+		pKey := r.Phrase + "|" + r.MatchType
+		pi, pExists := pr.Phrases[pKey]
+		if !pExists {
+			pi = &phraseInfo{
+				Phrase:     r.Phrase,
+				MatchType:  r.MatchType,
+				Context:    r.Context,
+				MatchBoost: matchBoost,
+				ExactBoost: exactBoost,
+			}
+			pr.Phrases[pKey] = pi
+		}
+		pi.Occurrences += r.Occurrences
+		pi.TF += tf
+		pi.IDF = idf // same for all rows of same phrase
+		pi.TFIDF += baseTFIDF
+		pi.Score += finalScore
+		pr.TotalScore += finalScore
+	}
+
+	// Apply multi-term bonus: pages matching more distinct query n-grams
+	// get a multiplier of 1 + 0.5*(K-1) where K is the number of matched n-grams.
+	for _, pr := range pageMap {
+		k := len(pr.MatchedNgrams)
+		if k > 1 {
+			pr.TotalScore *= 1.0 + 0.5*float64(k-1)
+		}
+	}
+
+	// ── 5. Sort by score descending ──────────────────────────────────
+	sorted := make([]*pageResult, 0, len(pageMap))
+	for _, pr := range pageMap {
+		sorted = append(sorted, pr)
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].TotalScore != sorted[j].TotalScore {
+			return sorted[i].TotalScore > sorted[j].TotalScore
+		}
+		return sorted[i].FoundAt.After(sorted[j].FoundAt)
+	})
+
+	maxScore := 0.0
+	if len(sorted) > 0 {
+		maxScore = sorted[0].TotalScore
+	}
+
+	// ── 6. Paginate and build output ─────────────────────────────────
+	var total int64 = int64(len(sorted))
+	if offset >= len(sorted) {
+		return nil, total, nil
+	}
+	end := offset + limit
+	if end > len(sorted) {
+		end = len(sorted)
+	}
+	page := sorted[offset:end]
+
+	results := make([]models.SearchResult, 0, len(page))
+	for _, pr := range page {
+		pct := 0.0
+		if maxScore > 0 {
+			pct = (pr.TotalScore / maxScore) * 100.0
+		}
+
+		// Build matched phrases list sorted by individual score descending.
+		mpList := make([]models.MatchedPhrase, 0, len(pr.Phrases))
+		for _, pi := range pr.Phrases {
+			mpList = append(mpList, models.MatchedPhrase{
+				Phrase:      pi.Phrase,
+				MatchType:   pi.MatchType,
+				Context:     pi.Context,
+				Occurrences: pi.Occurrences,
+				TF:          math.Round(pi.TF*1000) / 1000,
+				IDF:         math.Round(pi.IDF*1000) / 1000,
+				TFIDF:       math.Round(pi.TFIDF*1000) / 1000,
+				MatchBoost:  pi.MatchBoost,
+				ExactBoost:  pi.ExactBoost,
+				PhraseScore: math.Round(pi.Score*1000) / 1000,
+			})
+		}
+		sort.Slice(mpList, func(i, j int) bool {
+			if mpList[i].PhraseScore != mpList[j].PhraseScore {
+				return mpList[i].PhraseScore > mpList[j].PhraseScore
+			}
+			iExact := ngramSet[mpList[i].Phrase]
+			jExact := ngramSet[mpList[j].Phrase]
+			if iExact != jExact {
+				return iExact
+			}
+			return mpList[i].Occurrences > mpList[j].Occurrences
+		})
+
+		// Primary phrase = best match
+		primary := mpList[0]
+
+		// Total occurrences across all matched phrases
+		totalOcc := 0
+		for _, mp := range mpList {
+			totalOcc += mp.Occurrences
+		}
+
+		// Multi-term bonus info
+		k := len(pr.MatchedNgrams)
+		multiTermBonus := 1.0
+		if k > 1 {
+			multiTermBonus = 1.0 + 0.5*float64(k-1)
+		}
+
+		// rawScore = sum of phrase scores before multi-term bonus
+		rawScore := 0.0
+		for _, mp := range mpList {
+			rawScore += mp.PhraseScore
+		}
+
+		results = append(results, models.SearchResult{
+			URL:          pr.URL,
+			Domain:       pr.Domain,
+			CrawlJobID:   pr.CrawlJobID,
+			FoundAt:      pr.FoundAt.Format("2006-01-02 15:04:05"),
+			Score:        math.Round(pr.TotalScore*1000) / 1000,
+			ScorePercent: math.Round(pct*10) / 10,
+			ScoreDetail: models.ScoreBreakdown{
+				TotalDocs:      totalDocs,
+				MatchedTerms:   k,
+				MultiTermBonus: math.Round(multiTermBonus*1000) / 1000,
+				RawScore:       math.Round(rawScore*1000) / 1000,
+				FinalScore:     math.Round(pr.TotalScore*1000) / 1000,
+			},
+			MatchedPhrases: mpList,
+			Phrase:         primary.Phrase,
+			MatchType:      primary.MatchType,
+			Context:        primary.Context,
+			Occurrences:    totalOcc,
+		})
 	}
 
 	return results, total, nil

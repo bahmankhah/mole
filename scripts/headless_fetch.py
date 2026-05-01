@@ -108,23 +108,40 @@ def _is_cdn_challenge(content: str, status_code: int = 200) -> bool:
 def _is_spa_shell_unrendered(content: str) -> bool:
     """Detect an unrendered SPA shell (framework loaded but never bootstrapped).
 
-    Signs of an unrendered AngularJS/React/Vue page:
+    Signs of an unrendered SPA page:
     - ng-app present but no ng-scope (AngularJS never compiled the DOM)
-    - Multiple unresolved {{ }} template expressions
-    - ng-cloak still present (AngularJS hides elements until compiled)
+    - <app-root> present but empty or near-empty (Angular 2+ never rendered)
+    - Multiple unresolved {{ }} template expressions (no framework signals)
+
+    IMPORTANT: If ng-scope IS present, AngularJS compiled successfully.
+    Remaining unresolved {{ }} are just lazy bindings in hidden/conditional
+    sections — this is normal for large AngularJS apps.
     """
-    # AngularJS — ng-scope is added by AngularJS when it compiles the DOM.
-    # If ng-app is present but ng-scope is missing, the framework never ran.
-    if "ng-app=" in content and "ng-scope" not in content:
-        return True
-    # ng-cloak: AngularJS removes this attribute/class after compilation.
-    # If many ng-cloak elements remain, the app hasn't rendered.
-    if "ng-app=" in content and content.count("ng-cloak") > 2:
-        return True
-    # Unresolved template expressions (more than 3)
-    if "{{" in content:
-        unresolved = re.findall(r"\{\{[^}]+\}\}", content)
-        if len(unresolved) > 3:
+    # AngularJS — ng-scope is added when AngularJS compiles the DOM.
+    if "ng-app=" in content:
+        if "ng-scope" not in content:
+            # Framework loaded but never compiled — definitely unrendered
+            return True
+        # ng-scope present → AngularJS bootstrapped OK, page is rendered
+        return False
+    # Angular 2+: <app-root> should be populated after bootstrap.
+    # If it's empty or has only whitespace/comments, the app hasn't rendered.
+    if "<app-root" in content:
+        match = re.search(r"<app-root[^>]*>(.*?)</app-root>", content, re.DOTALL)
+        if match:
+            inner = match.group(1).strip()
+            # Remove HTML comments
+            inner = re.sub(r"<!--.*?-->", "", inner, flags=re.DOTALL).strip()
+            if len(inner) < 50:
+                return True
+        return False
+    # Generic SPA: unresolved template expressions (more than 10) in a small page
+    # suggest the framework never ran.  Skip expressions inside <style>/<script>.
+    if "{{" in content and len(content) < 50000:
+        stripped = re.sub(r"<style[^>]*>.*?</style>", "", content, flags=re.DOTALL | re.IGNORECASE)
+        stripped = re.sub(r"<script[^>]*>.*?</script>", "", stripped, flags=re.DOTALL | re.IGNORECASE)
+        unresolved = re.findall(r"\{\{[^}]+\}\}", stripped)
+        if len(unresolved) > 10:
             return True
     return False
 
@@ -247,9 +264,20 @@ def fetch(url: str, timeout_ms: int, wait_selector: str | None, user_agent: str 
             parsed = urlparse(url)
             has_fragment = bool(parsed.fragment)
 
-            # Navigate to the full URL. Hash fragments are never sent to the
-            # server, so the server/CDN sees the base URL regardless.
-            response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            # For hash-based SPA URLs (e.g. /#/search?q=...), navigate to the
+            # BASE URL without the hash first.  This lets the SPA framework
+            # bootstrap on its default/home route.  We'll set the hash
+            # fragment LATER (Step 4) as a genuine route change so we can
+            # properly wait for the route's API calls and DOM rendering.
+            if has_fragment:
+                base_url = parsed._replace(fragment="").geturl()
+                # Remove trailing # if present
+                base_url = base_url.rstrip("#")
+                nav_url = base_url
+            else:
+                nav_url = url
+
+            response = page.goto(nav_url, wait_until="domcontentloaded", timeout=timeout_ms)
 
             if response:
                 result["status_code"] = response.status
@@ -345,78 +373,86 @@ def fetch(url: str, timeout_ms: int, wait_selector: str | None, user_agent: str 
                     pass
 
             # ── SPA rendering wait strategy ──────────────────────────────
-            # Step 1: Wait for all resources (scripts, CSS) to finish loading.
+            # Framework-agnostic: we rely on two universal signals that work
+            # for ANY SPA (React, Vue, Angular, Svelte, AngularJS, etc.):
+            #   1) Network idle — no pending HTTP requests for 500ms
+            #   2) DOM stability — no DOM mutations for 1s
+            # This is exactly how a real browser "knows" a page is done.
+
+            # Step 1: Wait for all resources (scripts, CSS, images) to load.
             try:
                 page.wait_for_load_state("load", timeout=min(timeout_ms, 30000))
             except Exception:
                 pass
 
-            # Step 2: Wait for initial network activity to settle.
+            # Step 2: Wait for network to go idle (no requests for 500ms).
+            # This catches API calls SPAs make after bootstrap.
             try:
                 page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 25000))
             except Exception:
                 pass
 
-            # Step 2b: For AngularJS apps, wait for the framework to bootstrap.
-            # AngularJS adds the 'ng-scope' class to the root element after
-            # compilation.  Poll for it with a generous timeout.
-            _is_angular = 'ng-app=' in page.content()
-            if _is_angular:
+            # Step 3: Wait for DOM to stop mutating — the universal SPA
+            # readiness signal.  A MutationObserver resolves once no DOM
+            # changes occur for 1 second.  If nothing mutates at all, it
+            # resolves after 2 seconds (page was already stable).
+            try:
+                page.wait_for_function(
+                    """() => new Promise(resolve => {
+                        let timer = null;
+                        const observer = new MutationObserver(() => {
+                            clearTimeout(timer);
+                            timer = setTimeout(() => { observer.disconnect(); resolve(true); }, 1000);
+                        });
+                        observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+                        timer = setTimeout(() => { observer.disconnect(); resolve(true); }, 2000);
+                    })""",
+                    timeout=min(timeout_ms, 15000),
+                )
+            except Exception:
+                pass
+
+            # Step 4: Hash-fragment SPA route navigation.
+            # We navigated to the base URL without the hash, so the SPA
+            # framework bootstrapped on its default route.  Now set the
+            # actual hash fragment — this is a genuine new route change.
+            # We wait for the route's API calls (networkidle) and DOM
+            # rendering (mutation observer) to complete.
+            if has_fragment:
+                desired_hash = "#" + parsed.fragment
+                page.evaluate("(h) => { window.location.hash = h; }",
+                              desired_hash)
+                _time.sleep(1)
+                # Wait for API calls triggered by the new route
                 try:
-                    page.wait_for_selector(".ng-scope", timeout=min(timeout_ms, 15000))
+                    page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 25000))
                 except Exception:
-                    # Framework may not have bootstrapped yet; continue and
-                    # the unrendered-shell retry below will handle it.
+                    pass
+                # Wait for DOM to stabilise after route content renders
+                # (longer thresholds: 1.5s quiet for resolve, 3s max wait)
+                try:
+                    page.wait_for_function(
+                        """() => new Promise(resolve => {
+                            let t = null;
+                            const o = new MutationObserver(() => {
+                                clearTimeout(t);
+                                t = setTimeout(() => { o.disconnect(); resolve(true); }, 1500);
+                            });
+                            o.observe(document.body, { childList: true, subtree: true, characterData: true });
+                            t = setTimeout(() => { o.disconnect(); resolve(true); }, 3000);
+                        })""",
+                        timeout=min(timeout_ms, 15000),
+                    )
+                except Exception:
                     pass
 
-            # Step 3: If the original URL had a hash fragment (SPA route), CDN
-            # challenges or JS redirects may have stripped it during page load.
-            # Check if the hash matches what we expect. If not, set it via JS.
-            # SPA frameworks detect hash changes either via 'hashchange' event
-            # listeners or internal polling (e.g. AngularJS polls every 100ms).
-            # After setting the hash, we wait for the framework to process the
-            # route change and make any API calls for the new view.
-            if has_fragment:
-                current_hash = page.evaluate("() => window.location.hash")
-                desired_hash = "#" + parsed.fragment
-                if current_hash != desired_hash:
-                    page.evaluate("(h) => { window.location.hash = h; }",
-                                  desired_hash)
-                    # Wait for framework to detect hash change and start routing
-                    _time.sleep(1)
-                    # Wait for API calls triggered by the new route
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 20000))
-                    except Exception:
-                        pass
-                    # For AngularJS: after hash change, wait for $digest cycle
-                    # to process the route and render the new view.
-                    if _is_angular:
-                        try:
-                            page.wait_for_function(
-                                """() => {
-                                    // Check that AngularJS has finished digesting
-                                    try {
-                                        var root = document.querySelector('[ng-app]') || document.querySelector('.ng-scope');
-                                        if (!root) return false;
-                                        var scope = angular.element(root).scope();
-                                        if (!scope) return false;
-                                        return !scope.$$phase;
-                                    } catch(e) { return true; }
-                                }""",
-                                timeout=10000,
-                            )
-                        except Exception:
-                            pass
-                        _time.sleep(2)  # extra time for API response + DOM update
-
-            # Step 4: Final networkidle wait for any late API responses
+            # Step 5: Final networkidle wait for any late API responses
             try:
                 page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 15000))
             except Exception:
                 pass
 
-            # Step 5: Final render delay — gives the framework time to update
+            # Step 6: Final render delay — gives the framework time to update
             # the DOM with the data it received from API calls.
             _time.sleep(render_wait)
 
@@ -447,35 +483,50 @@ def fetch(url: str, timeout_ms: int, wait_selector: str | None, user_agent: str 
                     # Increasing backoff: 2s, 4s, 6s between retries
                     _time.sleep(attempt * 2)
                     try:
-                        page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
+                        page.reload(wait_until="networkidle", timeout=timeout_ms)
                     except Exception:
                         pass
+                    # DOM stability check
                     try:
-                        page.wait_for_load_state("load", timeout=min(timeout_ms, 30000))
+                        page.wait_for_function(
+                            """() => new Promise(resolve => {
+                                let t = null;
+                                const o = new MutationObserver(() => {
+                                    clearTimeout(t);
+                                    t = setTimeout(() => { o.disconnect(); resolve(true); }, 1000);
+                                });
+                                o.observe(document.body, { childList: true, subtree: true, characterData: true });
+                                t = setTimeout(() => { o.disconnect(); resolve(true); }, 2000);
+                            })""",
+                            timeout=min(timeout_ms, 10000),
+                        )
                     except Exception:
                         pass
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 25000))
-                    except Exception:
-                        pass
-                    # Wait for AngularJS to bootstrap
-                    if 'ng-app=' in page.content():
+                    # Re-trigger hash fragment route
+                    if has_fragment:
+                        desired_hash = "#" + parsed.fragment
+                        page.evaluate("(h) => { window.location.hash = h; }",
+                                      desired_hash)
+                        _time.sleep(1)
                         try:
-                            page.wait_for_selector(".ng-scope", timeout=min(timeout_ms, 15000))
+                            page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 25000))
                         except Exception:
                             pass
-                    # Re-set hash fragment if needed
-                    if has_fragment:
-                        current_hash = page.evaluate("() => window.location.hash")
-                        desired_hash = "#" + parsed.fragment
-                        if current_hash != desired_hash:
-                            page.evaluate("(h) => { window.location.hash = h; }",
-                                          desired_hash)
-                            _time.sleep(1)
-                            try:
-                                page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 20000))
-                            except Exception:
-                                pass
+                        try:
+                            page.wait_for_function(
+                                """() => new Promise(resolve => {
+                                    let t = null;
+                                    const o = new MutationObserver(() => {
+                                        clearTimeout(t);
+                                        t = setTimeout(() => { o.disconnect(); resolve(true); }, 1500);
+                                    });
+                                    o.observe(document.body, { childList: true, subtree: true, characterData: true });
+                                    t = setTimeout(() => { o.disconnect(); resolve(true); }, 3000);
+                                })""",
+                                timeout=min(timeout_ms, 15000),
+                            )
+                        except Exception:
+                            pass
                     _time.sleep(render_wait)
                     result["body"] = page.content()
                     if not _is_spa_shell_unrendered(result["body"]):
