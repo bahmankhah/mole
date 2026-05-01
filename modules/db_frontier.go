@@ -290,10 +290,10 @@ func (f *DBFrontier) GetNextURL() (*models.FrontierURL, error) {
 	var minID, maxID uint
 	f.db.Model(&models.FrontierURL{}).
 		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
-		Select("MIN(id)").Scan(&minID)
+		Select("COALESCE(MIN(id), 0)").Scan(&minID)
 	f.db.Model(&models.FrontierURL{}).
 		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
-		Select("MAX(id)").Scan(&maxID)
+		Select("COALESCE(MAX(id), 0)").Scan(&maxID)
 
 	if maxID == 0 {
 		return nil, errors.New("no pending URLs in frontier")
