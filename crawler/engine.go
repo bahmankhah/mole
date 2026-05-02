@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -55,6 +56,7 @@ type Engine struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
+	afterWG    sync.WaitGroup
 	currentJob *models.CrawlJob
 	jobMu      sync.RWMutex
 	rng        *rand.Rand
@@ -185,6 +187,7 @@ func (e *Engine) Start(job *models.CrawlJob) error {
 
 	// Recreate fetcher with effective config so per-job overrides take effect
 	e.fetcher = newFetcher(e.effectiveConfig)
+	log.Printf("[Engine] Effective after_crawl_script=%t for job %s", e.effectiveConfig.AfterCrawlScript, job.ID)
 
 	// Reset robots.txt rules for new job
 	e.robotRulesMu.Lock()
@@ -369,6 +372,7 @@ func (e *Engine) Stop() {
 	}
 
 	e.wg.Wait()
+	e.afterWG.Wait()
 
 	// Check if semantic search was enabled before clearing the job
 	shouldRebuildIndex := e.effectiveConfig.EnableSemanticSearch
@@ -442,6 +446,7 @@ func (e *Engine) GetState() CrawlerState {
 func (e *Engine) watchForCompletion() {
 	// Wait for all workers to finish
 	e.wg.Wait()
+	e.afterWG.Wait()
 
 	currentState := atomic.LoadInt32(&e.state)
 
@@ -628,7 +633,11 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 			jobID = e.currentJob.ID
 		}
 		e.jobMu.RUnlock()
-		go e.runAfterCrawlScript(url, result.StatusCode, contentType, depth, body, jobID)
+		e.afterWG.Add(1)
+		go func() {
+			defer e.afterWG.Done()
+			e.runAfterCrawlScript(url, result.StatusCode, contentType, depth, body, jobID)
+		}()
 	}
 }
 
@@ -1115,12 +1124,13 @@ type afterCrawlPayload struct {
 // The script receives a JSON payload on stdin and its stdout/stderr are logged.
 // Errors are non-fatal; they are logged and the crawl continues.
 func (e *Engine) runAfterCrawlScript(url string, statusCode int, contentType string, depth int, body []byte, jobID string) {
-	const scriptPath = "scripts/after_crawl.py"
-
-	if _, err := os.Stat(scriptPath); err != nil {
-		log.Printf("[AfterCrawl] Script not found at %s, skipping", scriptPath)
+	scriptPath, err := resolveAfterCrawlScriptPath()
+	if err != nil {
+		log.Printf("[AfterCrawl] Script not found, skipping %s: %v", url, err)
 		return
 	}
+
+	log.Printf("[AfterCrawl] Running %s for %s", scriptPath, url)
 
 	pythonCmd := modules.FindPython(e.effectiveConfig.PythonPath)
 
@@ -1144,10 +1154,13 @@ func (e *Engine) runAfterCrawlScript(url string, statusCode int, contentType str
 	cmd := exec.CommandContext(cmdCtx, pythonCmd, scriptPath)
 	cmd.Stdin = bytes.NewReader(input)
 
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			log.Printf("[AfterCrawl] Script error for %s: %s", url, string(exitErr.Stderr))
+		output := strings.TrimSpace(string(out))
+		if cmdCtx.Err() == context.DeadlineExceeded {
+			log.Printf("[AfterCrawl] Script timed out for %s after 60s: %s", url, output)
+		} else if output != "" {
+			log.Printf("[AfterCrawl] Script error for %s: %v: %s", url, err, output)
 		} else {
 			log.Printf("[AfterCrawl] Failed to run script for %s: %v", url, err)
 		}
@@ -1157,6 +1170,28 @@ func (e *Engine) runAfterCrawlScript(url string, statusCode int, contentType str
 	if len(out) > 0 {
 		log.Printf("[AfterCrawl] %s => %s", url, strings.TrimSpace(string(out)))
 	}
+}
+
+func resolveAfterCrawlScriptPath() (string, error) {
+	const relScriptPath = "scripts/after_crawl.py"
+
+	candidates := []string{relScriptPath}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), relScriptPath))
+	}
+
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			abs, err := filepath.Abs(candidate)
+			if err != nil {
+				return candidate, nil
+			}
+			return abs, nil
+		}
+	}
+
+	wd, _ := os.Getwd()
+	return "", fmt.Errorf("checked %q relative to working directory %q and executable directory", relScriptPath, wd)
 }
 
 // GetStats returns current crawl statistics

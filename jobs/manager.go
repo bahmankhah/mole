@@ -781,12 +781,17 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 	maxPages := cfg.MaxPages
 	userAgent := cfg.UserAgent
 	maxRetries := cfg.MaxRetries
+	respectRobots := cfg.RespectRobotsTxt
 	skipContentDup := cfg.SkipContentDuplicates
 	useHeadless := cfg.UseHeadlessBrowser
 	headlessSelector := cfg.HeadlessWaitSelector
 	enableSemantic := cfg.EnableSemanticSearch
+	saveTextContent := cfg.SaveTextContent
 	afterCrawlScript := cfg.AfterCrawlScript
 	enableWordExtraction := cfg.EnableWordExtraction
+	enableStemming := cfg.EnableStemming
+	enableLemmatization := cfg.EnableLemmatization
+	defaultLanguage := cfg.DefaultLanguage
 	useCrawlPhrasesOnly := cfg.UseCrawlPhrasesOnly
 
 	return &models.JobSettings{
@@ -797,12 +802,17 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 		MaxPages:              &maxPages,
 		UserAgent:             &userAgent,
 		MaxRetries:            &maxRetries,
+		RespectRobotsTxt:      &respectRobots,
 		SkipContentDuplicates: &skipContentDup,
 		UseHeadlessBrowser:    &useHeadless,
 		HeadlessWaitSelector:  &headlessSelector,
 		EnableSemanticSearch:  &enableSemantic,
+		SaveTextContent:       &saveTextContent,
 		AfterCrawlScript:      &afterCrawlScript,
 		EnableWordExtraction:  &enableWordExtraction,
+		EnableStemming:        &enableStemming,
+		EnableLemmatization:   &enableLemmatization,
+		DefaultLanguage:       &defaultLanguage,
 		UseCrawlPhrasesOnly:   &useCrawlPhrasesOnly,
 		SkipExtensions:        cfg.SkipExtensions,
 	}

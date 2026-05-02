@@ -657,11 +657,15 @@ func (h *Handler) UpdateJobSettings(c *gin.Context) {
 	// Check if settings are completely empty (all zero values) — treat as nil
 	if settings.MaxConcurrentRequests == nil && settings.RequestTimeoutSec == nil &&
 		settings.PolitenessDelayMs == nil && settings.MaxDepth == nil &&
+		settings.MaxPages == nil &&
 		settings.UserAgent == nil && settings.MaxRetries == nil &&
+		settings.RespectRobotsTxt == nil &&
 		settings.SkipContentDuplicates == nil &&
 		settings.UseHeadlessBrowser == nil && settings.HeadlessWaitSelector == nil &&
 		settings.EnableSemanticSearch == nil && settings.AfterCrawlScript == nil &&
-		settings.EnableWordExtraction == nil &&
+		settings.SaveTextContent == nil && settings.EnableWordExtraction == nil &&
+		settings.EnableStemming == nil && settings.EnableLemmatization == nil &&
+		settings.DefaultLanguage == nil && settings.UseCrawlPhrasesOnly == nil &&
 		len(settings.SkipExtensions) == 0 && len(settings.URLIncludePatterns) == 0 &&
 		len(settings.URLExcludePatterns) == 0 && len(settings.ExtraTrackingParams) == 0 {
 		if err := h.jobManager.UpdateJobSettings(jobID, nil); err != nil {

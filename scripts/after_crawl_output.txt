@@ -1,28 +1,54 @@
-status=200 depth=0 body_len=588092 url=https://divar.ir/s/tehran
-status=200 depth=1 body_len=164684 url=https://divar.ir/v/%D8%AF%D8%B3%D8%AA%DA%AF%D8%A7%D9%87-%D8%A8%D8%A7%D9%81%D9%86%D8%AF%DA%AF%DB%8C-%DA%98%D8%A7%D9%BE%D9%86%DB%8C/Qa0_O-Kf
-status=200 depth=1 body_len=156422 url=https://divar.ir/v/%D8%A7%D8%AA%D9%88%D9%85%D8%A7%D8%AA-%D9%BE%D9%85%D9%BE-%D8%A7%D9%84%D9%85%D9%86%D8%AA-%D8%AA%D8%B1%DA%A9%DB%8C%D9%87-%D9%87%D9%85%D8%B1%D8%A7%D9%87-%D8%A8%D8%A7-%D9%85%D9%86%D8%A8%D8%B9/Qa0_O5Si
-status=200 depth=1 body_len=179416 url=https://divar.ir/v/%D8%B9%DA%A9%D8%B3-%D9%88%D8%AA%D8%A8%D9%84%DB%8C%D8%BA-%D9%81%DB%8C%DA%A9-%D9%86%D8%AF%D8%A7%D8%B1%DB%8C%D9%85-%D8%B1%D9%88%D8%B4%D9%88%DB%8C%DB%8C-%D8%B4%DB%8C%D8%B1%D8%A7%D9%84%D8%A7%D8%AA-%DA%A9%D8%A7%D8%A8%DB%8C%D9%86%D8%AA%DB%8C-%D9%81%D8%B1%D9%86%DA%AF%DB%8C/Qa5tb3Yc
-status=200 depth=1 body_len=176824 url=https://divar.ir/v/%DA%A9%DB%8C%D9%81-%D9%88-%DA%A9%DB%8C%D9%81-%D9%BE%D9%88%D9%84-%D9%88%D8%A7%D8%B1%D8%AF%D8%A7%D8%AA%DB%8C/Qa07-WJY
-status=200 depth=1 body_len=162042 url=https://divar.ir/v/%DB%8C%D8%AE-%D8%AF%D8%A7%D9%86-%D8%A8%D8%B1%D9%86%D8%AC%DB%8C/Qa0_e98F
-status=200 depth=1 body_len=158836 url=https://divar.ir/v/%D9%85%DB%8C%DA%A9%D8%B1%D9%88%D8%AF%D8%B1%D9%85/Qa0D_EJk
-status=200 depth=1 body_len=175933 url=https://divar.ir/v/%DB%B1%DB%B8%DB%B5-%D9%85%D8%AA%D8%B1-%D9%85%D8%B1%D8%B2%D8%AF%D8%A7%D8%B1%D8%A7%D9%86-%D8%B7%D8%A8%D9%82%D9%87-%D8%A7%D9%88%D9%84/Qa0DPEGg
-status=200 depth=1 body_len=168470 url=https://divar.ir/v/100%D8%B1%D8%B3%D9%BE%DB%8C-%D8%AA%D8%AE%D8%B5%D8%B5%DB%8C-%D9%85%D9%86%D9%88-%DA%A9%D8%A7%D9%81%D9%87/Qayb1Sm3
-status=200 depth=1 body_len=176984 url=https://divar.ir/v/%DA%AF%D9%88%D8%B4%DB%8C-%D8%A7%DB%8C%D9%81%D9%88%D9%86%DB%B1%DB%B3-%D9%86%D8%B1%D9%85%D8%A7%D9%84-%DB%B1%DB%B2%DB%B8/Qa0DvFEJ
-status=200 depth=1 body_len=169589 url=https://divar.ir/v/%DB%8C%DA%A9-%D8%AC%D9%81%D8%AA-%D9%81%D8%B1%D8%B4-%D9%85%D8%A7%D8%B4%DB%8C%D9%86%DB%8C-2-3-%D8%A7%D9%86%D8%AA%DB%8C-%D8%A8%D8%A7%DA%A9%D8%AA%D8%B1%DB%8C%D8%A7%D9%84/Qa0D_BZn
-status=200 depth=1 body_len=160562 url=https://divar.ir/v/%DA%A9%D9%88%D9%84%D8%B1-%DB%B8%DB%B5%DB%B0%DB%B0-%D9%BE%D9%84%DB%8C%D9%85%D8%B1%DB%8C-%D8%A8%D8%A7-%D9%85%D9%88%D8%AA%D9%88%D8%B1-%DB%B1%DB%B0%DB%B0%D8%AF%D9%88%D8%B1-%D9%85%D8%AA%D8%BA%DB%8C%DB%8C%D8%B1-%D8%A7%D9%84%D8%A8%D8%B1%D8%B2/gZEh0TNl
-status=200 depth=1 body_len=166453 url=https://divar.ir/v/%D8%A8%D8%A7%D8%B1%D8%A8%D8%B1%DB%8C-%D8%B4%D9%85%D8%A7%D9%84-%D8%AA%D9%87%D8%B1%D8%A7%D9%86-%D8%A7%D8%AA%D9%88%D8%A8%D8%A7%D8%B1%D8%BA%D8%B1%D8%A8-%D9%88%D8%B4%D8%B1%D9%82-%D8%A7%D8%AB%D8%A7%D8%AB-%DA%A9%D8%B4%DB%8C-%DB%B3%DB%B0-%D8%AA%D8%AE%D9%81%DB%8C%D9%81/QaTz3FP2
-status=200 depth=1 body_len=161574 url=https://divar.ir/v/%D8%AA%D8%A7%D8%A8%D9%84%D9%88-%D9%81%D8%B1%D8%B4/Qa0DvD8n
-status=200 depth=1 body_len=170427 url=https://divar.ir/v/%D9%BE%DB%8C%D8%B1%D8%A7%D9%87%D9%86-%D8%AA%D8%B1%DA%A9/Qa0DPB5_
-status=200 depth=1 body_len=171385 url=https://divar.ir/v/%D8%B3%D9%87-%D8%AC%D9%81%D8%AA-%DA%A9%D9%81%D8%B4-%D9%85%D8%AC%D9%84%D8%B3%DB%8C/Qa0DvF6E
-status=200 depth=1 body_len=191501 url=https://divar.ir/v/68-%D9%85%D8%AA%D8%B1%DB%8C-2%D8%AE%D9%88%D8%A7%D8%A8-%D8%A8%D9%87%D8%B1-%D8%A7%D8%B5%D9%84%DB%8C-%D8%A7%DA%A9%D8%A7%D8%B2%DB%8C%D9%88%D9%86/Qa0_O44S
-status=200 depth=1 body_len=160232 url=https://divar.ir/v/%D8%A7%D9%BE%D9%84-%D9%88%D8%A7%DA%86-%D8%B3%D8%B1%DB%8C-%DB%B6-%D8%B3%D8%A7%DB%8C%D8%B2-%DB%B3%DB%B8-%DB%B4%DB%B0/Qa0DvD8a
-status=200 depth=1 body_len=187576 url=https://divar.ir/v/kmc-k7-%D9%85%D8%AF%D9%84-%DB%B4%DB%B0%DB%B2-%D9%85%D8%B4%D8%A7%D8%A8%D9%87-%D8%B5%D9%81%D8%B1/Qa0_-x-Z
-status=200 depth=1 body_len=159983 url=https://divar.ir/v/%D9%86%D9%85%D8%A7%DB%8C%D9%86%D8%AF%DA%AF%DB%8C-%DA%A9%D9%88%D9%84%D8%B1-%D9%BE%D9%84%DB%8C%D9%85%D8%B1%DB%8C-%D8%A2%D8%B2%D9%85%D8%A7%DB%8C%D8%B4-%D9%85%D8%AF%D9%84-8000-%D9%87%D8%B2%D8%A7%D8%B1/Qaxrtiso
-status=200 depth=1 body_len=165984 url=https://divar.ir/v/%D8%B7%D8%B1%D8%A7%D8%AD%DB%8C-%D9%84%D9%88%DA%AF%D9%88-%D8%A8%D8%A7-%D8%AA%D8%AE%D9%81%DB%8C%D9%81-%D9%88%DB%8C%DA%98%D9%87/Qa0_-qNE
-status=200 depth=1 body_len=158537 url=https://divar.ir/v/%D8%AA%D9%82%D9%88%DB%8C%D8%AA-%D9%85%DA%98%D9%87/Qa0D_EPD
-status=200 depth=1 body_len=165933 url=https://divar.ir/v/%D8%B3%D8%A7%D8%B9%D8%AA-%D8%B1%D9%88%D9%85%DB%8C%D8%B2%DB%8C/Qa0D_D-4
-status=200 depth=1 body_len=160231 url=https://divar.ir/v/%D8%A7%D9%BE%D9%84-%D9%88%D8%A7%DA%86-%D8%B3%D8%B1%DB%8C-%DB%B6-%D8%B3%D8%A7%DB%8C%D8%B2-%DB%B3%DB%B8-%DB%B4%DB%B0-/Qa0DvD8a
-status=200 depth=2 body_len=159983 url=https://divar.ir/v/-%D9%86%D9%85%D8%A7%DB%8C%D9%86%D8%AF%DA%AF%DB%8C-%DA%A9%D9%88%D9%84%D8%B1-%D9%BE%D9%84%DB%8C%D9%85%D8%B1%DB%8C-%D8%A2%D8%B2%D9%85%D8%A7%DB%8C%D8%B4-%D9%85%D8%AF%D9%84-8000-%D9%87%D8%B2%D8%A7%D8%B1-/Qaxrtiso
-status=200 depth=1 body_len=161151 url=https://divar.ir/v/%D9%84%D8%A7%D8%B3%D8%AA%DB%8C%DA%A9-%D8%AE%D9%88%D8%AF%D8%B1%D9%88/Qa0DfDGz
-status=200 depth=1 body_len=164605 url=https://divar.ir/v/%D8%A7%D8%B3%D9%BE%DB%8C%D9%84%D8%AA-%D9%BE%D9%86%D8%AC%D8%B1%D9%87-%D8%A7%DB%8C-%D9%87%D9%85%D9%87-%D9%85%D8%AF%D9%84-%D8%A8%D8%B1%D9%85%DB%8C%D8%AF%D8%A7%D8%B1%DB%8C%D9%85/QanLv7BM
-status=200 depth=1 body_len=158153 url=https://divar.ir/v/%D8%AA%D8%B4%DA%A9%DA%86%D9%87-%D8%A8%D8%B1%D9%82%DB%8C-%D8%A8%DB%8C%D9%88%D8%B1%D8%B1-%D9%85%D8%AF%D9%84-hk25/QatzrsE2
+status=200 depth=0 body_len=590851 url=https://divar.ir/s/tehran
+09197788499
+09123055521
+09101003852
+status=200 depth=1 body_len=162271 url=https://divar.ir/v/%DA%A9%D8%B1%D8%A7%D9%BE-%D9%88-%D8%B4%D9%84%D9%88%D8%A7%D8%B1-%D8%AC%DB%8C%D9%86/Qa1rPxMH
+09365312895
+09195315502
+09127763019
+09196357803
+09187778466
+09186604624
+02191329671
+09121138599
+09123024183
+09354504549
+09213130232
+09186604624
+09301700924
+02191329671
+09939365162
+09123158372
+09123904684
+09194497836
+09916751862
+09128080425
+09023925412
+09195009346
+status=200 depth=0 body_len=705422 url=https://divar.ir/s/iran?cities=4%2C1&q=%D8%B4%DB%8C%D8%B1%D8%A2%D9%84%D8%A7%D8%AA
+ERROR fetching phone: Expecting value: line 1 column 1 (char 0)
+ERROR fetching phone: Expecting value: line 1 column 1 (char 0)
+status=200 depth=1 body_len=18307 url=https://divar.ir/v/%D8%B4%DB%8C%D8%B1%D8%A7%D9%84%D8%A7%D8%AA-%D8%A8%D8%A7-%DA%A9%DB%8C%D9%81%DB%8C%D8%AA-%D8%A7%DB%8C%D8%B1%D8%A7%D9%86-%DA%AF%D8%B1%D9%88%D9%87-%D9%88-%DA%A9%D8%B3%D8%B1%DB%8C/Qast_7uo
+ERROR fetching phone: Expecting value: line 1 column 1 (char 0)
+ERROR fetching phone: Expecting value: line 1 column 1 (char 0)
+status=200 depth=1 body_len=18306 url=https://divar.ir/v/%D8%B4%DB%8C%D8%B1%D8%A7%D9%84%D8%A7%D8%AA-%D8%A8%D8%A7-%DA%A9%DB%8C%D9%81%DB%8C%D8%AA-%D8%B6%D9%85%D8%A7%D9%86%D8%AA%DB%8C-%DA%A9%D8%B3%D8%B1%DB%8C-%D8%A7%DB%8C%D8%B1%D8%A7%D9%86-%DA%AF%D8%B1%D9%88%D9%87-%D8%B9%D9%84%D9%85-%D8%AF%D9%88%D8%B4/QamzTQ0e
+ERROR fetching phone: Expecting value: line 1 column 1 (char 0)
+ERROR fetching phone: Expecting value: line 1 column 1 (char 0)
+ERROR fetching phone: Expecting value: line 1 column 1 (char 0)
+ERROR fetching phone: Expecting value: line 1 column 1 (char 0)
+ERROR fetching phone: Expecting value: line 1 column 1 (char 0)
+ERROR fetching phone: Expecting value: line 1 column 1 (char 0)
+status=200 depth=1 body_len=18308 url=https://divar.ir/v/%D8%B4%DB%8C%D8%B1%D8%A7%D9%84%D8%A7%D8%AA-%D8%B4%DB%8C%D8%B1-%D8%B8%D8%B1%D9%81%D8%B4%D9%88%DB%8C%DB%8C-%D8%B1%D9%88%D8%B4%D9%88%DB%8C%DB%8C-%D8%AD%D9%85%D8%A7%D9%85-%D8%AA%D9%88%D8%A7%D9%84%D8%AA%DB%B1%DB%B0%D8%B3%D8%A7%D9%84-%DA%AF%D8%A7%D8%B1%D8%A7%D9%86%D8%AA%DB%8C/Qal_veVH
+ERROR fetching phone: Expecting value: line 1 column 1 (char 0)
+09028987860
+09038069154
+09375072002
+09932687045
+09912145369
+status=200 depth=1 body_len=18605 url=https://divar.ir/v/%D8%B4%DB%8C%D8%B1%D8%A7%D9%84%D8%A7%D8%AA-%DA%A9%D8%B3%D8%B1%DB%8C-%D8%A7%DB%8C%D8%B1%D8%A7%D9%86-%DA%AF%D8%B1%D9%88%D9%87-%D8%B9%D9%84%D9%85-%D8%AF%D9%88%D8%B4-%DA%AF%D8%A7%D8%B1%D8%A7%D9%86%D8%AA%DB%8C/Qaulw9PX
+09031106606
+09389511938
+status=200 depth=1 body_len=18607 url=https://divar.ir/v/%DA%A9%D8%A7%D8%B4%DB%8C-%D9%88-%D8%B3%D8%B1%D8%A7%D9%85%DB%8C%DA%A9-%D8%B4%DB%8C%D8%B1%D8%A2%D9%84%D8%A7%D8%AA-%D9%85%D9%88%D8%B2%D8%A7%DB%8C%DB%8C%DA%A9-%D8%B3%D9%86%DA%AF-%D8%A2%D8%AC%D8%B1-%D9%86%D9%85%D8%A7-%D8%A7%D9%82%D8%B3%D8%A7%D8%B7-%DB%B6/QaC0CnKU
+09375072002
+09376138517
+status=200 depth=1 body_len=162672 url=https://divar.ir/v/%D8%AE%D8%B1%DB%8C%D8%AF-%D9%88-%D9%81%D8%B1%D9%88%D8%B4-%D8%A2%D9%87%D9%86-%D8%A2%D9%84%D8%A7%D8%AA-%D8%B6%D8%A7%DB%8C%D8%B9%D8%A7%D8%AA-%D9%85%D8%B3-%D8%B4%DB%8C%D8%B1%D8%A2%D9%84%D8%A7%D8%AA-%D8%A7%D9%84%D9%88%D9%85%DB%8C%D9%86%DB%8C%D9%88%D9%85/QaCh70Gb

@@ -1,6 +1,9 @@
 # Python dependencies for Mole crawler scripts
 # Install: pip install -r scripts/requirements.txt
 
+# Shared script utilities
+requests>=2.31
+
 # Headless browser support (headless_fetch.py)
 playwright>=1.40
 
