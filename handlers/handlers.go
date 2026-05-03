@@ -662,7 +662,7 @@ func (h *Handler) UpdateJobSettings(c *gin.Context) {
 		settings.RespectRobotsTxt == nil &&
 		settings.SkipContentDuplicates == nil &&
 		settings.UseHeadlessBrowser == nil && settings.HeadlessWaitSelector == nil &&
-		settings.EnableSemanticSearch == nil && settings.AfterCrawlScript == nil &&
+		settings.EnableSemanticSearch == nil && settings.AfterCrawlScript == nil && settings.AfterJobScript == nil &&
 		settings.SaveTextContent == nil && settings.EnableWordExtraction == nil &&
 		settings.EnableStemming == nil && settings.EnableLemmatization == nil &&
 		settings.DefaultLanguage == nil && settings.UseCrawlPhrasesOnly == nil &&

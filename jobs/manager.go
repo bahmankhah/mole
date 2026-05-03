@@ -788,6 +788,7 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 	enableSemantic := cfg.EnableSemanticSearch
 	saveTextContent := cfg.SaveTextContent
 	afterCrawlScript := cfg.AfterCrawlScript
+	afterJobScript := cfg.AfterJobScript
 	enableWordExtraction := cfg.EnableWordExtraction
 	enableStemming := cfg.EnableStemming
 	enableLemmatization := cfg.EnableLemmatization
@@ -809,6 +810,7 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 		EnableSemanticSearch:  &enableSemantic,
 		SaveTextContent:       &saveTextContent,
 		AfterCrawlScript:      &afterCrawlScript,
+		AfterJobScript:        &afterJobScript,
 		EnableWordExtraction:  &enableWordExtraction,
 		EnableStemming:        &enableStemming,
 		EnableLemmatization:   &enableLemmatization,

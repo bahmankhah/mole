@@ -60,6 +60,7 @@ type JobSettings struct {
 	EnableSemanticSearch  *bool    `json:"enable_semantic_search,omitempty"` // Enable semantic vector search for this job
 	SaveTextContent       *bool    `json:"save_text_content,omitempty"`      // Save extracted text content of pages
 	AfterCrawlScript      *bool    `json:"after_crawl_script,omitempty"`     // Run scripts/after_crawl.py after each successfully crawled page
+	AfterJobScript        *bool    `json:"after_job_script,omitempty"`       // Run scripts/after_job.py ~2 minutes after the job ends
 	EnableWordExtraction  *bool    `json:"enable_word_extraction,omitempty"` // Extract words and build inverted index
 	EnableStemming        *bool    `json:"enable_stemming,omitempty"`        // Stem/lemmatise words during indexing and search
 	EnableLemmatization   *bool    `json:"enable_lemmatization,omitempty"`   // Use lemmatization vs pure stemming

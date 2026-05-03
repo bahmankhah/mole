@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/resolver/crawler/config"
@@ -309,6 +310,9 @@ func (e *Engine) mergeJobSettings(s *models.JobSettings) {
 	if s.AfterCrawlScript != nil {
 		e.effectiveConfig.AfterCrawlScript = *s.AfterCrawlScript
 	}
+	if s.AfterJobScript != nil {
+		e.effectiveConfig.AfterJobScript = *s.AfterJobScript
+	}
 	if s.EnableStemming != nil {
 		e.effectiveConfig.EnableStemming = *s.EnableStemming
 	}
@@ -376,8 +380,10 @@ func (e *Engine) Stop() {
 
 	// Check if semantic search was enabled before clearing the job
 	shouldRebuildIndex := e.effectiveConfig.EnableSemanticSearch
+	runAfterJob := e.effectiveConfig.AfterJobScript
 
 	// Update job status
+	var endedJobID string
 	e.jobMu.Lock()
 	if e.currentJob != nil {
 		now := time.Now()
@@ -386,9 +392,14 @@ func (e *Engine) Stop() {
 		e.currentJob.CrawledURLs = int(atomic.LoadInt64(&e.crawledCount))
 		e.currentJob.FoundMatches = int(atomic.LoadInt64(&e.matchCount))
 		e.db.Save(e.currentJob)
+		endedJobID = e.currentJob.ID
 		e.currentJob = nil
 	}
 	e.jobMu.Unlock()
+
+	if runAfterJob && endedJobID != "" {
+		e.scheduleAfterJobScript(endedJobID, 2*time.Minute)
+	}
 
 	// Rebuild FAISS index if semantic search was enabled (index pages crawled before cancellation)
 	if shouldRebuildIndex {
@@ -461,6 +472,7 @@ func (e *Engine) watchForCompletion() {
 		}
 
 		// Update job status to completed
+		var endedJobID string
 		e.jobMu.Lock()
 		if e.currentJob != nil {
 			now := time.Now()
@@ -471,9 +483,14 @@ func (e *Engine) watchForCompletion() {
 			e.db.Save(e.currentJob)
 			log.Printf("[Engine] Job %s completed. Crawled: %d, Matches: %d",
 				e.currentJob.ID, e.currentJob.CrawledURLs, e.currentJob.FoundMatches)
+			endedJobID = e.currentJob.ID
 			e.currentJob = nil
 		}
 		e.jobMu.Unlock()
+
+		if e.effectiveConfig.AfterJobScript && endedJobID != "" {
+			e.scheduleAfterJobScript(endedJobID, 2*time.Minute)
+		}
 
 		// Rebuild FAISS index if semantic search was enabled
 		if e.effectiveConfig.EnableSemanticSearch {
@@ -1170,6 +1187,68 @@ func (e *Engine) runAfterCrawlScript(url string, statusCode int, contentType str
 	if len(out) > 0 {
 		log.Printf("[AfterCrawl] %s => %s", url, strings.TrimSpace(string(out)))
 	}
+}
+
+// scheduleAfterJobScript spawns a detached background process that, after
+// `delay`, runs scripts/after_job.py with --job-id <jobID>. The launcher process
+// exits immediately so the engine never blocks waiting on it. The shell child
+// uses setsid so it survives the parent (and the server) exiting.
+func (e *Engine) scheduleAfterJobScript(jobID string, delay time.Duration) {
+	scriptPath, err := resolveAfterJobScriptPath()
+	if err != nil {
+		log.Printf("[AfterJob] Script not found, skipping job %s: %v", jobID, err)
+		return
+	}
+
+	pythonCmd := modules.FindPython(e.effectiveConfig.PythonPath)
+	logPath := filepath.Join(filepath.Dir(scriptPath), "after_job.log")
+	delaySec := int(delay.Seconds())
+	if delaySec < 1 {
+		delaySec = 1
+	}
+
+	shellCmd := fmt.Sprintf(
+		"sleep %d && %q %q --job-id %q >> %q 2>&1",
+		delaySec,
+		pythonCmd, scriptPath, jobID, logPath,
+	)
+
+	cmd := exec.Command("sh", "-c", shellCmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		log.Printf("[AfterJob] Failed to spawn delayed runner for job %s: %v", jobID, err)
+		return
+	}
+	// Release the child so it doesn't become a zombie.
+	go func() { _ = cmd.Wait() }()
+
+	log.Printf("[AfterJob] Scheduled scripts/after_job.py for job %s in %s (pid=%d)", jobID, delay, cmd.Process.Pid)
+}
+
+func resolveAfterJobScriptPath() (string, error) {
+	const relScriptPath = "scripts/after_job.py"
+
+	candidates := []string{relScriptPath}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), relScriptPath))
+	}
+
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			abs, err := filepath.Abs(candidate)
+			if err != nil {
+				return candidate, nil
+			}
+			return abs, nil
+		}
+	}
+
+	wd, _ := os.Getwd()
+	return "", fmt.Errorf("checked %q relative to working directory %q and executable directory", relScriptPath, wd)
 }
 
 func resolveAfterCrawlScriptPath() (string, error) {

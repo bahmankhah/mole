@@ -366,6 +366,16 @@
                                         <p class="text-xs text-gray-400 mt-0.5">Execute <code class="font-mono text-xs">scripts/after_crawl.py</code> after each successfully crawled page. Script must exist at that path or it is skipped. Default: <span class="def-val" data-key="after_crawl_script"></span></p>
                                     </div>
                                 </div>
+                                <div class="bg-amber-50 border border-amber-200 rounded-md p-3">
+                                    <p class="text-xs text-amber-800"><strong>After-Job Script:</strong> Place <code class="font-mono bg-amber-100 px-1 rounded">scripts/after_job.py</code> in the project root. When enabled, it is scheduled to run roughly 2 minutes after the job ends (completed, cancelled, or stopped). It receives the job id via <code class="font-mono bg-amber-100 px-1 rounded">--job-id</code> and runs detached, so it survives a server restart. Logs are written to <code class="font-mono bg-amber-100 px-1 rounded">scripts/after_job.log</code>. Errors are non-fatal.</p>
+                                </div>
+                                <div class="flex items-start space-x-3">
+                                    <input type="checkbox" id="set-after-job-script" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <div>
+                                        <label for="set-after-job-script" class="text-sm font-medium text-gray-700">Run After-Job Script</label>
+                                        <p class="text-xs text-gray-400 mt-0.5">Schedule <code class="font-mono text-xs">scripts/after_job.py</code> ~2 minutes after this job ends. Default: <span class="def-val" data-key="after_job_script"></span></p>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
@@ -466,6 +476,9 @@
             var afterCrawlCb=document.getElementById('set-after-crawl-script');
             if(s.after_crawl_script!=null&&s.after_crawl_script!=undefined){afterCrawlCb.checked=s.after_crawl_script;afterCrawlCb.indeterminate=false;}
             else{afterCrawlCb.checked=defaultSettings.after_crawl_script||false;afterCrawlCb.indeterminate=true;}
+            var afterJobCb=document.getElementById('set-after-job-script');
+            if(s.after_job_script!=null&&s.after_job_script!=undefined){afterJobCb.checked=s.after_job_script;afterJobCb.indeterminate=false;}
+            else{afterJobCb.checked=defaultSettings.after_job_script||false;afterJobCb.indeterminate=true;}
             var wordCb=document.getElementById('set-enable-word-extraction');
             if(s.enable_word_extraction!=null&&s.enable_word_extraction!=undefined){wordCb.checked=s.enable_word_extraction;wordCb.indeterminate=false;}
             else{wordCb.checked=defaultSettings.enable_word_extraction||false;wordCb.indeterminate=true;}
@@ -501,6 +514,8 @@
             if(!textCb.indeterminate) p.save_text_content=textCb.checked;
             var afterCrawlCb=document.getElementById('set-after-crawl-script');
             if(!afterCrawlCb.indeterminate) p.after_crawl_script=afterCrawlCb.checked;
+            var afterJobCb=document.getElementById('set-after-job-script');
+            if(!afterJobCb.indeterminate) p.after_job_script=afterJobCb.checked;
             var wordCb=document.getElementById('set-enable-word-extraction');
             if(!wordCb.indeterminate) p.enable_word_extraction=wordCb.checked;
             var crawlOnlyCb=document.getElementById('set-use-crawl-phrases-only');
@@ -545,6 +560,9 @@
             var afterCrawlCb=document.getElementById('set-after-crawl-script');
             afterCrawlCb.checked=defaultSettings.after_crawl_script||false;
             afterCrawlCb.indeterminate=true;
+            var afterJobCb=document.getElementById('set-after-job-script');
+            afterJobCb.checked=defaultSettings.after_job_script||false;
+            afterJobCb.indeterminate=true;
             var wordCb=document.getElementById('set-enable-word-extraction');
             wordCb.checked=defaultSettings.enable_word_extraction||false;
             wordCb.indeterminate=true;

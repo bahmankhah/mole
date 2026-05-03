@@ -4,6 +4,10 @@ main
 # Python virtual environment
 scripts/.venv/
 scripts/.cookies/
+scripts/.cache/
+scripts/__pycache__/
+scripts/*.log
+scripts/after_crawl_data
 
 # Python cache
 __pycache__/

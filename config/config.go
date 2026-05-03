@@ -46,6 +46,7 @@ type CrawlerConfig struct {
 	EnableWordExtraction  bool          `yaml:"enable_word_extraction"` // Extract words and build inverted index during crawl
 	SaveTextContent       bool          `yaml:"save_text_content"`      // Save extracted text content of crawled pages
 	AfterCrawlScript      bool          `yaml:"after_crawl_script"`      // Run scripts/after_crawl.py after each successfully crawled page
+	AfterJobScript        bool          `yaml:"after_job_script"`        // Run scripts/after_job.py 2 minutes after the job ends (any terminal status)
 	EmbeddingScriptPath   string        `yaml:"embedding_script_path"`  // Path to embedding Python script (auto-detected if empty)
 	EmbeddingModel        string        `yaml:"embedding_model"`        // Sentence-transformer model name
 	PythonPath            string        `yaml:"python_path"`            // Path to python3 binary (auto-detects venv if empty)

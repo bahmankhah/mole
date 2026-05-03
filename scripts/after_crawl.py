@@ -26,90 +26,312 @@ Runs inside scripts/.venv — add dependencies to scripts/requirements.txt
 and run scripts/setup_python.sh to install them.
 """
 
+import fcntl
 import json
+import logging
 import re
-import requests
 import sys
 import os
+
+from divar_session import make_session, request_with_refresh
+
+
+DATA_DIR = os.path.join(os.path.dirname(__file__), "after_crawl_data")
+LOG_FILE = os.path.join(os.path.dirname(__file__), "after_crawl.log")
+
+
+def _setup_logger() -> logging.Logger:
+    log = logging.getLogger("after_crawl")
+    if log.handlers:
+        return log
+    log.setLevel(logging.INFO)
+    handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    log.addHandler(handler)
+    return log
+
+
+log = _setup_logger()
+
+
+def append_entry(job_id: str, entry: dict) -> None:
+    """Append an entry to scripts/after_crawl_data/{job_id}.json under flock.
+
+    File shape: {"data": [entry, entry, ...]}. The after_job.py script consumes
+    the same file and may rewrite or remove it once entries are processed.
+    """
+    if not job_id:
+        return
+    os.makedirs(DATA_DIR, exist_ok=True)
+    path = os.path.join(DATA_DIR, f"{job_id}.json")
+
+    # Open with read+write, creating if needed. Lock exclusively, mutate, write.
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        with os.fdopen(fd, "r+", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                raw = f.read()
+                if raw.strip():
+                    try:
+                        doc = json.loads(raw)
+                        if not isinstance(doc, dict) or not isinstance(doc.get("data"), list):
+                            doc = {"data": []}
+                    except json.JSONDecodeError:
+                        doc = {"data": []}
+                else:
+                    doc = {"data": []}
+                doc["data"].append(entry)
+                f.seek(0)
+                f.truncate()
+                json.dump(doc, f, ensure_ascii=False)
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        # fdopen takes ownership of fd on success; only close if we never reached the with-block
+        raise
+
+
+def extract_preloaded_state(body: str) -> dict | None:
+    """Extract window.__PRELOADED_STATE__ JSON object via brace-balanced scan."""
+    marker = "window.__PRELOADED_STATE__"
+    i = body.find(marker)
+    if i < 0:
+        return None
+    i = body.find("{", i)
+    if i < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for j in range(i, len(body)):
+        c = body[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(body[i:j+1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def extract_ad_info(body: str) -> dict:
+    """Extract ad fields from Divar __PRELOADED_STATE__ JSON."""
+    info: dict = {}
+    state = extract_preloaded_state(body)
+    if not state:
+        return info
+    post = (state.get("currentPost") or {}).get("post") or {}
+    seo = post.get("seo") or {}
+    web = seo.get("webInfo") or {}
+
+    info["token"] = post.get("token")
+    info["title"] = web.get("title") or seo.get("title")
+    city = post.get("city") or {}
+    info["city"] = city.get("name") or web.get("city_persian")
+    info["city_id"] = city.get("id")
+    info["city_slug"] = city.get("slug")
+    info["city_parent_id"] = city.get("parent")
+    info["district"] = web.get("district_persian")
+    info["category"] = web.get("category_slug_persian")
+
+    analytics = post.get("analytics") or {}
+    info["category_slug"] = analytics.get("cat2") or analytics.get("cat1")
+    info["cat1"] = analytics.get("cat1")
+    info["cat2"] = analytics.get("cat2")
+    info["cat3"] = analytics.get("cat3")
+
+    # district id from breadcrumb searchData
+    for b in seo.get("breadcrumbs", []):
+        ids = (((b.get("searchData") or {}).get("formData") or {}).get("districts") or {}).get("repeated_string", {}).get("value")
+        if ids:
+            info["district_ids"] = ids
+            break
+    info["breadcrumbs"] = [b.get("name") for b in seo.get("breadcrumbs", []) if b.get("name")]
+
+    we = post.get("webengage") or {}
+    if isinstance(we.get("price"), (int, float)) and we["price"]:
+        info["price_value"] = int(we["price"])
+
+    sections = post.get("sections") or {}
+
+    # description
+    for w in sections.get("DESCRIPTION", []):
+        if w.get("widgetType") == "DESCRIPTION_ROW":
+            txt = (((w.get("dto") or {}).get("data") or {}).get("text"))
+            if txt:
+                info["description"] = txt
+                break
+
+    # key/value rows: price, condition, exchange...
+    fields: dict = {}
+    for w in sections.get("LIST_DATA", []):
+        d = ((w.get("dto") or {}).get("data") or {})
+        t, v = d.get("title"), d.get("value")
+        if t and v:
+            fields[t] = v
+    if fields:
+        info["fields"] = fields
+        # convenient flat aliases
+        if "قیمت" in fields:
+            info["price"] = fields["قیمت"]
+            digits = fields["قیمت"].translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+            digits = re.sub(r"[^\d]", "", digits)
+            if digits:
+                info["price_value"] = int(digits)
+        if "وضعیت" in fields:
+            info["condition"] = fields["وضعیت"]
+
+    # publish / bump dates from EXPANDABLE_SECTION under TITLE
+    for w in sections.get("TITLE", []):
+        if w.get("widgetType") == "EXPANDABLE_SECTION":
+            d = ((w.get("dto") or {}).get("data") or {})
+            info["posted_label"] = d.get("title")
+            for sub in d.get("widget_list", []):
+                if sub.get("widget_type") == "DESCRIPTION_ROW":
+                    info["publish_info"] = ((sub.get("data") or {}).get("text"))
+                    break
+            break
+
+    # images & video
+    images: list = []
+    video: str | None = None
+    for w in sections.get("IMAGE", []):
+        if w.get("widgetType") == "IMAGE_CAROUSEL":
+            for it in (((w.get("dto") or {}).get("data") or {}).get("items", [])):
+                u = (it.get("image") or {}).get("url")
+                if u:
+                    images.append(u)
+                if not video and it.get("video_url"):
+                    video = it.get("video_url")
+    if images:
+        info["images"] = images
+    if video:
+        info["video"] = video
+
+    return info
+
+
+def fetch_phone(body: str, url: str) -> str | None:
+    """Best-effort phone fetch from Divar contact API. Returns None on any failure.
+
+    Cookies come from scripts/.cookies/divar.ir.json. On HTTP 401/403 or a
+    non-JSON response we trigger one session refresh+retry via divar_session.
+    """
+    match = re.search(r'"contactUUID"\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"', body)
+    if not match:
+        match = re.search(r'"contact_uuid"\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"', body)
+    if not match:
+        log.info("phone: no contactUUID in body for url=%s", url)
+        return None
+    uuid = match.group(1)
+    token = url.split("/")[-1] if url and "/" in url else None
+    if not token:
+        log.info("phone: no token in url=%s", url)
+        return None
+    api_url = f"https://api.divar.ir/v8/postcontact/web/contact_info_v2/{token}"
+    headers = {
+        "accept": "application/json, text/plain, */*",
+        "cache-control": "no-cache",
+        "content-type": "application/json",
+        "origin": "https://divar.ir",
+        "pragma": "no-cache",
+        "priority": "u=1, i",
+        "referer": "https://divar.ir/",
+        "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Linux"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site",
+        "x-render-type": "CSR",
+        "x-screen-size": "664x813",
+    }
+    payload = {"contact_uuid": uuid}
+    try:
+        session = make_session()
+        cookie_names = sorted(c.name for c in session.cookies)
+        log.info("phone: GET token=%s uuid=%s cookies=%s", token, uuid, cookie_names)
+        resp = request_with_refresh(
+            session, "POST", api_url,
+            headers=headers, json=payload, timeout=15, expect_json=True,
+        )
+        body_snip = (resp.text or "")[:300].replace("\n", " ")
+        log.info("phone: HTTP %s len=%d body=%s",
+                 resp.status_code, len(resp.text or ""), body_snip)
+        if resp.status_code // 100 != 2:
+            return None
+        try:
+            data = resp.json()
+        except ValueError as e:
+            log.warning("phone: response not JSON for token=%s: %s", token, e)
+            return None
+    except Exception as e:
+        log.exception("phone: fetch error for token=%s: %s", token, e)
+        return None
+    for widget in data.get("widget_list", []):
+        ph = widget.get("data", {}).get("action", {}).get("payload", {}).get("phone_number")
+        if ph:
+            log.info("phone: extracted token=%s phone=%s", token, ph)
+            return ph
+    log.info("phone: no phone_number widget in response for token=%s", token)
+    return None
 
 
 def process(page: dict) -> str:
     """
     Process a single crawled page.
 
-    Args:
-        page: dict with keys url, status_code, content_type, depth, body, job_id
+    Builds an entry of shape:
+        {"ad": {...}, "user": {"phone": "..."}}   # user key only when phone fetched
 
-    Returns:
-        A short string that will be logged by the engine (stdout).
-        Return an empty string to produce no log output.
+    Appends it to scripts/after_crawl_data/{job_id}.json. Returns a short
+    log line for the engine.
     """
     url = page.get("url", "")
     status = page.get("status_code", 0)
     depth = page.get("depth", 0)
     body = page.get("body", "")
+    job_id = page.get("job_id", "")
 
-    # ── Extract contactUUID and fetch phone number ──────────────────────────────────────────────
-    # Search for contactUUID in the page body JSON
-    match = re.search(r'"contactUUID"\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"', body)
-    if not match:
-        # fallback to contact_uuid key
-        match = re.search(r'"contact_uuid"\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"', body)
-    if match:
-        uuid = match.group(1)
-        # Prepare request
-        token = url.split("/")[-1] if url and "/" in url else "QaNGHZZU"
-        url_req = f"https://api.divar.ir/v8/postcontact/web/contact_info_v2/{token}"
-        headers = {
-            "accept": "application/json, text/plain, */*",
-            "accept-language": "en-US,en;q=0.9",
-            "cache-control": "no-cache",
-            "content-type": "application/json",
-            "origin": "https://divar.ir",
-            "pragma": "no-cache",
-            "priority": "u=1, i",
-            "referer": "https://divar.ir/",
-            "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Linux"',
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-site",
-            "traceparent": "00-e2414084b63773c9c1fb89d51df5b6de-19f80d75cf09251c-00",
-            "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-            "x-render-type": "CSR",
-            "x-screen-size": "664x813",
-            "Cookie": "did=273c05e8-da8e-40f0-bcfd-87a0c054f7ec; cdid=d9e47f9d-9d7a-4d93-bcbb-89df45c4dc2a; _ga=GA1.1.1901794337.1751288309; theme=dark; city=isfahan; player_id=4f898f95-95db-437d-880e-2efed2fadc45; multi-city=iran%7C4%2C1; _ga_1G1K17N77F=GS2.1.s1764418683$o10$g1$t1764418683$j60$l0$h0; _ga_CCSRPLKB4B=GS2.1.s1777474359$o1$g1$t1777474436$j51$l0$h0; token=; ff=%7B%22f%22%3A%7B%22foreigner_payment_enabled%22%3Atrue%2C%22enable_filter_post_count_web%22%3Atrue%2C%22enable-places-selector-online-search-web%22%3Atrue%2C%22chat_message_disabled%22%3Atrue%2C%22web_sentry_disabled%22%3Atrue%2C%22web_sentry_sample_rate%22%3A0.1%2C%22enable-screen-size-metric%22%3Atrue%7D%2C%22e%22%3A1777738015860%2C%22r%22%3A1777820815860%7D; referrer=; sAccessToken=eyJraWQiOiJkLTE3NzcyMDE4Mzg2MjQiLCJ0eXAiOiJKV1QiLCJ2ZXJzaW9uIjoiNCIsImFsZyI6IlJTMjU2In0.eyJpYXQiOjE3Nzc3MzUxNTAsImV4cCI6MTc3NzczODc1MCwic3ViIjoiZTgxYThmOTUtNTY0ZS00MTRkLTlmZmItYjU2M2U0MmRjYTE3IiwidElkIjoicHVibGljIiwic2Vzc2lvbkhhbmRsZSI6IjNlNzk2YmE4LTM0NTMtNGU3Yy05MDcwLTk3MzNjZjA3YTQ5ZiIsInJlZnJlc2hUb2tlbkhhc2gxIjoiNmEyN2M0MDAwZDBjOTA0YWIxMjhlNmI2NzFlNGI4YjI3ZTlkOTcwN2M0MTBmMDYwZGIyNDFiMDg3M2Q3ZmQzNiIsInBhcmVudFJlZnJlc2hUb2tlbkhhc2gxIjpudWxsLCJhbnRpQ3NyZlRva2VuIjpudWxsLCJpc3MiOiJodHRwczovL2FwaS5kaXZhci5pci92OC9hdXRoZW50aWNhdGUiLCJwaG9uZU51bWJlciI6Iis5ODkyMjYyMDQ2ODEiLCJzdC1wZXJtIjp7InQiOjE3Nzc3MzUxNTAyMTgsInYiOltdfSwic3Qtcm9sZSI6eyJ0IjoxNzc3NzM1MTUwMjE4LCJ2IjpbXX19.TYu5UsK68Wt_k1vUxENn5_7ym8SahXty2I9HP4zt6DSDQe7cQ2GHFJjet2VweFcLAC-5S6uY4ZBRSV2cWFtwC7Xdp5V3NWEVh4uijoV79zOE18cpxE9wkrCt7cMML1LsGttHotc02_dl5l1iTPqvjeuqQFuIUZnfWt_-_ufPfgNe9fDMa7ggIHgQVYVaNEiEKGlH77FeWhvpNcqpN5QgUFpE1Ka1CI6QxcNg7HE0IHfiOwOFtjdRQNcRV7iAmrNAAQxdWDXFjLFzMQXZqoMjss9_TzE3aDdhh-zelj2A9VzWu0HEil4LaRa8101lIeJsJfQhZhAIkPxJO7iRJaHUjA; sFrontToken=eyJ1aWQiOiJlODFhOGY5NS01NjRlLTQxNGQtOWZmYi1iNTYzZTQyZGNhMTciLCJhdGUiOjE3Nzc3Mzg3NTAwMDAsInVwIjp7ImFudGlDc3JmVG9rZW4iOm51bGwsImV4cCI6MTc3NzczODc1MCwiaWF0IjoxNzc3NzM1MTUwLCJpc3MiOiJodHRwczovL2FwaS5kaXZhci5pci92OC9hdXRoZW50aWNhdGUiLCJwYXJlbnRSZWZyZXNoVG9rZW5IYXNoMSI6bnVsbCwicGhvbmVOdW1iZXIiOiIrOTg5MjI2MjA0NjgxIiwicmVmcmVzaFRva2VuSGFzaDEiOiI2YTI3YzQwMDBkMGM5MDRhYjEyOGU2YjY3MWU0YjhiMjdlOWQ5NzA3YzQxMGYwNjBkYjI0MWIwODczZDdmZDM2Iiwic2Vzc2lvbkhhbmRsZSI6IjNlNzk2YmE4LTM0NTMtNGU3Yy05MDcwLTk3MzNjZjA3YTQ5ZiIsInN0LXBlcm0iOnsidCI6MTc3NzczNTE1MDIxOCwidiI6W119LCJzdC1yb2xlIjp7InQiOjE3Nzc3MzUxNTAyMTgsInYiOltdfSwic3ViIjoiZTgxYThmOTUtNTY0ZS00MTRkLTlmZmItYjU2M2U0MmRjYTE3IiwidElkIjoicHVibGljIn19; csid=130d3f45a055ed2f4c"
-        }
-        payload = {"contact_uuid": uuid}
-        try:
-            resp = requests.post(url_req, json=payload, headers=headers, timeout=10)
-            # return resp.text
-            data = resp.json()
-            # Navigate to phone number
-            phone = None
-            for widget in data.get("widget_list", []):
-                action = widget.get("data", {}).get("action", {})
-                payload = action.get("payload", {})
-                phone = payload.get("phone_number")
-                if phone:
-                    break
-            if phone:
-                return phone
-        except Exception as e:
-            return f"ERROR fetching phone: {e}"
-    # Fallback info
-    return f"status={status} depth={depth} body_len={len(body)} url={url}"
+    ad_info = extract_ad_info(body)
+    if ad_info:
+        ad_info["url"] = url
 
-    # ── Example: write to a file ─────────────────────────────────────────────
-    # with open("/tmp/crawled_urls.txt", "a") as f:
-    #     f.write(f"{url}\n")
-    # return f"appended {url}"
+    if not ad_info:
+        return f"status={status} depth={depth} body_len={len(body)} url={url} (no ad)"
 
-    # ── Example: alert on keyword ────────────────────────────────────────────
-    # if "confidential" in body.lower():
-    #     return f"KEYWORD MATCH: 'confidential' found at {url}"
-    # return ""
+    if not ad_info.get("token"):
+        return f"skip (no token) url={url}"
+
+    entry: dict = {"ad": ad_info}
+    phone = fetch_phone(body, url)
+    if phone:
+        entry["user"] = {"phone": phone}
+
+    try:
+        append_entry(job_id, entry)
+    except Exception as e:
+        return f"ad-extracted but append failed: {e}"
+
+    token = ad_info.get("token") or ""
+    return f"appended job={job_id} token={token} phone={'yes' if phone else 'no'}"
 
 
 def main():
@@ -126,13 +348,6 @@ def main():
     result = process(page)
     if result:
         print(result)
-        # Write the output string to a file in the same directory as this script.
-        out_path = os.path.join(os.path.dirname(__file__), "after_crawl_output.txt")
-        try:
-            with open(out_path, "a") as f:
-                f.write(result + "\n")
-        except Exception as e:
-            print(f"ERROR: failed to write output to {out_path}: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
