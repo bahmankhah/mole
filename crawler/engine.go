@@ -188,7 +188,8 @@ func (e *Engine) Start(job *models.CrawlJob) error {
 
 	// Recreate fetcher with effective config so per-job overrides take effect
 	e.fetcher = newFetcher(e.effectiveConfig)
-	log.Printf("[Engine] Effective after_crawl_script=%t for job %s", e.effectiveConfig.AfterCrawlScript, job.ID)
+	log.Printf("[Engine] Effective after_crawl_script=%t after_job_script=%t for job %s",
+		e.effectiveConfig.AfterCrawlScript, e.effectiveConfig.AfterJobScript, job.ID)
 
 	// Reset robots.txt rules for new job
 	e.robotRulesMu.Lock()
@@ -397,6 +398,7 @@ func (e *Engine) Stop() {
 	}
 	e.jobMu.Unlock()
 
+	log.Printf("[Engine] Stop path: after_job_script=%t endedJobID=%q", runAfterJob, endedJobID)
 	if runAfterJob && endedJobID != "" {
 		e.scheduleAfterJobScript(endedJobID, 2*time.Minute)
 	}
@@ -488,6 +490,8 @@ func (e *Engine) watchForCompletion() {
 		}
 		e.jobMu.Unlock()
 
+		log.Printf("[Engine] Completion path: after_job_script=%t endedJobID=%q",
+			e.effectiveConfig.AfterJobScript, endedJobID)
 		if e.effectiveConfig.AfterJobScript && endedJobID != "" {
 			e.scheduleAfterJobScript(endedJobID, 2*time.Minute)
 		}

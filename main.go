@@ -171,6 +171,7 @@ func main() {
 
 		// Job settings
 		api.PUT("/jobs/:id/settings", handler.UpdateJobSettings)
+		api.PUT("/jobs/:id/target", handler.UpdateJobTarget)
 		api.GET("/settings/defaults", handler.GetDefaultSettings)
 
 		// Stats

@@ -50,8 +50,17 @@
         <div class="bg-white rounded-lg shadow p-6 mb-8">
             <div class="flex items-start justify-between mb-6 gap-4">
                 <div class="min-w-0 flex-1">
-                    <h1 class="text-2xl font-bold text-gray-800 truncate" title="{{.job.TargetURL}}">{{.job.TargetURL}}</h1>
-                    <p class="text-gray-500 mt-1 text-sm">Job ID: {{.job.ID}} · Domain: {{.job.Domain}}</p>
+                    <div class="flex items-center gap-2">
+                        <h1 class="text-2xl font-bold text-gray-800 truncate" title="{{.job.TargetURL}}">{{.job.TargetURL}}</h1>
+                        {{if eq .job.Status "pending"}}
+                        <button onclick="openEditTarget()" title="Edit target URL"
+                                class="text-gray-400 hover:text-indigo-600 transition flex-shrink-0">✏️</button>
+                        {{end}}
+                    </div>
+                    <p class="text-gray-500 mt-1 text-sm">
+                        Job ID: {{.job.ID}} · Domain: {{.job.Domain}}
+                        {{if .job.SeedURLs}} · <span class="text-indigo-600">{{len .job.SeedURLs}} seed URLs</span>{{end}}
+                    </p>
                 </div>
                 <div class="flex space-x-3 flex-shrink-0">
                     {{if eq .job.Status "pending"}}
@@ -437,6 +446,47 @@
         </div>
     </div>
 
+    <!-- Edit Target URL Modal -->
+    <div id="edit-target-modal" class="hidden fixed inset-0 z-50 bg-black bg-opacity-40 flex items-center justify-center p-4">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+                <h3 class="text-lg font-semibold text-gray-800">Edit Target URL</h3>
+                <button onclick="closeEditTarget()" class="text-gray-400 hover:text-gray-600 text-2xl leading-none">&times;</button>
+            </div>
+            <form id="edit-target-form" onsubmit="submitEditTarget(event)" class="p-6 space-y-4">
+                <div class="bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded-md p-3">
+                    <strong>Heads up:</strong> Saving will replace the job's target URL and clear its current frontier so the next start re-seeds with the new URL(s).
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">URL or Domain</label>
+                    <input type="text" id="edit-target-url-input" required
+                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        oninput="onEditURLInput()">
+                    <p class="text-xs text-gray-500 mt-1">Use <code class="bg-gray-100 px-1 rounded">&#123;&#123;VAR&#125;&#125;</code> for template variables.</p>
+                </div>
+                <div id="edit-tpl-section" class="hidden">
+                    <div class="border border-indigo-200 bg-indigo-50 rounded-lg p-4 space-y-3">
+                        <div class="flex items-center justify-between">
+                            <h4 class="text-sm font-semibold text-indigo-700">Template Variables</h4>
+                            <span id="edit-tpl-seed-count" class="text-xs text-indigo-500 font-mono"></span>
+                        </div>
+                        <p class="text-xs text-gray-600">Define values for each variable. Use commas for lists, dash for ranges (e.g. <code class="bg-white px-1 rounded">1,hamster,5-10</code>).</p>
+                        <div id="edit-tpl-vars" class="space-y-2"></div>
+                        <div id="edit-tpl-preview-wrap" class="hidden">
+                            <button type="button" onclick="toggleEditPreview()" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Preview expanded URLs ▾</button>
+                            <div id="edit-tpl-preview" class="hidden mt-2 max-h-40 overflow-y-auto bg-white border rounded p-2 text-xs text-gray-600 font-mono space-y-0.5"></div>
+                        </div>
+                    </div>
+                </div>
+                <div id="edit-target-alert" class="hidden text-sm rounded-md p-3"></div>
+                <div class="flex items-center justify-end gap-3 pt-2">
+                    <button type="button" onclick="closeEditTarget()" class="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50">Cancel</button>
+                    <button type="submit" id="edit-target-save-btn" class="px-6 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm font-medium">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <script>
         var pagesState = { jobId:'{{.job.ID}}', currentPage:1, pageSize:20, total:{{.pageTotal}}, autoRefresh:false, interval:null };
         var defaultSettings = {{.defaultSettingsJSON}};
@@ -681,6 +731,122 @@
         window.pauseJob=async function(){await apiCall('POST','/api/jobs/pause');location.reload();};
         window.resumeJob=async function(){await apiCall('POST','/api/jobs/resume');location.reload();};
         window.discoverSubdomains=async function(id){await apiCall('POST','/api/jobs/'+id+'/subdomains/discover');alert('Subdomain discovery started!');};
+
+        /* ── Edit Target URL ── */
+        var jobTargetURL = {{.job.TargetURL | printf "%q"}};
+        var editTplVarRe = /\{\{(\w+)\}\}/g;
+        var editPrevVarNames = [];
+
+        function openEditTarget(){
+            var modal=document.getElementById('edit-target-modal');
+            var input=document.getElementById('edit-target-url-input');
+            input.value=jobTargetURL;
+            document.getElementById('edit-target-alert').classList.add('hidden');
+            modal.classList.remove('hidden');
+            onEditURLInput();
+            setTimeout(function(){input.focus();},50);
+        }
+        function closeEditTarget(){
+            document.getElementById('edit-target-modal').classList.add('hidden');
+        }
+        document.addEventListener('keydown',function(e){
+            if(e.key==='Escape'){var m=document.getElementById('edit-target-modal');if(m&&!m.classList.contains('hidden'))closeEditTarget();}
+        });
+        function onEditURLInput(){
+            var url=document.getElementById('edit-target-url-input').value;
+            var names=[],seen={},m;
+            editTplVarRe.lastIndex=0;
+            while((m=editTplVarRe.exec(url))!==null){if(!seen[m[1]]){seen[m[1]]=true;names.push(m[1]);}}
+            var sec=document.getElementById('edit-tpl-section');
+            if(names.length===0){sec.classList.add('hidden');editPrevVarNames=[];return;}
+            sec.classList.remove('hidden');
+            if(JSON.stringify(names)!==JSON.stringify(editPrevVarNames)){editPrevVarNames=names;renderEditVarInputs(names);}
+        }
+        function renderEditVarInputs(names){
+            var c=document.getElementById('edit-tpl-vars');c.innerHTML='';
+            names.forEach(function(name){
+                var row=document.createElement('div');
+                row.className='flex items-center gap-2';
+                row.innerHTML=
+                    '<span class="text-xs font-mono text-indigo-700 bg-white px-2 py-1 rounded border border-indigo-200 whitespace-nowrap min-w-[4rem] text-center">'+
+                    '{{"{{"}}'+escEditH(name)+'{{"}}"}}'+'</span>'+
+                    '<input type="text" data-var="'+escEditH(name)+'" placeholder="e.g. 1,hamster,5-10" '+
+                    'class="flex-1 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500" '+
+                    'oninput="updateEditPreview()">';
+                c.appendChild(row);
+            });
+            updateEditPreview();
+        }
+        function escEditH(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+        function expandEditValueExpr(expr){
+            if(!expr.trim())return [];
+            var parts=expr.split(','),result=[];
+            parts.forEach(function(p){
+                p=p.trim();if(!p)return;
+                var rm=p.match(/^(\d+)-(\d+)$/);
+                if(rm){var a=parseInt(rm[1]),b=parseInt(rm[2]);
+                    if(a<=b){for(var i=a;i<=b;i++)result.push(String(i));}
+                    else{for(var i=a;i>=b;i--)result.push(String(i));}
+                }else{result.push(p);}
+            });
+            return result;
+        }
+        function updateEditPreview(){
+            var url=document.getElementById('edit-target-url-input').value;
+            var names=editPrevVarNames;
+            var wrap=document.getElementById('edit-tpl-preview-wrap');
+            var countEl=document.getElementById('edit-tpl-seed-count');
+            if(names.length===0){wrap.classList.add('hidden');countEl.textContent='';return;}
+            var vars={},anyFilled=false;
+            names.forEach(function(n){
+                var inp=document.querySelector('#edit-tpl-vars input[data-var="'+n+'"]');
+                var vals=inp?expandEditValueExpr(inp.value):[];
+                vars[n]=vals;if(vals.length>0)anyFilled=true;
+            });
+            if(!anyFilled){wrap.classList.add('hidden');countEl.textContent='';return;}
+            var allFilled=names.every(function(n){return vars[n].length>0;});
+            if(!allFilled){wrap.classList.add('hidden');countEl.textContent='';return;}
+            var combos=[url];
+            names.forEach(function(name){
+                var next=[];
+                combos.forEach(function(u){vars[name].forEach(function(val){next.push(u.split('{{"{{"}}'+name+'{{"}}"}}').join(val));});});
+                combos=next;
+            });
+            countEl.textContent=combos.length+' seed URL'+(combos.length!==1?'s':'');
+            wrap.classList.remove('hidden');
+            var prev=document.getElementById('edit-tpl-preview');
+            var limit=20;
+            var html=combos.slice(0,limit).map(function(u){return '<div class="truncate">'+escEditH(u)+'</div>';}).join('');
+            if(combos.length>limit){html+='<div class="text-gray-400 italic">... and '+(combos.length-limit)+' more</div>';}
+            prev.innerHTML=html;
+        }
+        function toggleEditPreview(){document.getElementById('edit-tpl-preview').classList.toggle('hidden');}
+        function showEditAlert(msg,ok){
+            var el=document.getElementById('edit-target-alert');
+            el.textContent=msg;
+            el.className='text-sm rounded-md p-3 '+(ok?'bg-green-50 border border-green-200 text-green-700':'bg-red-50 border border-red-200 text-red-700');
+            el.classList.remove('hidden');
+        }
+        async function submitEditTarget(e){
+            e.preventDefault();
+            var btn=document.getElementById('edit-target-save-btn');
+            var orig=btn.textContent;btn.disabled=true;btn.textContent='Saving…';
+            try{
+                var url=document.getElementById('edit-target-url-input').value.trim();
+                var payload={target_url:url};
+                if(editPrevVarNames.length>0){
+                    payload.template_vars={};
+                    editPrevVarNames.forEach(function(n){
+                        var inp=document.querySelector('#edit-tpl-vars input[data-var="'+n+'"]');
+                        if(inp&&inp.value.trim())payload.template_vars[n]=inp.value.trim();
+                    });
+                }
+                var r=await fetch('/api/jobs/'+pagesState.jobId+'/target',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+                var d=await r.json();
+                if(d.success){showEditAlert('Target updated. Reloading…',true);setTimeout(function(){location.reload();},700);}
+                else{showEditAlert('Error: '+(d.error||'Unknown'),false);btn.disabled=false;btn.textContent=orig;}
+            }catch(err){showEditAlert('Network error: '+err.message,false);btn.disabled=false;btn.textContent=orig;}
+        }
 
         document.addEventListener('DOMContentLoaded',function(){fetchPages();fetchExtracted();populateSettings();});
     </script>

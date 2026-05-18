@@ -690,6 +690,62 @@ func (h *Handler) GetDefaultSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, Response{Success: true, Data: settings})
 }
 
+// UpdateJobTarget updates the target URL (and optional template variables) of a pending job.
+func (h *Handler) UpdateJobTarget(c *gin.Context) {
+	jobID := c.Param("id")
+	var req struct {
+		TargetURL    string            `json:"target_url"`
+		TemplateVars map[string]string `json:"template_vars"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+		return
+	}
+	target := strings.TrimSpace(req.TargetURL)
+	if target == "" {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Error: "target_url is required"})
+		return
+	}
+
+	var seedURLs models.StringSlice
+	if modules.HasTemplateVars(target) {
+		if len(req.TemplateVars) == 0 {
+			c.JSON(http.StatusBadRequest, Response{Success: false, Error: "template_vars required when URL contains {{VAR}}"})
+			return
+		}
+		expandedVars := make(map[string][]string, len(req.TemplateVars))
+		for name, expr := range req.TemplateVars {
+			vals, err := modules.ExpandValueExpr(expr)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, Response{Success: false,
+					Error: fmt.Sprintf("error expanding {{%s}}: %v", name, err)})
+				return
+			}
+			if len(vals) == 0 {
+				c.JSON(http.StatusBadRequest, Response{Success: false,
+					Error: fmt.Sprintf("variable {{%s}} has no values", name)})
+				return
+			}
+			expandedVars[name] = vals
+		}
+		urls, err := modules.ExpandTemplateURL(target, expandedVars, 50000)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+			return
+		}
+		seedURLs = urls
+	}
+
+	if err := h.jobManager.UpdateJobTarget(jobID, target, seedURLs); err != nil {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, Response{Success: true, Data: gin.H{
+		"target_url": target,
+		"seed_count": len(seedURLs),
+	}})
+}
+
 // SearchPage renders the search page
 func (h *Handler) SearchPage(c *gin.Context) {
 	query := c.Query("q")

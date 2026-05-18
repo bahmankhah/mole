@@ -33,7 +33,8 @@ import re
 import sys
 import os
 
-from divar_session import make_session, request_with_refresh
+import cookie_pool
+from divar_session import apply_auth_cookies, make_base_session
 
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "after_crawl_data")
@@ -229,10 +230,13 @@ def extract_ad_info(body: str) -> dict:
 
 
 def fetch_phone(body: str, url: str) -> str | None:
-    """Best-effort phone fetch from Divar contact API. Returns None on any failure.
+    """
+    Best-effort phone fetch from Divar contact API. Returns None on any failure.
 
-    Cookies come from scripts/.cookies/divar.ir.json. On HTTP 401/403 or a
-    non-JSON response we trigger one session refresh+retry via divar_session.
+    Auth cookies come from cookie_pool — round-robined across files in
+    scripts/.cookies/auth/. On 401/403/JWT-expired the cookie is flagged
+    expired and the next one is tried. If every cookie in the pool is
+    exhausted, the local crawl job is paused via the control API.
     """
     match = re.search(r'"contactUUID"\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"', body)
     if not match:
@@ -264,34 +268,51 @@ def fetch_phone(body: str, url: str) -> str | None:
         "x-screen-size": "664x813",
     }
     payload = {"contact_uuid": uuid}
-    try:
-        session = make_session()
-        cookie_names = sorted(c.name for c in session.cookies)
-        log.info("phone: GET token=%s uuid=%s cookies=%s", token, uuid, cookie_names)
-        resp = request_with_refresh(
-            session, "POST", api_url,
-            headers=headers, json=payload, timeout=15, expect_json=True,
-        )
+
+    tried: set[str] = set()
+    while True:
+        picked = cookie_pool.acquire()
+        if picked is None or picked[0] in tried:
+            log.warning("phone: no usable cookies left for token=%s; pausing job", token)
+            cookie_pool.pause_crawl_job()
+            return None
+        name, auth = picked
+        tried.add(name)
+
+        session = make_base_session()
+        apply_auth_cookies(session, auth)
+
+        try:
+            log.info("phone: POST token=%s uuid=%s cookie=%s", token, uuid, name)
+            resp = session.post(api_url, headers=headers, json=payload, timeout=15)
+        except Exception as e:
+            log.exception("phone: request error token=%s cookie=%s: %s", token, name, e)
+            return None
+
         body_snip = (resp.text or "")[:300].replace("\n", " ")
-        log.info("phone: HTTP %s len=%d body=%s",
-                 resp.status_code, len(resp.text or ""), body_snip)
+        log.info("phone: cookie=%s HTTP %s len=%d body=%s",
+                 name, resp.status_code, len(resp.text or ""), body_snip)
+
+        if cookie_pool.looks_expired(resp):
+            cookie_pool.mark_expired(name)
+            continue
+
         if resp.status_code // 100 != 2:
             return None
+
         try:
             data = resp.json()
         except ValueError as e:
-            log.warning("phone: response not JSON for token=%s: %s", token, e)
+            log.warning("phone: response not JSON for token=%s cookie=%s: %s", token, name, e)
             return None
-    except Exception as e:
-        log.exception("phone: fetch error for token=%s: %s", token, e)
+
+        for widget in data.get("widget_list", []):
+            ph = widget.get("data", {}).get("action", {}).get("payload", {}).get("phone_number")
+            if ph:
+                log.info("phone: extracted token=%s phone=%s cookie=%s", token, ph, name)
+                return ph
+        log.info("phone: no phone_number widget for token=%s cookie=%s", token, name)
         return None
-    for widget in data.get("widget_list", []):
-        ph = widget.get("data", {}).get("action", {}).get("payload", {}).get("phone_number")
-        if ph:
-            log.info("phone: extracted token=%s phone=%s", token, ph)
-            return ph
-    log.info("phone: no phone_number widget in response for token=%s", token)
-    return None
 
 
 def process(page: dict) -> str:
@@ -313,7 +334,7 @@ def process(page: dict) -> str:
     ad_info = extract_ad_info(body)
     if ad_info:
         ad_info["url"] = url
-
+ 
     if not ad_info:
         return f"status={status} depth={depth} body_len={len(body)} url={url} (no ad)"
 
@@ -321,7 +342,8 @@ def process(page: dict) -> str:
         return f"skip (no token) url={url}"
 
     entry: dict = {"ad": ad_info}
-    phone = fetch_phone(body, url)
+    # phone = fetch_phone(body, url)
+    phone = None
     if phone:
         entry["user"] = {"phone": phone}
 

@@ -729,6 +729,48 @@ func (m *Manager) UpdateJobSettings(jobID string, settings *models.JobSettings) 
 	return m.db.Save(&job).Error
 }
 
+// UpdateJobTarget updates the target URL (and seed URLs) of a pending job.
+// Frontier rows are deleted so a subsequent Start re-seeds with the new URL(s).
+func (m *Manager) UpdateJobTarget(jobID, targetURL string, seedURLs models.StringSlice) error {
+	var job models.CrawlJob
+	if err := m.db.First(&job, "id = ?", jobID).Error; err != nil {
+		return err
+	}
+	if job.Status != models.JobStatusPending {
+		return fmt.Errorf("can only edit target URL for pending jobs")
+	}
+	var domain, fullURL string
+	if strings.HasPrefix(targetURL, "http://") || strings.HasPrefix(targetURL, "https://") {
+		parsed, perr := url.Parse(targetURL)
+		if perr != nil {
+			return fmt.Errorf("invalid URL: %v", perr)
+		}
+		urlCleaner := modules.NewURLCleaner()
+		domain = urlCleaner.ExtractBaseDomain(parsed.Scheme + "://" + parsed.Host)
+		if domain == "" {
+			domain = parsed.Host
+		}
+		fullURL = targetURL
+	} else {
+		domain = modules.CleanDomain(targetURL)
+		fullURL = "https://" + domain
+	}
+
+	updates := map[string]interface{}{
+		"target_url": fullURL,
+		"domain":     domain,
+		"seed_urls":  seedURLs, // may be nil → cleared
+	}
+	if err := m.db.Model(&models.CrawlJob{}).Where("id = ?", jobID).Updates(updates).Error; err != nil {
+		return err
+	}
+	if err := m.db.Where("crawl_job_id = ?", jobID).Delete(&models.FrontierURL{}).Error; err != nil {
+		log.Printf("[JobManager] WARN: failed to clear frontier for job %s: %v", jobID, err)
+	}
+	log.Printf("[JobManager] Updated target for job %s → %s (seeds=%d)", jobID, fullURL, len(seedURLs))
+	return nil
+}
+
 // DuplicateJob creates a new pending job by copying the target URL, domain, max depth, and settings from an existing job.
 func (m *Manager) DuplicateJob(jobID string) (*models.CrawlJob, error) {
 	var src models.CrawlJob
