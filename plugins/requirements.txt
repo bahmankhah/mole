@@ -1,5 +1,5 @@
-# Python dependencies for Mole crawler scripts
-# Install: pip install -r scripts/requirements.txt
+# Python dependencies for Mole crawler plugins
+# Install: pip install -r plugins/requirements.txt
 
 # Shared script utilities
 requests>=2.31

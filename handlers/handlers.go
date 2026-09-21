@@ -13,6 +13,7 @@ import (
 	"github.com/resolver/crawler/jobs"
 	"github.com/resolver/crawler/models"
 	"github.com/resolver/crawler/modules"
+	"github.com/resolver/crawler/plugins"
 )
 
 // Handler holds all HTTP handlers
@@ -221,6 +222,15 @@ func (h *Handler) GetJob(c *gin.Context) {
 			settingsJSON = template.JS(b)
 		}
 		defaultSettingsB, _ := json.Marshal(defaultSettings)
+		pluginList, err := plugins.List()
+		if err != nil {
+			log.Printf("[Handler] Failed to list plugins: %v", err)
+			pluginList = nil
+		}
+		if pluginList == nil {
+			pluginList = []plugins.Plugin{}
+		}
+		pluginsB, _ := json.Marshal(pluginList)
 
 		c.HTML(http.StatusOK, "job.html", gin.H{
 			"job":                 job,
@@ -232,6 +242,8 @@ func (h *Handler) GetJob(c *gin.Context) {
 			"stats":               stats,
 			"settingsJSON":        settingsJSON,
 			"defaultSettingsJSON": template.JS(defaultSettingsB),
+			"pluginsJSON":         template.JS(pluginsB),
+			"settingsEditable":    job.Status.SettingsEditable(),
 		})
 		return
 	}
@@ -262,7 +274,14 @@ func (h *Handler) StartJob(c *gin.Context) {
 
 // StopJob stops the current crawl job
 func (h *Handler) StopJob(c *gin.Context) {
-	if err := h.jobManager.StopJob(); err != nil {
+	jobID := c.Param("id")
+	var err error
+	if jobID != "" {
+		err = h.jobManager.StopJobByID(jobID)
+	} else {
+		err = h.jobManager.StopJob()
+	}
+	if err != nil {
 		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
 		return
 	}
@@ -280,9 +299,10 @@ func (h *Handler) PauseJob(c *gin.Context) {
 	c.JSON(http.StatusOK, Response{Success: true, Message: "Job paused"})
 }
 
-// ResumeJob resumes the current crawl job
+// ResumeJob resumes a paused crawl job
 func (h *Handler) ResumeJob(c *gin.Context) {
-	if err := h.jobManager.ResumeJob(); err != nil {
+	jobID := c.Param("id")
+	if err := h.jobManager.ResumeJob(jobID); err != nil {
 		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
 		return
 	}
@@ -623,7 +643,7 @@ func (h *Handler) DuplicateJob(c *gin.Context) {
 	c.JSON(http.StatusCreated, Response{Success: true, Data: newJob, Message: "Job duplicated"})
 }
 
-// UpdateJobSettings updates settings for a pending job
+// UpdateJobSettings updates settings for a pending or paused job.
 func (h *Handler) UpdateJobSettings(c *gin.Context) {
 	jobID := c.Param("id")
 
@@ -653,21 +673,9 @@ func (h *Handler) UpdateJobSettings(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
 		return
 	}
+	settings.SanitizeRequest()
 
-	// Check if settings are completely empty (all zero values) — treat as nil
-	if settings.MaxConcurrentRequests == nil && settings.RequestTimeoutSec == nil &&
-		settings.PolitenessDelayMs == nil && settings.MaxDepth == nil &&
-		settings.MaxPages == nil &&
-		settings.UserAgent == nil && settings.MaxRetries == nil &&
-		settings.RespectRobotsTxt == nil &&
-		settings.SkipContentDuplicates == nil &&
-		settings.UseHeadlessBrowser == nil && settings.HeadlessWaitSelector == nil &&
-		settings.EnableSemanticSearch == nil && settings.AfterCrawlScript == nil && settings.AfterJobScript == nil &&
-		settings.SaveTextContent == nil && settings.EnableWordExtraction == nil &&
-		settings.EnableStemming == nil && settings.EnableLemmatization == nil &&
-		settings.DefaultLanguage == nil && settings.UseCrawlPhrasesOnly == nil &&
-		len(settings.SkipExtensions) == 0 && len(settings.URLIncludePatterns) == 0 &&
-		len(settings.URLExcludePatterns) == 0 && len(settings.ExtraTrackingParams) == 0 {
+	if settings.IsEmpty() {
 		if err := h.jobManager.UpdateJobSettings(jobID, nil); err != nil {
 			c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
 			return
@@ -681,13 +689,26 @@ func (h *Handler) UpdateJobSettings(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, Response{Success: true, Message: "Settings updated"})
+	c.JSON(http.StatusOK, Response{Success: true, Message: "Settings updated", Data: settings})
 }
 
 // GetDefaultSettings returns the default crawler settings
 func (h *Handler) GetDefaultSettings(c *gin.Context) {
 	settings := h.jobManager.GetDefaultJobSettings()
 	c.JSON(http.StatusOK, Response{Success: true, Data: settings})
+}
+
+// ListPlugins returns after-crawl / after-job plugins discovered under plugins/.
+func (h *Handler) ListPlugins(c *gin.Context) {
+	list, err := plugins.List()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Error: err.Error()})
+		return
+	}
+	if list == nil {
+		list = []plugins.Plugin{}
+	}
+	c.JSON(http.StatusOK, Response{Success: true, Data: list})
 }
 
 // UpdateJobTarget updates the target URL (and optional template variables) of a pending job.

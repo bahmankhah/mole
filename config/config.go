@@ -45,8 +45,8 @@ type CrawlerConfig struct {
 	EnableSemanticSearch  bool          `yaml:"enable_semantic_search"` // Enable vector-based semantic search
 	EnableWordExtraction  bool          `yaml:"enable_word_extraction"` // Extract words and build inverted index during crawl
 	SaveTextContent       bool          `yaml:"save_text_content"`      // Save extracted text content of crawled pages
-	AfterCrawlScript      bool          `yaml:"after_crawl_script"`      // Run scripts/after_crawl.py after each successfully crawled page
-	AfterJobScript        bool          `yaml:"after_job_script"`        // Run scripts/after_job.py 2 minutes after the job ends (any terminal status)
+	AfterCrawlPlugin      string        `yaml:"after_crawl_plugin"`     // Plugin id under plugins/ to run after each crawled page (empty = disabled)
+	AfterJobPlugin        string        `yaml:"after_job_plugin"`       // Plugin id under plugins/ to run ~2 minutes after the job ends (empty = disabled)
 	EmbeddingScriptPath   string        `yaml:"embedding_script_path"`  // Path to embedding Python script (auto-detected if empty)
 	EmbeddingModel        string        `yaml:"embedding_model"`        // Sentence-transformer model name
 	PythonPath            string        `yaml:"python_path"`            // Path to python3 binary (auto-detects venv if empty)
@@ -106,7 +106,28 @@ func LoadConfig(configPath string) *Config {
 	}
 
 	log.Printf("[Config] Loaded configuration from %s", configPath)
+	applyLegacyScriptFlags(cfg, data)
 	return cfg
+}
+
+// applyLegacyScriptFlags maps the old after_*_script booleans onto plugin ids.
+func applyLegacyScriptFlags(cfg *Config, data []byte) {
+	var raw struct {
+		Crawler struct {
+			AfterCrawlScript bool `yaml:"after_crawl_script"`
+			AfterJobScript   bool `yaml:"after_job_script"`
+		} `yaml:"crawler"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return
+	}
+	const legacyID = "divar"
+	if cfg.Crawler.AfterCrawlPlugin == "" && raw.Crawler.AfterCrawlScript {
+		cfg.Crawler.AfterCrawlPlugin = legacyID
+	}
+	if cfg.Crawler.AfterJobPlugin == "" && raw.Crawler.AfterJobScript {
+		cfg.Crawler.AfterJobPlugin = legacyID
+	}
 }
 
 // applyEnvOverrides applies environment variable overrides to the config

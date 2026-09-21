@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-after_crawl.py — Custom after-crawl hook for the Mole crawler.
+after_crawl.py — Divar plugin after-crawl hook for the Mole crawler.
 
-Invoked by the crawler engine after each successfully crawled page when
-"Run After-Crawl Script" is enabled in the job settings.
+Invoked by the crawler engine after each successfully crawled page when this
+plugin is selected as the after-crawl plugin in the job settings.
 
 Input  (stdin): JSON object with the following fields:
     url          (str)  — the crawled page URL
@@ -16,14 +16,8 @@ Input  (stdin): JSON object with the following fields:
 Output (stdout): any text; logged by the engine as [AfterCrawl] <url> => <output>.
 Stderr and non-zero exit codes are logged as errors but do not abort the crawl.
 
-Example use-cases:
-    - Extract and export specific data to a file or external API
-    - Detect patterns / keywords not supported by the phrase engine
-    - Send alerts when particular content is found
-    - Feed content into an external pipeline
-
-Runs inside scripts/.venv — add dependencies to scripts/requirements.txt
-and run scripts/setup_python.sh to install them.
+Runs inside plugins/.venv — add dependencies to plugins/requirements.txt
+and run plugins/setup_python.sh to install them.
 """
 
 import fcntl
@@ -37,8 +31,25 @@ import cookie_pool
 from divar_session import apply_auth_cookies, make_base_session
 
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "after_crawl_data")
-LOG_FILE = os.path.join(os.path.dirname(__file__), "after_crawl.log")
+PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+_PLUGINS_DIR = os.path.dirname(PLUGIN_DIR)
+
+
+def _resolve_data_dir() -> str:
+    local = os.path.join(PLUGIN_DIR, "after_crawl_data")
+    if os.path.isdir(local):
+        return local
+    for legacy in (
+        os.path.join(_PLUGINS_DIR, "after_crawl_data"),
+        os.path.join(os.path.dirname(_PLUGINS_DIR), "scripts", "after_crawl_data"),
+    ):
+        if os.path.isdir(legacy):
+            return legacy
+    return local
+
+
+DATA_DIR = _resolve_data_dir()
+LOG_FILE = os.path.join(PLUGIN_DIR, "after_crawl.log")
 
 
 def _setup_logger() -> logging.Logger:
@@ -59,7 +70,7 @@ log = _setup_logger()
 
 
 def append_entry(job_id: str, entry: dict) -> None:
-    """Append an entry to scripts/after_crawl_data/{job_id}.json under flock.
+    """Append an entry to after_crawl_data/{job_id}.json under flock.
 
     File shape: {"data": [entry, entry, ...]}. The after_job.py script consumes
     the same file and may rewrite or remove it once entries are processed.
@@ -234,9 +245,9 @@ def fetch_phone(body: str, url: str) -> str | None:
     Best-effort phone fetch from Divar contact API. Returns None on any failure.
 
     Auth cookies come from cookie_pool — round-robined across files in
-    scripts/.cookies/auth/. On 401/403/JWT-expired the cookie is flagged
-    expired and the next one is tried. If every cookie in the pool is
-    exhausted, the local crawl job is paused via the control API.
+    the plugin (or plugins/) .cookies/auth/ directory. On 401/403/JWT-expired
+    the cookie is flagged expired and the next one is tried. If every cookie
+    in the pool is exhausted, the local crawl job is paused via the control API.
     """
     match = re.search(r'"contactUUID"\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"', body)
     if not match:
@@ -322,7 +333,7 @@ def process(page: dict) -> str:
     Builds an entry of shape:
         {"ad": {...}, "user": {"phone": "..."}}   # user key only when phone fetched
 
-    Appends it to scripts/after_crawl_data/{job_id}.json. Returns a short
+    Appends it to after_crawl_data/{job_id}.json. Returns a short
     log line for the engine.
     """
     url = page.get("url", "")

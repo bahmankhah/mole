@@ -104,11 +104,17 @@ The system follows a modular, pipeline-based architecture. The **Job Manager** o
 │   ├── subdomain_scanner.go      # DNS-based subdomain enumeration with concurrent lookups
 │   └── semantic_search.go        # Embedding generation, FAISS index management, semantic search
 │
-├── scripts/
+├── plugins/
+│   ├── plugins.go                # Discovers after-crawl / after-job plugins from this folder
 │   ├── headless_fetch.py         # Playwright-based headless Chromium page renderer
 │   ├── semantic_embed.py         # Sentence-transformer embedding + FAISS index/search service
+│   ├── stem_lemma.py             # Stemming / lemmatization helper
 │   ├── requirements.txt          # Python dependencies (playwright, sentence-transformers, faiss-cpu, numpy)
-│   └── setup_python.sh           # Automated Python venv creation and dependency installation
+│   ├── setup_python.sh           # Automated Python venv creation and dependency installation
+│   └── <plugin-id>/              # One folder per after-crawl / after-job plugin
+│       ├── plugin.json           # Name, description, optional hook filenames
+│       ├── after_crawl.py        # Optional: runs after each crawled page (JSON on stdin)
+│       └── after_job.py          # Optional: runs ~2 minutes after the job ends (--job-id)
 │
 ├── templates/
 │   ├── index.html                # Dashboard: recent jobs, discovery jobs, matches, phrases
@@ -407,7 +413,7 @@ Standard HTTP client that mimics a real Chrome browser to avoid bot detection:
 
 #### HeadlessFetcher (`modules/fetcher.go`)
 
-For JavaScript-heavy SPAs. Delegates to `scripts/headless_fetch.py` via subprocess:
+For JavaScript-heavy SPAs. Delegates to `plugins/headless_fetch.py` via subprocess:
 
 - Launches Playwright Chromium in headless mode
 - Waits for `domcontentloaded`, then optionally waits for a CSS selector
@@ -506,11 +512,11 @@ DNS-based subdomain enumeration:
 
 Vector-based semantic search using sentence-transformers and FAISS:
 
-- **Embedding generation** — Calls `scripts/semantic_embed.py` with `command: embed`. Uses `paraphrase-multilingual-MiniLM-L12-v2` model (384-dimensional, multilingual). Truncates page content to ~1,000 words. Prepends page title to the text.
+- **Embedding generation** — Calls `plugins/semantic_embed.py` with `command: embed`. Uses `paraphrase-multilingual-MiniLM-L12-v2` model (384-dimensional, multilingual). Truncates page content to ~1,000 words. Prepends page title to the text.
 - **Content hashing** — SHA-256 of the embedded text prevents re-embedding identical content.
 - **Storage** — Embeddings stored as `MEDIUMBLOB` in MySQL (float64 → float32 serialization, 4 bytes per dimension). Upserted on `page_id` conflict.
-- **Index building** — Calls `scripts/semantic_embed.py` with `command: index`. Reads all embeddings from DB, builds a FAISS `IndexIDMap(IndexFlatIP)` index (inner product = cosine similarity for normalized vectors), writes to `data/faiss/pages.index`.
-- **Search** — Calls `scripts/semantic_embed.py` with `command: search`. Embeds the query text, searches the FAISS index for top-K nearest neighbors, returns page IDs with similarity scores. Results are enriched with page metadata and domain info from the database.
+- **Index building** — Calls `plugins/semantic_embed.py` with `command: index`. Reads all embeddings from DB, builds a FAISS `IndexIDMap(IndexFlatIP)` index (inner product = cosine similarity for normalized vectors), writes to `data/faiss/pages.index`.
+- **Search** — Calls `plugins/semantic_embed.py` with `command: search`. Embeds the query text, searches the FAISS index for top-K nearest neighbors, returns page IDs with similarity scores. Results are enriched with page metadata and domain info from the database.
 - **Auto-rebuild** — FAISS index is automatically rebuilt when a crawl job completes with semantic search enabled.
 - **Environment handling** — Strips proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) before calling Python to prevent interference with model downloads.
 
@@ -591,7 +597,7 @@ AI-powered similarity search across all crawled pages:
 For JavaScript-heavy SPAs that don't render content server-side:
 
 1. Enabled via `use_headless_browser: true` in config or per-job settings
-2. Go launches `scripts/headless_fetch.py` as a subprocess
+2. Go launches `plugins/headless_fetch.py` as a subprocess
 3. Playwright launches headless Chromium with anti-detection flags (`--no-sandbox`, etc.)
 4. Navigates to URL, waits for `domcontentloaded`
 5. Optionally waits for a CSS selector (`headless_wait_selector`)
@@ -640,6 +646,8 @@ Each crawl job can override global crawler config with a JSON `settings` field:
 | `use_headless_browser` | bool | Enable Playwright rendering |
 | `headless_wait_selector` | string | CSS selector to wait for |
 | `enable_semantic_search` | bool | Generate embeddings |
+| `after_crawl_plugin` | string | Plugin id under `plugins/` to run after each crawled page (empty = disabled) |
+| `after_job_plugin` | string | Plugin id under `plugins/` to run ~2 minutes after the job ends (empty = disabled) |
 
 Null/omitted values fall back to global defaults. Settings can be updated via API for `pending` jobs and reset to defaults.
 
@@ -682,6 +690,7 @@ Base URL: `http://<host>:<port>/api`
 | `DELETE` | `/api/jobs/:id` | Delete a job and all associated data |
 | `PUT` | `/api/jobs/:id/settings` | Update settings for a pending job. Body: `{...settings}` or `{"reset": true}` |
 | `GET` | `/api/settings/defaults` | Get default crawler settings |
+| `GET` | `/api/plugins` | List after-crawl / after-job plugins discovered from `plugins/` |
 
 ### Discovery
 
@@ -782,6 +791,8 @@ crawler:
   use_headless_browser: false       # Use Playwright for JS rendering
   headless_wait_selector: ""        # CSS selector to wait for (headless mode)
   enable_semantic_search: false     # Generate embeddings + FAISS index
+  after_crawl_plugin: ""            # Plugin folder under plugins/ (empty = disabled)
+  after_job_plugin: ""
   embedding_model: "paraphrase-multilingual-MiniLM-L12-v2"  # Sentence-transformer model
   skip_extensions:                  # File extensions to skip
     - .jpg
@@ -874,11 +885,11 @@ Required only for **headless browser rendering** and/or **semantic search**.
 
 ```bash
 # Automated setup (creates venv, installs deps)
-chmod +x scripts/setup_python.sh
-./scripts/setup_python.sh
+chmod +x plugins/setup_python.sh
+./plugins/setup_python.sh
 
 # Manual setup
-cd scripts
+cd plugins
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -887,7 +898,7 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-The Go server auto-detects the Python venv at `scripts/.venv/bin/python3`. No manual activation needed.
+The Go server auto-detects the Python venv at `plugins/.venv/bin/python3`. No manual activation needed.
 
 ### Python Dependencies
 

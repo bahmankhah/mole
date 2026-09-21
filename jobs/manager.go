@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -30,6 +31,8 @@ type Manager struct {
 
 	mu              sync.Mutex
 	activeJob       *models.CrawlJob
+	queuedIDs       []string // jobs that should start when the engine is free
+	closed          bool
 	subdomainCtx    context.Context
 	subdomainCancel context.CancelFunc
 }
@@ -48,26 +51,41 @@ func NewManager(db *gorm.DB, cfg *config.Config, engine *crawler.Engine) *Manage
 		subdomainScanner: scanner,
 	}
 
+	engine.SetOnIdle(m.onEngineIdle)
+
 	// Clean up any stale running/paused jobs from previous runs
 	m.cleanupStaleJobs()
 
 	return m
 }
 
-// cleanupStaleJobs resets any jobs that were running or paused when the server stopped
+// cleanupStaleJobs parks crawl jobs that were still running when the process died.
+// Paused jobs are left paused so they can be resumed after restart.
 func (m *Manager) cleanupStaleJobs() {
-	// Update any running jobs to cancelled status
-	result := m.db.Model(&models.CrawlJob{}).
-		Where("status IN ?", []string{string(models.JobStatusRunning), string(models.JobStatusPaused)}).
-		Updates(map[string]interface{}{
-			"status":        models.JobStatusCancelled,
-			"error_message": "Job interrupted by server restart",
-		})
-	if result.RowsAffected > 0 {
-		log.Printf("[JobManager] Cleaned up %d stale jobs from previous run", result.RowsAffected)
+	var running []models.CrawlJob
+	if err := m.db.Where("status = ?", string(models.JobStatusRunning)).Find(&running).Error; err != nil {
+		log.Printf("[JobManager] Failed to look up stale running jobs: %v", err)
+	} else if len(running) > 0 {
+		ids := make([]string, 0, len(running))
+		for _, job := range running {
+			ids = append(ids, job.ID)
+		}
+		if err := m.db.Model(&models.FrontierURL{}).
+			Where("crawl_job_id IN ? AND status = ?", ids, models.FrontierStatusProcessing).
+			Update("status", models.FrontierStatusPending).Error; err != nil {
+			log.Printf("[JobManager] Failed to reset in-flight URLs for stale jobs: %v", err)
+		}
+		result := m.db.Model(&models.CrawlJob{}).
+			Where("id IN ?", ids).
+			Update("status", models.JobStatusPaused)
+		if result.Error != nil {
+			log.Printf("[JobManager] Failed to park stale running jobs: %v", result.Error)
+		} else {
+			log.Printf("[JobManager] Parked %d running job(s) after restart (status=paused)", result.RowsAffected)
+		}
 	}
 
-	// Also clean up any stale discovery jobs
+	// Discovery has no resume path; abandon in-flight discovery jobs.
 	m.db.Model(&models.DiscoveryJob{}).
 		Where("status IN ?", []string{string(models.JobStatusRunning), string(models.JobStatusPaused)}).
 		Updates(map[string]interface{}{
@@ -128,99 +146,213 @@ func (m *Manager) UpdateJobSeedURLs(jobID string, seeds models.StringSlice) erro
 	return m.db.Model(&models.CrawlJob{}).Where("id = ?", jobID).Update("seed_urls", seeds).Error
 }
 
-// StartJob starts a crawl job
+// StartJob starts a crawl job. If another job is running, this job stays pending
+// and is started when the engine becomes free (the running job completes, stops, or is paused).
 func (m *Manager) StartJob(jobID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	if m.activeJob != nil && m.activeJob.Status == models.JobStatusRunning {
-		return fmt.Errorf("a job is already running")
-	}
 
 	var job models.CrawlJob
 	if err := m.db.First(&job, "id = ?", jobID).Error; err != nil {
 		return err
 	}
 
-	// Load phrases
+	if m.engine.GetState() == crawler.StateRunning {
+		if job.Status != models.JobStatusPending && job.Status != models.JobStatusPaused {
+			return fmt.Errorf("a job is already running")
+		}
+		m.enqueueLocked(jobID)
+		log.Printf("[JobManager] Queued job %s until the running job finishes or is paused", jobID)
+		return nil
+	}
+
+	return m.startJobLocked(&job)
+}
+
+func (m *Manager) startJobLocked(job *models.CrawlJob) error {
+	m.removeQueuedLocked(job.ID)
+
 	if err := m.engine.LoadPhrases(); err != nil {
 		log.Printf("[JobManager] Warning: failed to load phrases: %v", err)
 	}
 
-	// Start the crawler engine
-	if err := m.engine.Start(&job); err != nil {
+	if err := m.engine.Start(job); err != nil {
 		return err
 	}
 
-	m.activeJob = &job
-	log.Printf("[JobManager] Started job %s", jobID)
+	m.activeJob = job
+	log.Printf("[JobManager] Started job %s", job.ID)
 	return nil
 }
 
-// StopJob stops the current crawl job
+// StopJob stops the currently running crawl job and starts the next queued job if any.
 func (m *Manager) StopJob() error {
+	return m.stopCurrentLocked(true)
+}
+
+func (m *Manager) stopCurrentLocked(startNext bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check engine state directly
-	engineState := m.engine.GetState()
-	if engineState == crawler.StateIdle {
-		// Engine is idle, but check if there's a job in the database that needs cleanup
-		var runningJob models.CrawlJob
-		if err := m.db.Where("status IN ?", []string{string(models.JobStatusRunning), string(models.JobStatusPaused)}).First(&runningJob).Error; err == nil {
-			// Found a stale job, update its status
-			runningJob.Status = models.JobStatusCancelled
-			runningJob.ErrorMessage = "Job stopped manually"
-			m.db.Save(&runningJob)
-			log.Printf("[JobManager] Cleaned up stale job %s", runningJob.ID)
-			return nil
-		}
+	if m.engine.GetState() == crawler.StateIdle {
 		return fmt.Errorf("no active job")
 	}
 
 	m.engine.Stop()
 	m.activeJob = nil
+	if startNext && !m.closed {
+		return m.startNextQueuedLocked()
+	}
 	return nil
 }
 
-// PauseJob pauses the current crawl job
+// StopJobByID stops a running job or cancels a paused one.
+func (m *Manager) StopJobByID(jobID string) error {
+	var job models.CrawlJob
+	if err := m.db.First(&job, "id = ?", jobID).Error; err != nil {
+		return err
+	}
+
+	switch job.Status {
+	case models.JobStatusRunning:
+		return m.stopCurrentLocked(true)
+	case models.JobStatusPaused:
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.removeQueuedLocked(jobID)
+		now := time.Now()
+		job.Status = models.JobStatusCancelled
+		job.CompletedAt = &now
+		job.ErrorMessage = "Job stopped manually"
+		if err := m.db.Save(&job).Error; err != nil {
+			return err
+		}
+		log.Printf("[JobManager] Cancelled paused job %s", jobID)
+		return nil
+	default:
+		return fmt.Errorf("job is not running or paused")
+	}
+}
+
+// PauseJob parks the current crawl job and starts the next queued job if any.
 func (m *Manager) PauseJob() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check engine state directly
 	engineState := m.engine.GetState()
 	if engineState != crawler.StateRunning {
-		// Engine is not running, but check if there's a job in the database that needs cleanup
 		if engineState == crawler.StateIdle {
 			var runningJob models.CrawlJob
 			if err := m.db.Where("status = ?", string(models.JobStatusRunning)).First(&runningJob).Error; err == nil {
-				// Found a stale running job, update its status to paused
 				runningJob.Status = models.JobStatusPaused
 				m.db.Save(&runningJob)
 				log.Printf("[JobManager] Marked stale job %s as paused", runningJob.ID)
-				return nil
+				return m.startNextQueuedLocked()
 			}
 		}
 		return fmt.Errorf("no running job to pause")
 	}
 
 	m.engine.Pause()
-	return nil
+	m.activeJob = nil
+	if m.closed {
+		return nil
+	}
+	return m.startNextQueuedLocked()
 }
 
-// ResumeJob resumes the current crawl job
-func (m *Manager) ResumeJob() error {
+// ResumeJob resumes a paused crawl job. If jobID is empty, the most recently paused job is used.
+func (m *Manager) ResumeJob(jobID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check engine state directly
-	if m.engine.GetState() != crawler.StatePaused {
-		return fmt.Errorf("no paused job to resume")
+	if m.engine.GetState() == crawler.StatePaused {
+		current := m.engine.GetCurrentJob()
+		if jobID == "" || (current != nil && current.ID == jobID) {
+			m.engine.Resume()
+			return nil
+		}
 	}
 
-	m.engine.Resume()
+	if jobID == "" {
+		var job models.CrawlJob
+		if err := m.db.Where("status = ?", string(models.JobStatusPaused)).
+			Order("updated_at DESC").First(&job).Error; err != nil {
+			return fmt.Errorf("no paused job to resume")
+		}
+		jobID = job.ID
+	}
+
+	var job models.CrawlJob
+	if err := m.db.First(&job, "id = ?", jobID).Error; err != nil {
+		return err
+	}
+	if job.Status != models.JobStatusPaused {
+		return fmt.Errorf("job is not paused")
+	}
+
+	if m.engine.GetState() == crawler.StateRunning {
+		m.enqueueLocked(jobID)
+		log.Printf("[JobManager] Queued paused job %s until the running job finishes or is paused", jobID)
+		return nil
+	}
+
+	return m.startJobLocked(&job)
+}
+
+func (m *Manager) onEngineIdle() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return
+	}
+	m.activeJob = nil
+	if err := m.startNextQueuedLocked(); err != nil {
+		log.Printf("[JobManager] Failed to start next queued job: %v", err)
+	}
+}
+
+func (m *Manager) startNextQueuedLocked() error {
+	if m.engine.GetState() != crawler.StateIdle {
+		return nil
+	}
+	for len(m.queuedIDs) > 0 {
+		id := m.queuedIDs[0]
+		m.queuedIDs = m.queuedIDs[1:]
+		var job models.CrawlJob
+		if err := m.db.First(&job, "id = ?", id).Error; err != nil {
+			log.Printf("[JobManager] Skipping queued job %s: %v", id, err)
+			continue
+		}
+		if job.Status != models.JobStatusPending && job.Status != models.JobStatusPaused {
+			continue
+		}
+		log.Printf("[JobManager] Starting queued job %s", id)
+		return m.startJobLocked(&job)
+	}
 	return nil
+}
+
+func (m *Manager) enqueueLocked(id string) {
+	for _, q := range m.queuedIDs {
+		if q == id {
+			return
+		}
+	}
+	m.queuedIDs = append(m.queuedIDs, id)
+}
+
+func (m *Manager) removeQueuedLocked(id string) {
+	if len(m.queuedIDs) == 0 {
+		return
+	}
+	out := m.queuedIDs[:0]
+	for _, q := range m.queuedIDs {
+		if q != id {
+			out = append(out, q)
+		}
+	}
+	m.queuedIDs = out
 }
 
 // GetJob retrieves a job by ID
@@ -248,6 +380,10 @@ func (m *Manager) GetJobs(limit, offset int) ([]models.CrawlJob, int64, error) {
 
 // DeleteJob deletes a job and its associated data
 func (m *Manager) DeleteJob(jobID string) error {
+	m.mu.Lock()
+	m.removeQueuedLocked(jobID)
+	m.mu.Unlock()
+
 	// Delete associated data
 	m.db.Where("discovery_job_id = ?", jobID).Delete(&models.Subdomain{})
 	m.db.Where("crawl_job_id = ?", jobID).Delete(&models.CrawledPage{})
@@ -712,21 +848,27 @@ func (m *Manager) GetEngineStats() map[string]interface{} {
 	return m.engine.GetStats()
 }
 
-// UpdateJobSettings updates the settings for a pending job
+// UpdateJobSettings updates the settings for a pending or paused job.
+// Paused jobs pick up the new settings on resume (Engine.Start re-merges them).
 func (m *Manager) UpdateJobSettings(jobID string, settings *models.JobSettings) error {
 	var job models.CrawlJob
 	if err := m.db.First(&job, "id = ?", jobID).Error; err != nil {
 		return err
 	}
-	if job.Status != models.JobStatusPending {
-		return fmt.Errorf("can only update settings for pending jobs")
+	if !job.Status.SettingsEditable() {
+		return fmt.Errorf("can only update settings for pending or paused jobs")
 	}
 	if settings == nil {
 		// Reset to defaults: set settings column to NULL
 		return m.db.Model(&models.CrawlJob{}).Where("id = ?", jobID).Update("settings", nil).Error
 	}
-	job.Settings = settings
-	return m.db.Save(&job).Error
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("encode settings: %w", err)
+	}
+	// Write the JSON column directly. Save() does not reliably persist this
+	// custom Valuer type, which dropped request method/headers/body on reload.
+	return m.db.Model(&models.CrawlJob{}).Where("id = ?", jobID).Update("settings", string(raw)).Error
 }
 
 // UpdateJobTarget updates the target URL (and seed URLs) of a pending job.
@@ -794,6 +936,15 @@ func (m *Manager) DuplicateJob(jobID string) (*models.CrawlJob, error) {
 		if s.ExtraTrackingParams != nil {
 			s.ExtraTrackingParams = append([]string(nil), src.Settings.ExtraTrackingParams...)
 		}
+		if s.RequestHeaders != nil {
+			s.RequestHeaders = append([]models.HTTPHeader(nil), src.Settings.RequestHeaders...)
+		}
+		if s.RequestBodyVars != nil {
+			s.RequestBodyVars = make(map[string]string, len(src.Settings.RequestBodyVars))
+			for k, v := range src.Settings.RequestBodyVars {
+				s.RequestBodyVars[k] = v
+			}
+		}
 		settingsCopy = &s
 	}
 
@@ -829,8 +980,8 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 	headlessSelector := cfg.HeadlessWaitSelector
 	enableSemantic := cfg.EnableSemanticSearch
 	saveTextContent := cfg.SaveTextContent
-	afterCrawlScript := cfg.AfterCrawlScript
-	afterJobScript := cfg.AfterJobScript
+	afterCrawlPlugin := cfg.AfterCrawlPlugin
+	afterJobPlugin := cfg.AfterJobPlugin
 	enableWordExtraction := cfg.EnableWordExtraction
 	enableStemming := cfg.EnableStemming
 	enableLemmatization := cfg.EnableLemmatization
@@ -851,8 +1002,8 @@ func (m *Manager) GetDefaultJobSettings() *models.JobSettings {
 		HeadlessWaitSelector:  &headlessSelector,
 		EnableSemanticSearch:  &enableSemantic,
 		SaveTextContent:       &saveTextContent,
-		AfterCrawlScript:      &afterCrawlScript,
-		AfterJobScript:        &afterJobScript,
+		AfterCrawlPlugin:      &afterCrawlPlugin,
+		AfterJobPlugin:        &afterJobPlugin,
 		EnableWordExtraction:  &enableWordExtraction,
 		EnableStemming:        &enableStemming,
 		EnableLemmatization:   &enableLemmatization,
@@ -1311,12 +1462,19 @@ func generateNgrams(words []string) []string {
 	return ngrams
 }
 
-// Shutdown gracefully shuts down the job manager
+// Shutdown gracefully shuts down the job manager.
+// A running crawl is parked as paused so it can be resumed after restart.
 func (m *Manager) Shutdown() {
 	m.StopSubdomainDiscovery()
-	if m.activeJob != nil {
-		m.StopJob()
+	m.mu.Lock()
+	m.closed = true
+	m.queuedIDs = nil
+	if m.engine.GetState() == crawler.StateRunning {
+		log.Printf("[JobManager] Parking running job for restart")
+		m.engine.Pause()
+		m.activeJob = nil
 	}
+	m.mu.Unlock()
 	m.subdomainScanner.Shutdown()
 }
 

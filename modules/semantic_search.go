@@ -37,10 +37,7 @@ func NewSemanticSearcher(cfg config.CrawlerConfig, db *gorm.DB) *SemanticSearche
 	scriptPath := cfg.EmbeddingScriptPath
 	if scriptPath == "" {
 		// Auto-detect script path relative to working directory
-		candidates := []string{
-			"scripts/semantic_embed.py",
-			"./scripts/semantic_embed.py",
-		}
+		candidates := pluginPathCandidates("semantic_embed.py")
 		for _, c := range candidates {
 			if _, err := os.Stat(c); err == nil {
 				scriptPath = c
@@ -48,7 +45,7 @@ func NewSemanticSearcher(cfg config.CrawlerConfig, db *gorm.DB) *SemanticSearche
 			}
 		}
 		if scriptPath == "" {
-			scriptPath = "scripts/semantic_embed.py"
+			scriptPath = filepath.Join("plugins", "semantic_embed.py")
 		}
 	}
 

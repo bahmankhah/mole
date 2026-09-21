@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -21,6 +20,7 @@ import (
 	"github.com/resolver/crawler/config"
 	"github.com/resolver/crawler/models"
 	"github.com/resolver/crawler/modules"
+	"github.com/resolver/crawler/plugins"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -75,6 +75,12 @@ type Engine struct {
 	// Stats
 	crawledCount int64
 	matchCount   int64
+
+	// Extra HTTP headers from job settings, applied to every fetch.
+	extraHeaders []models.HTTPHeader
+
+	// Called after the engine becomes idle because a job completed.
+	onIdle func()
 }
 
 // newFetcher creates the appropriate Fetcher based on config.
@@ -182,14 +188,15 @@ func (e *Engine) Start(job *models.CrawlJob) error {
 
 	// Merge job settings with default config
 	e.effectiveConfig = e.config
+	e.extraHeaders = nil
 	if job.Settings != nil {
 		e.mergeJobSettings(job.Settings)
 	}
 
 	// Recreate fetcher with effective config so per-job overrides take effect
 	e.fetcher = newFetcher(e.effectiveConfig)
-	log.Printf("[Engine] Effective after_crawl_script=%t after_job_script=%t for job %s",
-		e.effectiveConfig.AfterCrawlScript, e.effectiveConfig.AfterJobScript, job.ID)
+	log.Printf("[Engine] Effective after_crawl_plugin=%q after_job_plugin=%q for job %s",
+		e.effectiveConfig.AfterCrawlPlugin, e.effectiveConfig.AfterJobPlugin, job.ID)
 
 	// Reset robots.txt rules for new job
 	e.robotRulesMu.Lock()
@@ -231,7 +238,9 @@ func (e *Engine) Start(job *models.CrawlJob) error {
 	// Update job status
 	now := time.Now()
 	job.Status = models.JobStatusRunning
-	job.StartedAt = &now
+	if job.StartedAt == nil {
+		job.StartedAt = &now
+	}
 	e.db.Save(job)
 
 	// Check if frontier already has URLs (resuming) or needs seeding
@@ -239,6 +248,17 @@ func (e *Engine) Start(job *models.CrawlJob) error {
 		// Add seed URLs
 		if err := e.addSeedURLs(job); err != nil {
 			log.Printf("[Engine] Error adding seed URLs: %v", err)
+			job.Status = models.JobStatusFailed
+			job.ErrorMessage = err.Error()
+			e.db.Save(job)
+			if e.cancel != nil {
+				e.cancel()
+			}
+			e.jobMu.Lock()
+			e.currentJob = nil
+			e.jobMu.Unlock()
+			atomic.StoreInt32(&e.state, int32(StateIdle))
+			return err
 		}
 	} else {
 		log.Printf("[Engine] Resuming with %d pending URLs in frontier", e.frontier.PendingCount())
@@ -308,11 +328,11 @@ func (e *Engine) mergeJobSettings(s *models.JobSettings) {
 	if s.SaveTextContent != nil {
 		e.effectiveConfig.SaveTextContent = *s.SaveTextContent
 	}
-	if s.AfterCrawlScript != nil {
-		e.effectiveConfig.AfterCrawlScript = *s.AfterCrawlScript
+	if s.AfterCrawlPlugin != nil {
+		e.effectiveConfig.AfterCrawlPlugin = strings.TrimSpace(*s.AfterCrawlPlugin)
 	}
-	if s.AfterJobScript != nil {
-		e.effectiveConfig.AfterJobScript = *s.AfterJobScript
+	if s.AfterJobPlugin != nil {
+		e.effectiveConfig.AfterJobPlugin = strings.TrimSpace(*s.AfterJobPlugin)
 	}
 	if s.EnableStemming != nil {
 		e.effectiveConfig.EnableStemming = *s.EnableStemming
@@ -325,6 +345,9 @@ func (e *Engine) mergeJobSettings(s *models.JobSettings) {
 	}
 	if s.UseCrawlPhrasesOnly != nil {
 		e.effectiveConfig.UseCrawlPhrasesOnly = *s.UseCrawlPhrasesOnly
+	}
+	if len(s.RequestHeaders) > 0 {
+		e.extraHeaders = append([]models.HTTPHeader(nil), s.RequestHeaders...)
 	}
 }
 
@@ -350,19 +373,86 @@ func (e *Engine) randomizedDelay() time.Duration {
 
 // addSeedURLs adds initial seed URLs for the job
 func (e *Engine) addSeedURLs(job *models.CrawlJob) error {
-	// If the job has explicit seed URLs (from template expansion), use those.
-	if len(job.SeedURLs) > 0 {
-		for _, seed := range job.SeedURLs {
+	method, bodies, err := expandSeedRequests(job.Settings)
+	if err != nil {
+		return err
+	}
+
+	seeds := job.SeedURLs
+	if len(seeds) == 0 {
+		seeds = models.StringSlice{job.TargetURL}
+	}
+
+	if method != "POST" {
+		for _, seed := range seeds {
 			e.frontier.AddSeedURLs(seed)
 		}
-		log.Printf("[Engine] Added %d seed URLs for job %s, frontier size: %d", len(job.SeedURLs), job.ID, e.frontier.PendingCount())
+		log.Printf("[Engine] Added %d seed URL(s) for job %s, frontier size: %d", len(seeds), job.ID, e.frontier.PendingCount())
 		return nil
 	}
 
-	// Default: single target URL as seed.
-	e.frontier.AddSeedURLs(job.TargetURL)
-	log.Printf("[Engine] Added seed URLs for %s, frontier size: %d", job.TargetURL, e.frontier.PendingCount())
+	// POST seeds skip robots.txt/sitemap discovery — those are GET-only documents.
+	for _, seed := range seeds {
+		for _, body := range bodies {
+			if err := e.frontier.AddSeedRequest(seed, "POST", body); err != nil {
+				log.Printf("[Engine] Warning: failed to add POST seed %s: %v", seed, err)
+			}
+		}
+	}
+	log.Printf("[Engine] Added %d URL(s) × %d POST payload(s) for job %s, frontier size: %d",
+		len(seeds), len(bodies), job.ID, e.frontier.PendingCount())
 	return nil
+}
+
+// expandSeedRequests returns the HTTP method and expanded POST bodies for seed URLs.
+// GET jobs return method "GET" and a nil body list.
+func expandSeedRequests(s *models.JobSettings) (string, []string, error) {
+	if s == nil || s.RequestMethod == nil {
+		return "GET", nil, nil
+	}
+	method := strings.ToUpper(strings.TrimSpace(*s.RequestMethod))
+	if method != "POST" {
+		return "GET", nil, nil
+	}
+
+	body := ""
+	if s.RequestBody != nil {
+		body = *s.RequestBody
+	}
+
+	if !modules.HasTemplateVars(body) {
+		return "POST", []string{body}, nil
+	}
+
+	names := modules.ExtractTemplateVars(body)
+	expandedVars := make(map[string][]string, len(names))
+	for _, name := range names {
+		expr := ""
+		if s.RequestBodyVars != nil {
+			expr = s.RequestBodyVars[name]
+		}
+		vals, err := modules.ExpandValueExpr(expr)
+		if err != nil {
+			return "", nil, fmt.Errorf("error expanding payload variable {{%s}}: %w", name, err)
+		}
+		if len(vals) == 0 {
+			return "", nil, fmt.Errorf("payload variable {{%s}} has no values", name)
+		}
+		expandedVars[name] = vals
+	}
+
+	bodies, err := modules.ExpandTemplate(body, expandedVars, 50000)
+	if err != nil {
+		return "", nil, fmt.Errorf("error expanding payload template: %w", err)
+	}
+	return "POST", bodies, nil
+}
+
+func requestMethodLabel(method string) string {
+	if strings.TrimSpace(method) == "" {
+		return "GET"
+	}
+	return strings.ToUpper(method)
 }
 
 // Stop stops the crawler
@@ -381,7 +471,7 @@ func (e *Engine) Stop() {
 
 	// Check if semantic search was enabled before clearing the job
 	shouldRebuildIndex := e.effectiveConfig.EnableSemanticSearch
-	runAfterJob := e.effectiveConfig.AfterJobScript
+	runAfterJob := e.effectiveConfig.AfterJobPlugin
 
 	// Update job status
 	var endedJobID string
@@ -398,9 +488,9 @@ func (e *Engine) Stop() {
 	}
 	e.jobMu.Unlock()
 
-	log.Printf("[Engine] Stop path: after_job_script=%t endedJobID=%q", runAfterJob, endedJobID)
-	if runAfterJob && endedJobID != "" {
-		e.scheduleAfterJobScript(endedJobID, 2*time.Minute)
+	log.Printf("[Engine] Stop path: after_job_plugin=%q endedJobID=%q", runAfterJob, endedJobID)
+	if runAfterJob != "" && endedJobID != "" {
+		e.scheduleAfterJobScript(endedJobID, runAfterJob, 2*time.Minute)
 	}
 
 	// Rebuild FAISS index if semantic search was enabled (index pages crawled before cancellation)
@@ -418,21 +508,41 @@ func (e *Engine) Stop() {
 	log.Printf("[Engine] Stopped")
 }
 
-// Pause pauses the crawler
+// Pause parks the current job and releases the engine so another job can run.
+// Frontier URLs stay in the database; Resume is Start() of the paused job.
 func (e *Engine) Pause() {
-	atomic.StoreInt32(&e.state, int32(StatePaused))
+	if !atomic.CompareAndSwapInt32(&e.state, int32(StateRunning), int32(StatePaused)) {
+		return
+	}
+
+	if e.cancel != nil {
+		e.cancel()
+	}
+
+	e.wg.Wait()
+	e.afterWG.Wait()
+
+	// Return in-flight URLs to pending so a later resume can pick them up.
+	e.frontier.ResetProcessingURLs()
 
 	e.jobMu.Lock()
 	if e.currentJob != nil {
 		e.currentJob.Status = models.JobStatusPaused
+		e.currentJob.CrawledURLs = int(atomic.LoadInt64(&e.crawledCount))
+		e.currentJob.FoundMatches = int(atomic.LoadInt64(&e.matchCount))
 		e.db.Save(e.currentJob)
+		log.Printf("[Engine] Paused job %s (crawled=%d, matches=%d)",
+			e.currentJob.ID, e.currentJob.CrawledURLs, e.currentJob.FoundMatches)
+		e.currentJob = nil
 	}
 	e.jobMu.Unlock()
 
-	log.Printf("[Engine] Paused")
+	atomic.StoreInt32(&e.state, int32(StateIdle))
+	log.Printf("[Engine] Paused and released engine")
 }
 
-// Resume resumes the crawler
+// Resume resumes an in-engine paused crawler (legacy path).
+// After Pause parks the job, callers should Start() the paused job instead.
 func (e *Engine) Resume() {
 	if atomic.CompareAndSwapInt32(&e.state, int32(StatePaused), int32(StateRunning)) {
 		// Reset any URLs stuck in "processing" state back to pending.
@@ -450,6 +560,11 @@ func (e *Engine) Resume() {
 	}
 }
 
+// SetOnIdle registers a callback invoked after a job completes and the engine is idle.
+func (e *Engine) SetOnIdle(fn func()) {
+	e.onIdle = fn
+}
+
 // GetState returns the current crawler state
 func (e *Engine) GetState() CrawlerState {
 	return CrawlerState(atomic.LoadInt32(&e.state))
@@ -461,53 +576,56 @@ func (e *Engine) watchForCompletion() {
 	e.wg.Wait()
 	e.afterWG.Wait()
 
-	currentState := atomic.LoadInt32(&e.state)
+	// Only the still-running job should complete here. Pause/Stop change state
+	// first so they can park or cancel without this path marking the job done.
+	if !atomic.CompareAndSwapInt32(&e.state, int32(StateRunning), int32(StateStopping)) {
+		return
+	}
 
-	// Check if we were stopped manually (state would be StateStopping or StateIdle)
-	// If state is still Running, workers exited naturally due to empty frontier
-	if currentState == int32(StateRunning) {
-		log.Printf("[Engine] All workers finished, marking job as completed")
+	log.Printf("[Engine] All workers finished, marking job as completed")
 
-		// Cancel the context to stop the monitor goroutine
-		if e.cancel != nil {
-			e.cancel()
-		}
+	// Cancel the context to stop the monitor goroutine
+	if e.cancel != nil {
+		e.cancel()
+	}
 
-		// Update job status to completed
-		var endedJobID string
-		e.jobMu.Lock()
-		if e.currentJob != nil {
-			now := time.Now()
-			e.currentJob.Status = models.JobStatusCompleted
-			e.currentJob.CompletedAt = &now
-			e.currentJob.CrawledURLs = int(atomic.LoadInt64(&e.crawledCount))
-			e.currentJob.FoundMatches = int(atomic.LoadInt64(&e.matchCount))
-			e.db.Save(e.currentJob)
-			log.Printf("[Engine] Job %s completed. Crawled: %d, Matches: %d",
-				e.currentJob.ID, e.currentJob.CrawledURLs, e.currentJob.FoundMatches)
-			endedJobID = e.currentJob.ID
-			e.currentJob = nil
-		}
-		e.jobMu.Unlock()
+	// Update job status to completed
+	var endedJobID string
+	e.jobMu.Lock()
+	if e.currentJob != nil {
+		now := time.Now()
+		e.currentJob.Status = models.JobStatusCompleted
+		e.currentJob.CompletedAt = &now
+		e.currentJob.CrawledURLs = int(atomic.LoadInt64(&e.crawledCount))
+		e.currentJob.FoundMatches = int(atomic.LoadInt64(&e.matchCount))
+		e.db.Save(e.currentJob)
+		log.Printf("[Engine] Job %s completed. Crawled: %d, Matches: %d",
+			e.currentJob.ID, e.currentJob.CrawledURLs, e.currentJob.FoundMatches)
+		endedJobID = e.currentJob.ID
+		e.currentJob = nil
+	}
+	e.jobMu.Unlock()
 
-		log.Printf("[Engine] Completion path: after_job_script=%t endedJobID=%q",
-			e.effectiveConfig.AfterJobScript, endedJobID)
-		if e.effectiveConfig.AfterJobScript && endedJobID != "" {
-			e.scheduleAfterJobScript(endedJobID, 2*time.Minute)
-		}
+	log.Printf("[Engine] Completion path: after_job_plugin=%q endedJobID=%q",
+		e.effectiveConfig.AfterJobPlugin, endedJobID)
+	if e.effectiveConfig.AfterJobPlugin != "" && endedJobID != "" {
+		e.scheduleAfterJobScript(endedJobID, e.effectiveConfig.AfterJobPlugin, 2*time.Minute)
+	}
 
-		// Rebuild FAISS index if semantic search was enabled
-		if e.effectiveConfig.EnableSemanticSearch {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-				defer cancel()
-				if err := e.semanticSearcher.RebuildIndex(ctx); err != nil {
-					log.Printf("[Engine] Failed to rebuild FAISS index: %v", err)
-				}
-			}()
-		}
+	// Rebuild FAISS index if semantic search was enabled
+	if e.effectiveConfig.EnableSemanticSearch {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			if err := e.semanticSearcher.RebuildIndex(ctx); err != nil {
+				log.Printf("[Engine] Failed to rebuild FAISS index: %v", err)
+			}
+		}()
+	}
 
-		atomic.StoreInt32(&e.state, int32(StateIdle))
+	atomic.StoreInt32(&e.state, int32(StateIdle))
+	if e.onIdle != nil {
+		go e.onIdle()
 	}
 }
 
@@ -587,10 +705,14 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	url := frontierURL.URL
 	depth := frontierURL.Depth
 
-	log.Printf("[Worker %d] >>> CRAWLING url=%s depth=%d", workerID, url, depth)
+	log.Printf("[Worker %d] >>> CRAWLING url=%s depth=%d method=%s", workerID, url, depth, requestMethodLabel(frontierURL.RequestMethod))
 
 	// Fetch using the configured fetcher (HTTP or headless)
-	result := e.fetcher.Fetch(e.ctx, url)
+	result := e.fetcher.Fetch(e.ctx, url, modules.FetchOptions{
+		Method:  frontierURL.RequestMethod,
+		Headers: e.extraHeaders,
+		Body:    frontierURL.RequestBody,
+	})
 	if result.Error != nil {
 		// If the headless browser returned an error but also delivered real
 		// content (e.g. "SPA shell not rendered after retries" yet the body
@@ -599,7 +721,7 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 		hasUsableBody := result.StatusCode == 200 && len(result.Body) > 1024
 		if !hasUsableBody {
 			log.Printf("[Worker %d] Failed to fetch %s: %v", workerID, url, result.Error)
-			_, _ = e.saveCrawledPage(url, result.StatusCode, result.ContentType, 0, depth, result.Error.Error(), startTime, result.Body)
+			_, _ = e.saveCrawledPage(url, result.StatusCode, result.ContentType, 0, depth, result.Error.Error(), startTime, result.Body, frontierURL.URLHash)
 			e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
 			return
 		}
@@ -616,7 +738,7 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 		log.Printf("[Worker %d] Retriable status %d for %s (retry %d/%d)",
 			workerID, result.StatusCode, url, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
 		_, _ = e.saveCrawledPage(url, result.StatusCode, result.ContentType, int64(len(result.Body)), depth,
-			fmt.Sprintf("HTTP %d", result.StatusCode), startTime, result.Body)
+			fmt.Sprintf("HTTP %d", result.StatusCode), startTime, result.Body, frontierURL.URLHash)
 		e.frontier.MarkFailed(frontierURL.ID, frontierURL.RetryCount, e.effectiveConfig.MaxRetries)
 		return
 	}
@@ -626,7 +748,7 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	// Content-Type pre-check: skip binary content early
 	if !isProcessableContentType(contentType) {
 		log.Printf("[Worker %d] Skipping non-processable content type %q for %s", workerID, contentType, url)
-		_, _ = e.saveCrawledPage(url, result.StatusCode, contentType, 0, depth, "", startTime, nil)
+		_, _ = e.saveCrawledPage(url, result.StatusCode, contentType, 0, depth, "", startTime, nil, frontierURL.URLHash)
 		e.frontier.MarkCompleted(frontierURL.ID)
 		return
 	}
@@ -635,7 +757,7 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	log.Printf("[Worker %d] BODY url=%s size=%d bytes, first100=%q", workerID, url, len(body), string(body[:min(100, len(body))]))
 
 	// Save crawled page (with title extraction for HTML)
-	page, created := e.saveCrawledPage(url, result.StatusCode, contentType, int64(len(body)), depth, "", startTime, body)
+	page, created := e.saveCrawledPage(url, result.StatusCode, contentType, int64(len(body)), depth, "", startTime, body, frontierURL.URLHash)
 	if created {
 		atomic.AddInt64(&e.crawledCount, 1)
 	}
@@ -646,18 +768,19 @@ func (e *Engine) crawl(workerID int, frontierURL *models.FrontierURL) {
 	// Process content based on type
 	e.processContent(workerID, url, body, contentType, result.StatusCode, depth, page, frontierURL.AnchorText)
 
-	// Run after-crawl custom script if enabled and script exists
-	if e.effectiveConfig.AfterCrawlScript {
+	// Run after-crawl plugin if a plugin id is set and the script exists
+	if e.effectiveConfig.AfterCrawlPlugin != "" {
 		e.jobMu.RLock()
 		jobID := ""
 		if e.currentJob != nil {
 			jobID = e.currentJob.ID
 		}
 		e.jobMu.RUnlock()
+		pluginID := e.effectiveConfig.AfterCrawlPlugin
 		e.afterWG.Add(1)
 		go func() {
 			defer e.afterWG.Done()
-			e.runAfterCrawlScript(url, result.StatusCode, contentType, depth, body, jobID)
+			e.runAfterCrawlScript(pluginID, url, result.StatusCode, contentType, depth, body, jobID)
 		}()
 	}
 }
@@ -912,6 +1035,34 @@ func isProcessableContentType(contentType string) bool {
 	return false
 }
 
+// isTextualContentType reports whether the response body is worth storing when
+// Save Text Content is enabled. Covers HTML/plain/XML plus JSON API payloads.
+func isTextualContentType(contentType string) bool {
+	if contentType == "" {
+		return true
+	}
+	ct := strings.ToLower(contentType)
+	if i := strings.Index(ct, ";"); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	if strings.HasPrefix(ct, "text/") {
+		return true
+	}
+	switch ct {
+	case "application/json",
+		"application/ld+json",
+		"application/problem+json",
+		"application/xml",
+		"application/xhtml+xml",
+		"application/javascript",
+		"application/x-javascript",
+		"application/rss+xml",
+		"application/atom+xml":
+		return true
+	}
+	return strings.HasSuffix(ct, "+json") || strings.HasSuffix(ct, "+xml")
+}
+
 // extractPathFromURL extracts just the path component from a URL string
 func extractPathFromURL(rawURL string) string {
 	// Find the path after the host
@@ -937,7 +1088,7 @@ func extractPathFromURL(rawURL string) string {
 }
 
 // saveCrawledPage saves a crawled page to database
-func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string, contentLength int64, depth int, errorMsg string, startTime time.Time, body []byte) (*models.CrawledPage, bool) {
+func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string, contentLength int64, depth int, errorMsg string, startTime time.Time, body []byte, identityHash string) (*models.CrawledPage, bool) {
 	// Use fragment-preserving normalization for SPA URLs
 	var normalizedURL string
 	if modules.HasMeaningfulFragment(url) {
@@ -945,7 +1096,10 @@ func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string,
 	} else {
 		normalizedURL, _ = e.urlCleaner.ProcessURL(url)
 	}
-	urlHash := e.urlCleaner.HashURL(normalizedURL)
+	urlHash := identityHash
+	if urlHash == "" {
+		urlHash = e.urlCleaner.HashURL(normalizedURL)
+	}
 
 	// Compute document content hash
 	docHash := ""
@@ -1013,7 +1167,7 @@ func (e *Engine) saveCrawledPage(url string, statusCode int, contentType string,
 			page.Title = title
 		}
 	}
-	if e.effectiveConfig.SaveTextContent && len(body) > 0 && strings.Contains(contentType, "text/") {
+	if e.effectiveConfig.SaveTextContent && len(body) > 0 && isTextualContentType(contentType) {
 		raw := string(body)
 		page.TextContent = &raw
 	}
@@ -1141,17 +1295,17 @@ type afterCrawlPayload struct {
 	JobID       string `json:"job_id"`
 }
 
-// runAfterCrawlScript executes scripts/after_crawl.py with the crawled page data.
+// runAfterCrawlScript executes the selected plugin's after_crawl.py with the crawled page data.
 // The script receives a JSON payload on stdin and its stdout/stderr are logged.
 // Errors are non-fatal; they are logged and the crawl continues.
-func (e *Engine) runAfterCrawlScript(url string, statusCode int, contentType string, depth int, body []byte, jobID string) {
-	scriptPath, err := resolveAfterCrawlScriptPath()
+func (e *Engine) runAfterCrawlScript(pluginID, url string, statusCode int, contentType string, depth int, body []byte, jobID string) {
+	scriptPath, err := plugins.AfterCrawlScript(pluginID)
 	if err != nil {
-		log.Printf("[AfterCrawl] Script not found, skipping %s: %v", url, err)
+		log.Printf("[AfterCrawl] Plugin %q script not found, skipping %s: %v", pluginID, url, err)
 		return
 	}
 
-	log.Printf("[AfterCrawl] Running %s for %s", scriptPath, url)
+	log.Printf("[AfterCrawl] Running plugin %s (%s) for %s", pluginID, scriptPath, url)
 
 	pythonCmd := modules.FindPython(e.effectiveConfig.PythonPath)
 
@@ -1173,6 +1327,7 @@ func (e *Engine) runAfterCrawlScript(url string, statusCode int, contentType str
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, pythonCmd, scriptPath)
+	cmd.Dir = filepath.Dir(scriptPath)
 	cmd.Stdin = bytes.NewReader(input)
 
 	out, err := cmd.CombinedOutput()
@@ -1194,26 +1349,29 @@ func (e *Engine) runAfterCrawlScript(url string, statusCode int, contentType str
 }
 
 // scheduleAfterJobScript spawns a detached background process that, after
-// `delay`, runs scripts/after_job.py with --job-id <jobID>. The launcher process
-// exits immediately so the engine never blocks waiting on it. The shell child
-// uses setsid so it survives the parent (and the server) exiting.
-func (e *Engine) scheduleAfterJobScript(jobID string, delay time.Duration) {
-	scriptPath, err := resolveAfterJobScriptPath()
+// `delay`, runs the selected plugin's after_job.py with --job-id <jobID>.
+// The launcher process exits immediately so the engine never blocks waiting
+// on it. The shell child uses setsid so it survives the parent (and the
+// server) exiting.
+func (e *Engine) scheduleAfterJobScript(jobID, pluginID string, delay time.Duration) {
+	scriptPath, err := plugins.AfterJobScript(pluginID)
 	if err != nil {
-		log.Printf("[AfterJob] Script not found, skipping job %s: %v", jobID, err)
+		log.Printf("[AfterJob] Plugin %q script not found, skipping job %s: %v", pluginID, jobID, err)
 		return
 	}
 
 	pythonCmd := modules.FindPython(e.effectiveConfig.PythonPath)
-	logPath := filepath.Join(filepath.Dir(scriptPath), "after_job.log")
+	pluginDir := filepath.Dir(scriptPath)
+	logPath := filepath.Join(pluginDir, "after_job.log")
 	delaySec := int(delay.Seconds())
 	if delaySec < 1 {
 		delaySec = 1
 	}
 
 	shellCmd := fmt.Sprintf(
-		"sleep %d && %q %q --job-id %q >> %q 2>&1",
+		"sleep %d && cd %q && %q %q --job-id %q >> %q 2>&1",
 		delaySec,
+		pluginDir,
 		pythonCmd, scriptPath, jobID, logPath,
 	)
 
@@ -1230,51 +1388,7 @@ func (e *Engine) scheduleAfterJobScript(jobID string, delay time.Duration) {
 	// Release the child so it doesn't become a zombie.
 	go func() { _ = cmd.Wait() }()
 
-	log.Printf("[AfterJob] Scheduled scripts/after_job.py for job %s in %s (pid=%d)", jobID, delay, cmd.Process.Pid)
-}
-
-func resolveAfterJobScriptPath() (string, error) {
-	const relScriptPath = "scripts/after_job.py"
-
-	candidates := []string{relScriptPath}
-	if exe, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), relScriptPath))
-	}
-
-	for _, candidate := range candidates {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			abs, err := filepath.Abs(candidate)
-			if err != nil {
-				return candidate, nil
-			}
-			return abs, nil
-		}
-	}
-
-	wd, _ := os.Getwd()
-	return "", fmt.Errorf("checked %q relative to working directory %q and executable directory", relScriptPath, wd)
-}
-
-func resolveAfterCrawlScriptPath() (string, error) {
-	const relScriptPath = "scripts/after_crawl.py"
-
-	candidates := []string{relScriptPath}
-	if exe, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), relScriptPath))
-	}
-
-	for _, candidate := range candidates {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			abs, err := filepath.Abs(candidate)
-			if err != nil {
-				return candidate, nil
-			}
-			return abs, nil
-		}
-	}
-
-	wd, _ := os.Getwd()
-	return "", fmt.Errorf("checked %q relative to working directory %q and executable directory", relScriptPath, wd)
+	log.Printf("[AfterJob] Scheduled plugin %s for job %s in %s (pid=%d)", pluginID, jobID, delay, cmd.Process.Pid)
 }
 
 // GetStats returns current crawl statistics

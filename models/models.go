@@ -4,6 +4,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,6 +31,11 @@ const (
 	JobStatusCancelled JobStatus = "cancelled"
 )
 
+// SettingsEditable reports whether crawler settings may be changed for this status.
+func (s JobStatus) SettingsEditable() bool {
+	return s == JobStatusPending || s == JobStatusPaused
+}
+
 // MatchType represents where a phrase was found
 type MatchType string
 
@@ -38,6 +44,12 @@ const (
 	MatchTypeURL     MatchType = "url"     // Found in the page URL
 	MatchTypeAnchor  MatchType = "anchor"  // Found in anchor text pointing to the page
 )
+
+// HTTPHeader is a single extra request header applied to crawl fetches.
+type HTTPHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
 
 // JobSettings holds per-job crawler settings that override global defaults.
 // A nil/null value means "use global defaults".
@@ -59,13 +71,156 @@ type JobSettings struct {
 	HeadlessWaitSelector  *string  `json:"headless_wait_selector,omitempty"` // CSS selector to wait for before capturing
 	EnableSemanticSearch  *bool    `json:"enable_semantic_search,omitempty"` // Enable semantic vector search for this job
 	SaveTextContent       *bool    `json:"save_text_content,omitempty"`      // Save extracted text content of pages
-	AfterCrawlScript      *bool    `json:"after_crawl_script,omitempty"`     // Run scripts/after_crawl.py after each successfully crawled page
-	AfterJobScript        *bool    `json:"after_job_script,omitempty"`       // Run scripts/after_job.py ~2 minutes after the job ends
+	AfterCrawlPlugin      *string  `json:"after_crawl_plugin,omitempty"`     // Plugin id from plugins/; empty disables after-crawl
+	AfterJobPlugin        *string  `json:"after_job_plugin,omitempty"`       // Plugin id from plugins/; empty disables after-job
 	EnableWordExtraction  *bool    `json:"enable_word_extraction,omitempty"` // Extract words and build inverted index
 	EnableStemming        *bool    `json:"enable_stemming,omitempty"`        // Stem/lemmatise words during indexing and search
 	EnableLemmatization   *bool    `json:"enable_lemmatization,omitempty"`   // Use lemmatization vs pure stemming
 	DefaultLanguage       *string  `json:"default_language,omitempty"`       // Language for stemming: "fa" or "en"
 	UseCrawlPhrasesOnly   *bool    `json:"use_crawl_phrases_only,omitempty"` // true = only match crawl-extracted words; false = also match manual phrases
+	// HTTP request overrides. Method/body apply to seed URLs; extra headers apply to every fetch.
+	RequestMethod   *string           `json:"request_method,omitempty"`    // "GET" (default) or "POST"
+	RequestHeaders  []HTTPHeader      `json:"request_headers,omitempty"`   // extra headers (repeater)
+	RequestBody     *string           `json:"request_body,omitempty"`      // POST payload; may contain {{VAR}} placeholders
+	RequestBodyVars map[string]string `json:"request_body_vars,omitempty"` // var_name → value expression (e.g. "1,hamster,5-10")
+}
+
+// IsEmpty reports whether no per-job overrides were set.
+func (s JobSettings) IsEmpty() bool {
+	return s.MaxConcurrentRequests == nil && s.RequestTimeoutSec == nil &&
+		s.PolitenessDelayMs == nil && s.MaxDepth == nil &&
+		s.MaxPages == nil &&
+		s.UserAgent == nil && s.MaxRetries == nil &&
+		s.RespectRobotsTxt == nil &&
+		s.SkipContentDuplicates == nil &&
+		s.UseHeadlessBrowser == nil && s.HeadlessWaitSelector == nil &&
+		s.EnableSemanticSearch == nil && s.AfterCrawlPlugin == nil && s.AfterJobPlugin == nil &&
+		s.SaveTextContent == nil && s.EnableWordExtraction == nil &&
+		s.EnableStemming == nil && s.EnableLemmatization == nil &&
+		s.DefaultLanguage == nil && s.UseCrawlPhrasesOnly == nil &&
+		s.RequestMethod == nil && s.RequestBody == nil &&
+		len(s.RequestHeaders) == 0 && len(s.RequestBodyVars) == 0 &&
+		len(s.SkipExtensions) == 0 && len(s.URLIncludePatterns) == 0 &&
+		len(s.URLExcludePatterns) == 0 && len(s.ExtraTrackingParams) == 0
+}
+
+// SanitizeRequest normalizes HTTP request fields (method, headers, body vars).
+func (s *JobSettings) SanitizeRequest() {
+	if s == nil {
+		return
+	}
+	if s.RequestMethod != nil {
+		m := strings.ToUpper(strings.TrimSpace(*s.RequestMethod))
+		if m == "POST" {
+			s.RequestMethod = &m
+		} else if m == "" || m == "GET" {
+			s.RequestMethod = nil
+			s.RequestBody = nil
+			s.RequestBodyVars = nil
+		} else {
+			s.RequestMethod = nil
+			s.RequestBody = nil
+			s.RequestBodyVars = nil
+		}
+	}
+	if len(s.RequestHeaders) > 0 {
+		cleaned := make([]HTTPHeader, 0, len(s.RequestHeaders))
+		for _, h := range s.RequestHeaders {
+			name := strings.TrimSpace(h.Name)
+			if name == "" {
+				continue
+			}
+			cleaned = append(cleaned, HTTPHeader{Name: name, Value: h.Value})
+		}
+		if len(cleaned) == 0 {
+			s.RequestHeaders = nil
+		} else {
+			s.RequestHeaders = cleaned
+		}
+	}
+	if s.RequestBody != nil && strings.TrimSpace(*s.RequestBody) == "" {
+		s.RequestBody = nil
+	}
+	if len(s.RequestBodyVars) > 0 {
+		cleaned := make(map[string]string, len(s.RequestBodyVars))
+		for k, v := range s.RequestBodyVars {
+			k = strings.TrimSpace(k)
+			v = strings.TrimSpace(v)
+			if k == "" || v == "" {
+				continue
+			}
+			cleaned[k] = v
+		}
+		if len(cleaned) == 0 {
+			s.RequestBodyVars = nil
+		} else {
+			s.RequestBodyVars = cleaned
+		}
+	}
+	s.AfterCrawlPlugin = sanitizePluginID(s.AfterCrawlPlugin)
+	s.AfterJobPlugin = sanitizePluginID(s.AfterJobPlugin)
+}
+
+const legacyEnabledPluginID = "divar"
+
+func sanitizePluginID(id *string) *string {
+	if id == nil {
+		return nil
+	}
+	v := strings.TrimSpace(*id)
+	if v == "" {
+		empty := ""
+		return &empty
+	}
+	if !isSafePluginID(v) {
+		empty := ""
+		return &empty
+	}
+	return &v
+}
+
+func isSafePluginID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for i, r := range id {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			continue
+		}
+		if i > 0 && (r == '_' || r == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// UnmarshalJSON accepts current plugin-id fields and the older after_*_script booleans.
+func (s *JobSettings) UnmarshalJSON(data []byte) error {
+	type Alias JobSettings
+	aux := &struct {
+		*Alias
+		AfterCrawlScript *bool `json:"after_crawl_script"`
+		AfterJobScript   *bool `json:"after_job_script"`
+	}{Alias: (*Alias)(s)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	if s.AfterCrawlPlugin == nil && aux.AfterCrawlScript != nil {
+		id := ""
+		if *aux.AfterCrawlScript {
+			id = legacyEnabledPluginID
+		}
+		s.AfterCrawlPlugin = &id
+	}
+	if s.AfterJobPlugin == nil && aux.AfterJobScript != nil {
+		id := ""
+		if *aux.AfterJobScript {
+			id = legacyEnabledPluginID
+		}
+		s.AfterJobPlugin = &id
+	}
+	return nil
 }
 
 // StringSlice is a JSON-serialised []string for GORM columns.
@@ -224,6 +379,8 @@ type FrontierURL struct {
 	ParentURL     string    `gorm:"type:varchar(2048)" json:"parent_url,omitempty"`
 	AnchorText    string    `gorm:"type:text" json:"anchor_text,omitempty"`
 	RetryCount    int       `gorm:"default:0" json:"retry_count"`
+	RequestMethod string    `gorm:"type:varchar(10);default:''" json:"request_method,omitempty"` // GET (empty) or POST; seed requests only
+	RequestBody   string    `gorm:"type:mediumtext" json:"request_body,omitempty"`               // POST body for this frontier entry
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 	CrawlJob      CrawlJob  `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`

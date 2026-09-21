@@ -8,15 +8,16 @@ phone fetch can rotate to a different account.
 
 import json
 import logging
-from pathlib import Path
 
 import requests
+
+from cookie_pool import COOKIES_DIR
 
 
 log = logging.getLogger("after_crawl")
 
 
-COOKIE_FILE = Path(__file__).parent / ".cookies" / "divar.ir.json"
+COOKIE_FILE = COOKIES_DIR / "divar.ir.json"
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "

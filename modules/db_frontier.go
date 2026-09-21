@@ -214,23 +214,53 @@ func (f *DBFrontier) addURLInternal(rawURL string, depth int, parentURL string, 
 		return err
 	}
 
-	// Generate URL hash
-	urlHash := hashURL(cleanedURL)
+	return f.enqueueFrontier(cleanedURL, depth, parentURL, anchorText, "", "")
+}
 
-	// Check if this URL was already crawled in this job.
-	// Completed URLs are deleted from the frontier and recorded in crawled_pages,
-	// so the frontier's unique constraint alone is not enough to prevent re-crawling.
+// AddSeedRequest adds a seed URL with an explicit HTTP method and optional body.
+// Used for POST crawl jobs so the same URL can be queued with different payloads.
+func (f *DBFrontier) AddSeedRequest(rawURL, method, body string) error {
+	f.mu.Lock()
+	crawlJobID := f.crawlJobID
+	f.mu.Unlock()
+	if crawlJobID == "" {
+		return errors.New("no crawl job set")
+	}
+
+	var cleanedURL string
+	var err error
+	if HasMeaningfulFragment(rawURL) {
+		cleanedURL, err = f.urlCleaner.ProcessURLKeepFragment(rawURL)
+	} else {
+		cleanedURL, err = f.urlCleaner.ProcessURL(rawURL)
+	}
+	if err != nil {
+		cleanedURL = rawURL
+	}
+	return f.enqueueFrontier(cleanedURL, 0, "", "", method, body)
+}
+
+// enqueueFrontier inserts a frontier row if this request identity has not been
+// crawled or queued yet. Method/body are included in the identity hash so POST
+// variants of the same URL are distinct.
+func (f *DBFrontier) enqueueFrontier(cleanedURL string, depth int, parentURL, anchorText, method, body string) error {
+	f.mu.Lock()
+	crawlJobID := f.crawlJobID
+	f.mu.Unlock()
+	if crawlJobID == "" {
+		return errors.New("no crawl job set")
+	}
+
+	urlHash := RequestIdentityHash(cleanedURL, method, body)
+
 	var crawledCount int64
 	f.db.Model(&models.CrawledPage{}).
 		Where("crawl_job_id = ? AND url_hash = ?", crawlJobID, urlHash).
 		Count(&crawledCount)
 	if crawledCount > 0 {
-		return nil // Already crawled, skip silently
+		return nil
 	}
 
-	// Use upsert to avoid duplicates in frontier (per job).
-	// The composite unique index (crawl_job_id, url_hash) prevents duplicates,
-	// so we rely on ON CONFLICT DO NOTHING instead of a separate SELECT check.
 	frontierURL := models.FrontierURL{
 		CrawlJobID:    crawlJobID,
 		URL:           cleanedURL,
@@ -241,9 +271,10 @@ func (f *DBFrontier) addURLInternal(rawURL string, depth int, parentURL string, 
 		Status:        models.FrontierStatusPending,
 		ParentURL:     parentURL,
 		AnchorText:    anchorText,
+		RequestMethod: method,
+		RequestBody:   body,
 	}
 
-	// Insert only if not exists (based on composite unique: crawl_job_id + url_hash)
 	result := f.db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "crawl_job_id"}, {Name: "url_hash"}},
 		DoNothing: true,
@@ -253,11 +284,9 @@ func (f *DBFrontier) addURLInternal(rawURL string, depth int, parentURL string, 
 		log.Printf("[%s] DB error adding URL %s: %v", f.Name(), cleanedURL, result.Error)
 		return result.Error
 	}
-
 	if result.RowsAffected > 0 {
-		log.Printf("[%s] ADDED url=%s hash=%s depth=%d", f.Name(), cleanedURL, urlHash[:12], depth)
+		log.Printf("[%s] ADDED url=%s method=%s hash=%s depth=%d", f.Name(), cleanedURL, defaultMethod(method), urlHash[:12], depth)
 	}
-
 	return nil
 }
 
@@ -429,9 +458,7 @@ func (f *DBFrontier) IsURLSeen(rawURL string) bool {
 	if err != nil {
 		return false
 	}
-	urlHash := hashURL(cleanedURL)
-
-	// Check if URL is in the frontier queue for this job (pending/processing/failed)
+	urlHash := RequestIdentityHash(cleanedURL, "", "")
 	var frontierCount int64
 	f.db.Model(&models.FrontierURL{}).
 		Where("crawl_job_id = ? AND url_hash = ?", crawlJobID, urlHash).
@@ -459,10 +486,24 @@ func (f *DBFrontier) ResetProcessingURLs() error {
 		Update("status", models.FrontierStatusPending).Error
 }
 
-// hashURL creates a SHA256 hash of the URL
-func hashURL(url string) string {
-	hash := sha256.Sum256([]byte(url))
+// RequestIdentityHash uniquely identifies a fetch.
+// GET requests hash the URL alone (same as historical url_hash).
+// POST requests include method and body so distinct payloads are not collapsed.
+func RequestIdentityHash(rawURL, method, body string) string {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if method == "" || method == "GET" {
+		hash := sha256.Sum256([]byte(rawURL))
+		return hex.EncodeToString(hash[:])
+	}
+	hash := sha256.Sum256([]byte(rawURL + "\n" + method + "\n" + body))
 	return hex.EncodeToString(hash[:])
+}
+
+func defaultMethod(method string) string {
+	if strings.TrimSpace(method) == "" {
+		return "GET"
+	}
+	return strings.ToUpper(method)
 }
 
 // AddSeedURLs adds initial seed URLs for a crawl job.
@@ -543,43 +584,7 @@ func (f *DBFrontier) addSeedURLDirect(cleanedURL string, depth int, parentURL st
 		return errors.New("no crawl job set")
 	}
 
-	urlHash := hashURL(cleanedURL)
-
-	// Check if already crawled
-	var crawledCount int64
-	f.db.Model(&models.CrawledPage{}).
-		Where("crawl_job_id = ? AND url_hash = ?", crawlJobID, urlHash).
-		Count(&crawledCount)
-	if crawledCount > 0 {
-		return nil
-	}
-
-	frontierURL := models.FrontierURL{
-		CrawlJobID:    crawlJobID,
-		URL:           cleanedURL,
-		URLHash:       urlHash,
-		NormalizedURL: cleanedURL,
-		Depth:         depth,
-		Priority:      0,
-		Status:        models.FrontierStatusPending,
-		ParentURL:     parentURL,
-	}
-
-	result := f.db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "crawl_job_id"}, {Name: "url_hash"}},
-		DoNothing: true,
-	}).Create(&frontierURL)
-
-	if result.Error != nil {
-		log.Printf("[%s] DB error adding seed URL %s: %v", f.Name(), cleanedURL, result.Error)
-		return result.Error
-	}
-
-	if result.RowsAffected > 0 {
-		log.Printf("[%s] ADDED seed url=%s hash=%s depth=%d", f.Name(), cleanedURL, urlHash[:12], depth)
-	}
-
-	return nil
+	return f.enqueueFrontier(cleanedURL, depth, parentURL, "", "", "")
 }
 
 // isRootURL returns true if the URL points to the domain root with no meaningful path.

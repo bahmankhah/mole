@@ -68,10 +68,10 @@
                     <button onclick="discoverSubdomains('{{.job.ID}}')" class="bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition">🔎 Discover</button>
                     {{else if eq .job.Status "running"}}
                     <button onclick="pauseJob()" class="bg-yellow-600 text-white py-2 px-4 rounded-md hover:bg-yellow-700 transition">⏸ Pause</button>
-                    <button onclick="stopJob()" class="bg-red-600 text-white py-2 px-4 rounded-md hover:bg-red-700 transition">⏹ Stop</button>
+                    <button onclick="stopJob('{{.job.ID}}')" class="bg-red-600 text-white py-2 px-4 rounded-md hover:bg-red-700 transition">⏹ Stop</button>
                     {{else if eq .job.Status "paused"}}
-                    <button onclick="resumeJob()" class="bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700 transition">▶ Resume</button>
-                    <button onclick="stopJob()" class="bg-red-600 text-white py-2 px-4 rounded-md hover:bg-red-700 transition">⏹ Stop</button>
+                    <button onclick="resumeJob('{{.job.ID}}')" class="bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700 transition">▶ Resume</button>
+                    <button onclick="stopJob('{{.job.ID}}')" class="bg-red-600 text-white py-2 px-4 rounded-md hover:bg-red-700 transition">⏹ Stop</button>
                     {{end}}
                     <button onclick="duplicateJob('{{.job.ID}}')" class="bg-gray-600 text-white py-2 px-4 rounded-md hover:bg-gray-700 transition" title="Create a copy of this job">⧉ Duplicate</button>
                 </div>
@@ -230,9 +230,9 @@
                     <div class="flex items-center justify-between mb-6">
                         <div>
                             <h3 class="text-lg font-semibold text-gray-800">Job Settings</h3>
-                            <p class="text-sm text-gray-500 mt-1">Override default crawler config for this job. Empty fields use global defaults.</p>
+                            <p class="text-sm text-gray-500 mt-1">Override default crawler config for this job. Empty fields use global defaults.{{if eq .job.Status "paused"}} Changes apply when you resume.{{end}}</p>
                         </div>
-                        {{if eq .job.Status "pending"}}
+                        {{if .settingsEditable}}
                         <span class="px-3 py-1 bg-green-100 text-green-700 rounded-full text-xs font-medium">Editable</span>
                         {{else}}
                         <span class="px-3 py-1 bg-gray-100 text-gray-500 rounded-full text-xs font-medium">Read-only</span>
@@ -244,37 +244,91 @@
                     <form id="settings-form" onsubmit="saveSettings(event)">
                         <div class="border border-gray-200 rounded-lg mb-6">
                             <div class="bg-gray-50 px-4 py-3 border-b border-gray-200 rounded-t-lg">
+                                <h4 class="text-sm font-semibold text-gray-700">HTTP Request</h4>
+                            </div>
+                            <div class="p-4 space-y-5">
+                                <div class="bg-indigo-50 border border-indigo-200 rounded-md p-3">
+                                    <p class="text-xs text-indigo-800"><strong>Seeds only:</strong> Method and payload apply to this job’s seed URL(s). Links discovered from responses are still fetched with GET. Extra headers are sent on every request. For API-style POST crawls, set Max Depth to 0.</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Request Method</label>
+                                    <div class="inline-flex rounded-md border border-gray-300 overflow-hidden">
+                                        <button type="button" id="method-get" onclick="setRequestMethod('GET')" class="px-4 py-2 text-sm font-medium focus:outline-none">GET</button>
+                                        <button type="button" id="method-post" onclick="setRequestMethod('POST')" class="px-4 py-2 text-sm font-medium border-l border-gray-300 focus:outline-none">POST</button>
+                                    </div>
+                                    <p class="text-xs text-gray-400 mt-1">Default: GET</p>
+                                    <input type="hidden" id="set-request-method" value="GET">
+                                </div>
+                                <div>
+                                    <div class="flex items-center justify-between mb-1">
+                                        <label class="block text-sm font-medium text-gray-700">Headers</label>
+                                        {{if .settingsEditable}}
+                                        <button type="button" onclick="addHeaderRow()" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">+ Add header</button>
+                                        {{end}}
+                                    </div>
+                                    <p class="text-xs text-gray-400 mb-2">Optional. Overrides the crawler’s default headers when the same name is used (including User-Agent).</p>
+                                    <div id="header-rows" class="space-y-2"></div>
+                                </div>
+                                <div id="post-body-section" class="hidden space-y-3">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700 mb-1">Request Body</label>
+                                        <textarea id="set-request-body" rows="6" placeholder='{"query": "{{"{{Q}}"}}", "page": "{{"{{PAGE}}"}}"}'
+                                            class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono text-sm disabled:bg-gray-100 disabled:text-gray-500"
+                                            {{if not .settingsEditable}}disabled{{end}}
+                                            oninput="onBodyInput()"></textarea>
+                                        <p class="text-xs text-gray-400 mt-1">JSON, form data, or raw text. Use <code class="bg-gray-100 px-1 rounded">&#123;&#123;VAR&#125;&#125;</code> for template variables — same syntax as seed URLs. Content-Type is inferred (JSON or form) unless you set a header.</p>
+                                    </div>
+                                    <div id="body-tpl-section" class="hidden">
+                                        <div class="border border-indigo-200 bg-indigo-50 rounded-lg p-4 space-y-3">
+                                            <div class="flex items-center justify-between">
+                                                <h5 class="text-sm font-semibold text-indigo-700">Payload Variables</h5>
+                                                <span id="body-tpl-seed-count" class="text-xs text-indigo-500 font-mono"></span>
+                                            </div>
+                                            <p class="text-xs text-gray-600">Define values for each variable. Use commas for lists, dash for ranges (e.g. <code class="bg-white px-1 rounded">1,hamster,5-10</code>). Each seed URL is requested with every expanded payload.</p>
+                                            <div id="body-tpl-vars" class="space-y-2"></div>
+                                            <div id="body-tpl-preview-wrap" class="hidden">
+                                                <button type="button" onclick="toggleBodyPreview()" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Preview expanded payloads ▾</button>
+                                                <div id="body-tpl-preview" class="hidden mt-2 max-h-40 overflow-y-auto bg-white border rounded p-2 text-xs text-gray-600 font-mono space-y-0.5"></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="border border-gray-200 rounded-lg mb-6">
+                            <div class="bg-gray-50 px-4 py-3 border-b border-gray-200 rounded-t-lg">
                                 <h4 class="text-sm font-semibold text-gray-700">Crawler Configuration</h4>
                             </div>
                             <div class="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 mb-1">Max Concurrent Requests</label>
-                                    <input type="number" id="set-max-concurrent" min="1" max="100" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <input type="number" id="set-max-concurrent" min="1" max="100" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if not .settingsEditable}}disabled{{end}}>
                                     <p class="text-xs text-gray-400 mt-1">Default: <span class="def-val" data-key="max_concurrent_requests"></span></p>
                                 </div>
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 mb-1">Request Timeout (sec)</label>
-                                    <input type="number" id="set-request-timeout" min="1" max="300" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <input type="number" id="set-request-timeout" min="1" max="300" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if not .settingsEditable}}disabled{{end}}>
                                     <p class="text-xs text-gray-400 mt-1">Default: <span class="def-val" data-key="request_timeout_seconds"></span></p>
                                 </div>
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 mb-1">Politeness Delay (ms)</label>
-                                    <input type="number" id="set-politeness-delay" min="0" max="60000" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <input type="number" id="set-politeness-delay" min="0" max="60000" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if not .settingsEditable}}disabled{{end}}>
                                     <p class="text-xs text-gray-400 mt-1">Default: <span class="def-val" data-key="politeness_delay_ms"></span>ms · Randomized ±1s at runtime</p>
                                 </div>
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 mb-1">Max Depth</label>
-                                    <input type="number" id="set-max-depth" min="1" max="100" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <input type="number" id="set-max-depth" min="1" max="100" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if not .settingsEditable}}disabled{{end}}>
                                     <p class="text-xs text-gray-400 mt-1">Default: <span class="def-val" data-key="max_depth"></span></p>
                                 </div>
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 mb-1">Max Retries</label>
-                                    <input type="number" id="set-max-retries" min="0" max="10" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <input type="number" id="set-max-retries" min="0" max="10" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if not .settingsEditable}}disabled{{end}}>
                                     <p class="text-xs text-gray-400 mt-1">Default: <span class="def-val" data-key="max_retries"></span></p>
                                 </div>
                                 <div class="md:col-span-2">
                                     <label class="block text-sm font-medium text-gray-700 mb-1">User Agent</label>
-                                    <input type="text" id="set-user-agent" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <input type="text" id="set-user-agent" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500" {{if not .settingsEditable}}disabled{{end}}>
                                     <p class="text-xs text-gray-400 mt-1 truncate">Default: <span class="def-val" data-key="user_agent"></span></p>
                                 </div>
                             </div>
@@ -290,11 +344,11 @@
                                 </div>
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 mb-1">Include Patterns <span class="text-gray-400 text-xs">(one regex per line)</span></label>
-                                    <textarea id="set-url-include" rows="3" placeholder="/blog/.*&#10;/products/[0-9]+" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono text-sm disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}></textarea>
+                                    <textarea id="set-url-include" rows="3" placeholder="/blog/.*&#10;/products/[0-9]+" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono text-sm disabled:bg-gray-100 disabled:text-gray-500" {{if not .settingsEditable}}disabled{{end}}></textarea>
                                 </div>
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 mb-1">Exclude Patterns <span class="text-gray-400 text-xs">(one regex per line)</span></label>
-                                    <textarea id="set-url-exclude" rows="3" placeholder="\.(css|js|png|jpg)$&#10;/admin/.*" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono text-sm disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}></textarea>
+                                    <textarea id="set-url-exclude" rows="3" placeholder="\.(css|js|png|jpg)$&#10;/admin/.*" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono text-sm disabled:bg-gray-100 disabled:text-gray-500" {{if not .settingsEditable}}disabled{{end}}></textarea>
                                 </div>
                             </div>
                         </div>
@@ -305,7 +359,7 @@
                             </div>
                             <div class="p-4 space-y-4">
                                 <div class="flex items-start space-x-3">
-                                    <input type="checkbox" id="set-skip-content-dup" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <input type="checkbox" id="set-skip-content-dup" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if not .settingsEditable}}disabled{{end}}>
                                     <div>
                                         <label for="set-skip-content-dup" class="text-sm font-medium text-gray-700">Skip Content Duplicates</label>
                                         <p class="text-xs text-gray-400 mt-0.5">When enabled, pages with identical body content (same doc hash) are skipped instead of being processed again. Default: <span class="def-val" data-key="skip_content_duplicates"></span></p>
@@ -313,7 +367,7 @@
                                 </div>
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 mb-1">Extra Tracking Params to Strip <span class="text-gray-400 text-xs">(one per line)</span></label>
-                                    <textarea id="set-extra-tracking" rows="3" placeholder="session_id&#10;token&#10;locale" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono text-sm disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}></textarea>
+                                    <textarea id="set-extra-tracking" rows="3" placeholder="session_id&#10;token&#10;locale" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono text-sm disabled:bg-gray-100 disabled:text-gray-500" {{if not .settingsEditable}}disabled{{end}}></textarea>
                                     <p class="text-xs text-gray-400 mt-1">Site-specific query parameters to strip from URLs before deduplication. The crawler already strips standard tracking params (utm_*, fbclid, gclid, _ref, _t, amp, return_url, redirect_url, etc.).</p>
                                 </div>
                             </div>
@@ -328,7 +382,7 @@
                                     <p class="text-xs text-blue-800"><strong>Note:</strong> When enabled, pages are fetched using a headless Chromium browser via Playwright. This is needed for JavaScript-rendered SPAs (e.g. IranDoc). Slower than plain HTTP but captures dynamically loaded content.</p>
                                 </div>
                                 <div class="flex items-start space-x-3">
-                                    <input type="checkbox" id="set-use-headless" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <input type="checkbox" id="set-use-headless" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if not .settingsEditable}}disabled{{end}}>
                                     <div>
                                         <label for="set-use-headless" class="text-sm font-medium text-gray-700">Use Headless Browser</label>
                                         <p class="text-xs text-gray-400 mt-0.5">Fetch pages using headless Chromium instead of plain HTTP requests. Default: <span class="def-val" data-key="use_headless_browser"></span></p>
@@ -336,7 +390,7 @@
                                 </div>
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 mb-1">Wait Selector <span class="text-gray-400 text-xs">(CSS selector)</span></label>
-                                    <input type="text" id="set-headless-selector" placeholder="#content, .results-list, [data-loaded]" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono text-sm disabled:bg-gray-100 disabled:text-gray-500" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <input type="text" id="set-headless-selector" placeholder="#content, .results-list, [data-loaded]" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono text-sm disabled:bg-gray-100 disabled:text-gray-500" {{if not .settingsEditable}}disabled{{end}}>
                                     <p class="text-xs text-gray-400 mt-1">CSS selector to wait for before capturing the page HTML. Leave empty to wait for network idle only. Default: <span class="def-val" data-key="headless_wait_selector"></span></p>
                                 </div>
                             </div>
@@ -351,7 +405,7 @@
                                     <p class="text-xs text-purple-800"><strong>Note:</strong> When enabled, each crawled page is embedded using a multilingual sentence-transformer model (via Python + FAISS). This enables meaning-based semantic search across all crawled content. Adds overhead per page but allows searching by concept instead of exact keywords.</p>
                                 </div>
                                 <div class="flex items-start space-x-3">
-                                    <input type="checkbox" id="set-enable-semantic" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <input type="checkbox" id="set-enable-semantic" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if not .settingsEditable}}disabled{{end}}>
                                     <div>
                                         <label for="set-enable-semantic" class="text-sm font-medium text-gray-700">Enable Semantic Search</label>
                                         <p class="text-xs text-gray-400 mt-0.5">Generate vector embeddings for crawled pages to enable AI-powered semantic search. Default: <span class="def-val" data-key="enable_semantic_search"></span></p>
@@ -362,28 +416,23 @@
 
                         <div class="border border-gray-200 rounded-lg mb-6">
                             <div class="bg-gray-50 px-4 py-3 border-b border-gray-200 rounded-t-lg">
-                                <h4 class="text-sm font-semibold text-gray-700">Custom Scripts</h4>
+                                <h4 class="text-sm font-semibold text-gray-700">Plugins</h4>
                             </div>
                             <div class="p-4 space-y-4">
                                 <div class="bg-green-50 border border-green-200 rounded-md p-3">
-                                    <p class="text-xs text-green-800"><strong>After-Crawl Script:</strong> Place <code class="font-mono bg-green-100 px-1 rounded">scripts/after_crawl.py</code> in the project root. When enabled, it runs after each successfully crawled page. Page data is passed as JSON on stdin (<code class="font-mono bg-green-100 px-1 rounded">url</code>, <code class="font-mono bg-green-100 px-1 rounded">status_code</code>, <code class="font-mono bg-green-100 px-1 rounded">content_type</code>, <code class="font-mono bg-green-100 px-1 rounded">depth</code>, <code class="font-mono bg-green-100 px-1 rounded">body</code>, <code class="font-mono bg-green-100 px-1 rounded">job_id</code>). Runs inside the project <code class="font-mono bg-green-100 px-1 rounded">scripts/.venv</code> environment. Errors are logged and non-fatal.</p>
+                                    <p class="text-xs text-green-800"><strong>After-crawl / after-job plugins</strong> live as folders under <code class="font-mono bg-green-100 px-1 rounded">plugins/</code>. Each plugin has a <code class="font-mono bg-green-100 px-1 rounded">plugin.json</code> plus optional <code class="font-mono bg-green-100 px-1 rounded">after_crawl.py</code> and <code class="font-mono bg-green-100 px-1 rounded">after_job.py</code>. After-crawl receives page JSON on stdin; after-job is scheduled ~2 minutes after the job ends with <code class="font-mono bg-green-100 px-1 rounded">--job-id</code>. Errors are logged and non-fatal.</p>
                                 </div>
-                                <div class="flex items-start space-x-3">
-                                    <input type="checkbox" id="set-after-crawl-script" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if ne .job.Status "pending"}}disabled{{end}}>
-                                    <div>
-                                        <label for="set-after-crawl-script" class="text-sm font-medium text-gray-700">Run After-Crawl Script</label>
-                                        <p class="text-xs text-gray-400 mt-0.5">Execute <code class="font-mono text-xs">scripts/after_crawl.py</code> after each successfully crawled page. Script must exist at that path or it is skipped. Default: <span class="def-val" data-key="after_crawl_script"></span></p>
-                                    </div>
+                                <div>
+                                    <label for="set-after-crawl-plugin" class="text-sm font-medium text-gray-700">After-Crawl Plugin</label>
+                                    <select id="set-after-crawl-plugin" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500 bg-white" {{if not .settingsEditable}}disabled{{end}}></select>
+                                    <p class="text-xs text-gray-400 mt-0.5">Runs after each successfully crawled page. Default: <span class="def-val" data-key="after_crawl_plugin"></span></p>
+                                    <p id="after-crawl-plugin-desc" class="text-xs text-gray-500 mt-1"></p>
                                 </div>
-                                <div class="bg-amber-50 border border-amber-200 rounded-md p-3">
-                                    <p class="text-xs text-amber-800"><strong>After-Job Script:</strong> Place <code class="font-mono bg-amber-100 px-1 rounded">scripts/after_job.py</code> in the project root. When enabled, it is scheduled to run roughly 2 minutes after the job ends (completed, cancelled, or stopped). It receives the job id via <code class="font-mono bg-amber-100 px-1 rounded">--job-id</code> and runs detached, so it survives a server restart. Logs are written to <code class="font-mono bg-amber-100 px-1 rounded">scripts/after_job.log</code>. Errors are non-fatal.</p>
-                                </div>
-                                <div class="flex items-start space-x-3">
-                                    <input type="checkbox" id="set-after-job-script" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if ne .job.Status "pending"}}disabled{{end}}>
-                                    <div>
-                                        <label for="set-after-job-script" class="text-sm font-medium text-gray-700">Run After-Job Script</label>
-                                        <p class="text-xs text-gray-400 mt-0.5">Schedule <code class="font-mono text-xs">scripts/after_job.py</code> ~2 minutes after this job ends. Default: <span class="def-val" data-key="after_job_script"></span></p>
-                                    </div>
+                                <div>
+                                    <label for="set-after-job-plugin" class="text-sm font-medium text-gray-700">After-Job Plugin</label>
+                                    <select id="set-after-job-plugin" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500 bg-white" {{if not .settingsEditable}}disabled{{end}}></select>
+                                    <p class="text-xs text-gray-400 mt-0.5">Scheduled ~2 minutes after this job ends. Default: <span class="def-val" data-key="after_job_plugin"></span></p>
+                                    <p id="after-job-plugin-desc" class="text-xs text-gray-500 mt-1"></p>
                                 </div>
                             </div>
                         </div>
@@ -397,14 +446,14 @@
                                     <p class="text-xs text-teal-800"><strong>Note:</strong> When enabled, individual words are automatically extracted from each crawled page (after normalization, stop-word removal, and lowercasing) and stored as search phrases linked to this job. This builds a per-crawl inverted index for keyword discovery.</p>
                                 </div>
                                 <div class="flex items-start space-x-3">
-                                    <input type="checkbox" id="set-enable-word-extraction" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <input type="checkbox" id="set-enable-word-extraction" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if not .settingsEditable}}disabled{{end}}>
                                     <div>
                                         <label for="set-enable-word-extraction" class="text-sm font-medium text-gray-700">Enable Word Extraction</label>
                                         <p class="text-xs text-gray-400 mt-0.5">Automatically extract and index individual words from crawled pages. Default: <span class="def-val" data-key="enable_word_extraction"></span></p>
                                     </div>
                                 </div>
                                 <div class="flex items-start space-x-3">
-                                    <input type="checkbox" id="set-use-crawl-phrases-only" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <input type="checkbox" id="set-use-crawl-phrases-only" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if not .settingsEditable}}disabled{{end}}>
                                     <div>
                                         <label for="set-use-crawl-phrases-only" class="text-sm font-medium text-gray-700">Use Crawl Phrases Only</label>
                                         <p class="text-xs text-gray-400 mt-0.5">Only match against extracted words from this crawl (ignore manual search phrases). Default: <span class="def-val" data-key="use_crawl_phrases_only"></span></p>
@@ -419,10 +468,10 @@
                             </div>
                             <div class="p-4 space-y-4">
                                 <div class="bg-amber-50 border border-amber-200 rounded-md p-3">
-                                    <p class="text-xs text-amber-800"><strong>Note:</strong> When enabled, the extracted text content of each crawled page is saved to the database. This applies to text-based responses only (HTML text extraction, plain text, XML). Can significantly increase database size for large crawls.</p>
+                                    <p class="text-xs text-amber-800"><strong>Note:</strong> When enabled, the response body of each crawled page is saved to the database. This includes HTML, plain text, XML, and JSON API responses. Can significantly increase database size for large crawls.</p>
                                 </div>
                                 <div class="flex items-start space-x-3">
-                                    <input type="checkbox" id="set-save-text-content" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if ne .job.Status "pending"}}disabled{{end}}>
+                                    <input type="checkbox" id="set-save-text-content" class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 disabled:opacity-50" {{if not .settingsEditable}}disabled{{end}}>
                                     <div>
                                         <label for="set-save-text-content" class="text-sm font-medium text-gray-700">Save Text Content</label>
                                         <p class="text-xs text-gray-400 mt-0.5">Store the extracted text content of each crawled page in the database. Default: <span class="def-val" data-key="save_text_content"></span></p>
@@ -431,7 +480,7 @@
                             </div>
                         </div>
 
-                        {{if eq .job.Status "pending"}}
+                        {{if .settingsEditable}}
                         <div class="flex items-center justify-between">
                             <div class="flex items-center space-x-3">
                                 <button type="button" onclick="resetToDefaults()" class="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50 transition">Clear Fields</button>
@@ -491,6 +540,12 @@
         var pagesState = { jobId:'{{.job.ID}}', currentPage:1, pageSize:20, total:{{.pageTotal}}, autoRefresh:false, interval:null };
         var defaultSettings = {{.defaultSettingsJSON}};
         var currentSettings = {{.settingsJSON}};
+        var pluginCatalog = {{.pluginsJSON}};
+        var settingsEditable = {{.settingsEditable}};
+        var jobSeedCount = {{if .job.SeedURLs}}{{len .job.SeedURLs}}{{else}}1{{end}};
+        var requestMethod = 'GET';
+        var bodyTplVarRe = /\{\{(\w+)\}\}/g;
+        var bodyPrevVarNames = [];
 
         /* ── Settings ── */
         function populateSettings(){
@@ -498,7 +553,8 @@
                 var k=el.getAttribute('data-key');
                 var v=defaultSettings[k];
                 if(typeof v === 'boolean') el.textContent=v?'On':'Off';
-                else el.textContent=v!=null?v:'-';
+                else if(k==='after_crawl_plugin'||k==='after_job_plugin') el.textContent=v?v:'None';
+                else el.textContent=v!=null&&v!==''?v:'-';
             });
             var s=currentSettings||{};
             setVal('set-max-concurrent',s.max_concurrent_requests);
@@ -523,23 +579,217 @@
             var textCb=document.getElementById('set-save-text-content');
             if(s.save_text_content!=null&&s.save_text_content!=undefined){textCb.checked=s.save_text_content;textCb.indeterminate=false;}
             else{textCb.checked=defaultSettings.save_text_content||false;textCb.indeterminate=true;}
-            var afterCrawlCb=document.getElementById('set-after-crawl-script');
-            if(s.after_crawl_script!=null&&s.after_crawl_script!=undefined){afterCrawlCb.checked=s.after_crawl_script;afterCrawlCb.indeterminate=false;}
-            else{afterCrawlCb.checked=defaultSettings.after_crawl_script||false;afterCrawlCb.indeterminate=true;}
-            var afterJobCb=document.getElementById('set-after-job-script');
-            if(s.after_job_script!=null&&s.after_job_script!=undefined){afterJobCb.checked=s.after_job_script;afterJobCb.indeterminate=false;}
-            else{afterJobCb.checked=defaultSettings.after_job_script||false;afterJobCb.indeterminate=true;}
+            fillPluginSelect('set-after-crawl-plugin','after_crawl', s.after_crawl_plugin!=null&&s.after_crawl_plugin!=undefined?s.after_crawl_plugin:(defaultSettings.after_crawl_plugin||''), 'after-crawl-plugin-desc');
+            fillPluginSelect('set-after-job-plugin','after_job', s.after_job_plugin!=null&&s.after_job_plugin!=undefined?s.after_job_plugin:(defaultSettings.after_job_plugin||''), 'after-job-plugin-desc');
             var wordCb=document.getElementById('set-enable-word-extraction');
             if(s.enable_word_extraction!=null&&s.enable_word_extraction!=undefined){wordCb.checked=s.enable_word_extraction;wordCb.indeterminate=false;}
             else{wordCb.checked=defaultSettings.enable_word_extraction||false;wordCb.indeterminate=true;}
             var crawlOnlyCb=document.getElementById('set-use-crawl-phrases-only');
             if(s.use_crawl_phrases_only!=null&&s.use_crawl_phrases_only!=undefined){crawlOnlyCb.checked=s.use_crawl_phrases_only;crawlOnlyCb.indeterminate=false;}
             else{crawlOnlyCb.checked=defaultSettings.use_crawl_phrases_only!=null?defaultSettings.use_crawl_phrases_only:true;crawlOnlyCb.indeterminate=true;}
+            setVal('set-request-body', s.request_body);
+            renderHeaderRows(s.request_headers||[]);
+            setRequestMethod(s.request_method||'GET');
+            onBodyInput(s.request_body_vars||{});
         }
         function setVal(id,v){var e=document.getElementById(id);if(e)e.value=(v!=null&&v!=undefined)?v:'';}
         function intVal(id){var v=document.getElementById(id).value.trim();return v===''?undefined:parseInt(v,10);}
         function strVal(id){var v=document.getElementById(id).value.trim();return v===''?undefined:v;}
         function linesVal(id){var v=document.getElementById(id).value.trim();if(!v)return undefined;var l=v.split('\n').map(function(x){return x.trim()}).filter(function(x){return x.length>0});return l.length?l:undefined;}
+
+        function pluginById(id){
+            if(!id) return null;
+            var list=pluginCatalog||[];
+            for(var i=0;i<list.length;i++){if(list[i].id===id) return list[i];}
+            return null;
+        }
+        function fillPluginSelect(selectId, hook, selected, descId){
+            var el=document.getElementById(selectId);
+            if(!el) return;
+            var prev=selected||'';
+            el.innerHTML='';
+            var none=document.createElement('option');
+            none.value='';
+            none.textContent='None';
+            el.appendChild(none);
+            (pluginCatalog||[]).forEach(function(p){
+                if(hook==='after_crawl' && !p.has_after_crawl) return;
+                if(hook==='after_job' && !p.has_after_job) return;
+                var o=document.createElement('option');
+                o.value=p.id;
+                o.textContent=p.name?p.name+' ('+p.id+')':p.id;
+                el.appendChild(o);
+            });
+            if(prev && !pluginById(prev)){
+                var missing=document.createElement('option');
+                missing.value=prev;
+                missing.textContent=prev+' (missing)';
+                el.appendChild(missing);
+            }
+            el.value=prev;
+            function syncDesc(){
+                var desc=document.getElementById(descId);
+                if(!desc) return;
+                var p=pluginById(el.value);
+                desc.textContent=p&&p.description?p.description:'';
+            }
+            el.onchange=syncDesc;
+            syncDesc();
+        }
+
+        function setRequestMethod(method){
+            requestMethod=(method||'GET').toUpperCase()==='POST'?'POST':'GET';
+            var hidden=document.getElementById('set-request-method');
+            if(hidden) hidden.value=requestMethod;
+            var getBtn=document.getElementById('method-get');
+            var postBtn=document.getElementById('method-post');
+            if(!getBtn||!postBtn) return;
+            var active='bg-indigo-600 text-white';
+            var idle='bg-white text-gray-700 hover:bg-gray-50';
+            getBtn.className='px-4 py-2 text-sm font-medium focus:outline-none '+(requestMethod==='GET'?active:idle)+(settingsEditable?'':' opacity-60 cursor-not-allowed');
+            postBtn.className='px-4 py-2 text-sm font-medium border-l border-gray-300 focus:outline-none '+(requestMethod==='POST'?active:idle)+(settingsEditable?'':' opacity-60 cursor-not-allowed');
+            getBtn.disabled=!settingsEditable;
+            postBtn.disabled=!settingsEditable;
+            var bodySec=document.getElementById('post-body-section');
+            if(bodySec){
+                if(requestMethod==='POST') bodySec.classList.remove('hidden');
+                else bodySec.classList.add('hidden');
+            }
+        }
+        function renderHeaderRows(headers){
+            var wrap=document.getElementById('header-rows');
+            wrap.innerHTML='';
+            if(!headers||!headers.length) headers=[{name:'',value:''}];
+            headers.forEach(function(h){appendHeaderRow(h.name||'', h.value||'');});
+        }
+        function appendHeaderRow(name,value){
+            var wrap=document.getElementById('header-rows');
+            var row=document.createElement('div');
+            row.className='flex items-center gap-2 header-row';
+            var dis=settingsEditable?'':'disabled';
+            row.innerHTML=
+                '<input type="text" data-header="name" placeholder="Name (e.g. Authorization)" '+dis+' class="w-1/3 px-3 py-2 border border-gray-300 rounded-md text-sm font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500">'+
+                '<input type="text" data-header="value" placeholder="Value" '+dis+' class="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500">'+
+                (settingsEditable?'<button type="button" onclick="removeHeaderRow(this)" class="px-2 py-2 text-gray-400 hover:text-red-600 text-lg leading-none" title="Remove">&times;</button>':'');
+            wrap.appendChild(row);
+            row.querySelector('[data-header="name"]').value=name||'';
+            row.querySelector('[data-header="value"]').value=value||'';
+        }
+        window.addHeaderRow=function(){appendHeaderRow('','');};
+        window.removeHeaderRow=function(btn){
+            var wrap=document.getElementById('header-rows');
+            btn.closest('.header-row').remove();
+            if(!wrap.querySelector('.header-row')) appendHeaderRow('','');
+        };
+        function collectHeaders(){
+            var rows=document.querySelectorAll('#header-rows .header-row');
+            var out=[];
+            rows.forEach(function(row){
+                var name=(row.querySelector('[data-header="name"]')||{}).value||'';
+                var value=(row.querySelector('[data-header="value"]')||{}).value||'';
+                name=name.trim();
+                if(name) out.push({name:name,value:value});
+            });
+            return out;
+        }
+        function onBodyInput(presetVars){
+            var body=document.getElementById('set-request-body').value;
+            var names=[],seen={},m;
+            bodyTplVarRe.lastIndex=0;
+            while((m=bodyTplVarRe.exec(body))!==null){if(!seen[m[1]]){seen[m[1]]=true;names.push(m[1]);}}
+            var sec=document.getElementById('body-tpl-section');
+            if(names.length===0){sec.classList.add('hidden');bodyPrevVarNames=[];document.getElementById('body-tpl-seed-count').textContent='';return;}
+            sec.classList.remove('hidden');
+            var keep={};
+            if(presetVars) keep=presetVars;
+            else{
+                bodyPrevVarNames.forEach(function(n){
+                    var inp=document.querySelector('#body-tpl-vars input[data-body-var="'+n+'"]');
+                    if(inp) keep[n]=inp.value;
+                });
+            }
+            if(JSON.stringify(names)!==JSON.stringify(bodyPrevVarNames)){
+                bodyPrevVarNames=names;
+                renderBodyVarInputs(names, keep);
+            }else if(presetVars){
+                names.forEach(function(n){
+                    var inp=document.querySelector('#body-tpl-vars input[data-body-var="'+n+'"]');
+                    if(inp&&presetVars[n]) inp.value=presetVars[n];
+                });
+            }
+            updateBodyPreview();
+        }
+        function renderBodyVarInputs(names, preset){
+            var c=document.getElementById('body-tpl-vars');c.innerHTML='';
+            names.forEach(function(name){
+                var row=document.createElement('div');
+                row.className='flex items-center gap-2';
+                var val=(preset&&preset[name])?escHtml(preset[name]):'';
+                var dis=settingsEditable?'':'disabled';
+                row.innerHTML=
+                    '<span class="text-xs font-mono text-indigo-700 bg-white px-2 py-1 rounded border border-indigo-200 whitespace-nowrap min-w-[4rem] text-center">'+
+                    '{{"{{"}}'+escHtml(name)+'{{"}}"}}'+'</span>'+
+                    '<input type="text" data-body-var="'+escHtml(name)+'" placeholder="e.g. 1,hamster,5-10" value="'+val+'" '+dis+' '+
+                    'class="flex-1 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:bg-gray-100" '+
+                    'oninput="updateBodyPreview()">';
+                c.appendChild(row);
+            });
+            updateBodyPreview();
+        }
+        function expandBodyValueExpr(expr){
+            if(!expr||!expr.trim())return [];
+            var parts=expr.split(','),result=[];
+            parts.forEach(function(p){
+                p=p.trim();if(!p)return;
+                var rm=p.match(/^(\d+)-(\d+)$/);
+                if(rm){var a=parseInt(rm[1],10),b=parseInt(rm[2],10);
+                    if(a<=b){for(var i=a;i<=b;i++)result.push(String(i));}
+                    else{for(var i=a;i>=b;i--)result.push(String(i));}
+                }else{result.push(p);}
+            });
+            return result;
+        }
+        function updateBodyPreview(){
+            var body=document.getElementById('set-request-body').value;
+            var names=bodyPrevVarNames;
+            var wrap=document.getElementById('body-tpl-preview-wrap');
+            var countEl=document.getElementById('body-tpl-seed-count');
+            if(names.length===0){wrap.classList.add('hidden');countEl.textContent='';return;}
+            var vars={},anyFilled=false;
+            names.forEach(function(n){
+                var inp=document.querySelector('#body-tpl-vars input[data-body-var="'+n+'"]');
+                var vals=inp?expandBodyValueExpr(inp.value):[];
+                vars[n]=vals;if(vals.length>0)anyFilled=true;
+            });
+            if(!anyFilled){wrap.classList.add('hidden');countEl.textContent='';return;}
+            var allFilled=names.every(function(n){return vars[n].length>0;});
+            if(!allFilled){wrap.classList.add('hidden');countEl.textContent='';return;}
+            var combos=[body];
+            names.forEach(function(name){
+                var next=[];
+                combos.forEach(function(u){vars[name].forEach(function(val){next.push(u.split('{{"{{"}}'+name+'{{"}}"}}').join(val));});});
+                combos=next;
+            });
+            var seedN=jobSeedCount||1;
+            var total=seedN*combos.length;
+            countEl.textContent=seedN+' seed URL'+(seedN!==1?'s':'')+' × '+combos.length+' payload'+(combos.length!==1?'s':'')+' = '+total+' request'+(total!==1?'s':'');
+            wrap.classList.remove('hidden');
+            var prev=document.getElementById('body-tpl-preview');
+            var limit=20;
+            var html=combos.slice(0,limit).map(function(u){return '<div class="whitespace-pre-wrap break-all">'+escHtml(u)+'</div>';}).join('');
+            if(combos.length>limit){html+='<div class="text-gray-400 italic">... and '+(combos.length-limit)+' more</div>';}
+            prev.innerHTML=html;
+        }
+        function toggleBodyPreview(){document.getElementById('body-tpl-preview').classList.toggle('hidden');}
+        function collectBodyVars(){
+            if(!bodyPrevVarNames.length) return undefined;
+            var out={},any=false;
+            bodyPrevVarNames.forEach(function(n){
+                var inp=document.querySelector('#body-tpl-vars input[data-body-var="'+n+'"]');
+                if(inp&&inp.value.trim()){out[n]=inp.value.trim();any=true;}
+            });
+            return any?out:undefined;
+        }
 
         function buildPayload(){
             var p={};
@@ -562,14 +812,23 @@
             if(!semCb.indeterminate) p.enable_semantic_search=semCb.checked;
             var textCb=document.getElementById('set-save-text-content');
             if(!textCb.indeterminate) p.save_text_content=textCb.checked;
-            var afterCrawlCb=document.getElementById('set-after-crawl-script');
-            if(!afterCrawlCb.indeterminate) p.after_crawl_script=afterCrawlCb.checked;
-            var afterJobCb=document.getElementById('set-after-job-script');
-            if(!afterJobCb.indeterminate) p.after_job_script=afterJobCb.checked;
+            p.after_crawl_plugin=document.getElementById('set-after-crawl-plugin').value||'';
+            p.after_job_plugin=document.getElementById('set-after-job-plugin').value||'';
             var wordCb=document.getElementById('set-enable-word-extraction');
             if(!wordCb.indeterminate) p.enable_word_extraction=wordCb.checked;
             var crawlOnlyCb=document.getElementById('set-use-crawl-phrases-only');
             if(!crawlOnlyCb.indeterminate) p.use_crawl_phrases_only=crawlOnlyCb.checked;
+            var methodEl=document.getElementById('set-request-method');
+            requestMethod=(methodEl&&methodEl.value==='POST')||requestMethod==='POST'?'POST':'GET';
+            if(requestMethod==='POST'){
+                p.request_method='POST';
+                var bodyEl=document.getElementById('set-request-body');
+                if(bodyEl&&bodyEl.value!=='') p.request_body=bodyEl.value;
+                var bodyVars=collectBodyVars();
+                if(bodyVars)p.request_body_vars=bodyVars;
+            }
+            var headers=collectHeaders();
+            if(headers.length)p.request_headers=headers;
             return p;
         }
         function showAlert(msg,ok){
@@ -580,11 +839,25 @@
         }
         async function saveSettings(e){
             e.preventDefault();
+            if(requestMethod==='POST' && bodyPrevVarNames.length){
+                var missing=bodyPrevVarNames.filter(function(n){
+                    var inp=document.querySelector('#body-tpl-vars input[data-body-var="'+n+'"]');
+                    return !inp||!inp.value.trim();
+                });
+                if(missing.length){
+                    showAlert('Fill values for payload variables: '+missing.map(function(n){return '{{"{{"}}'+n+'{{"}}"}}';}).join(', '),false);
+                    return;
+                }
+            }
             var btn=document.getElementById('save-settings-btn');btn.disabled=true;btn.textContent='Saving…';
             try{
                 var r=await fetch('/api/jobs/'+pagesState.jobId+'/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildPayload())});
                 var d=await r.json();
-                if(d.success){showAlert('Settings saved.',true);setTimeout(function(){location.reload();},800);}
+                if(d.success){
+                    if(d.message&&d.message.indexOf('reset')!==-1){showAlert(d.message,true);}
+                    else{showAlert('Settings saved.',true);}
+                    setTimeout(function(){location.reload();},800);
+                }
                 else{showAlert('Error: '+(d.error||'Unknown'),false);}
             }catch(err){showAlert('Network error: '+err.message,false);}
             btn.disabled=false;btn.textContent='Save Settings';
@@ -607,18 +880,18 @@
             var textCb=document.getElementById('set-save-text-content');
             textCb.checked=defaultSettings.save_text_content||false;
             textCb.indeterminate=true;
-            var afterCrawlCb=document.getElementById('set-after-crawl-script');
-            afterCrawlCb.checked=defaultSettings.after_crawl_script||false;
-            afterCrawlCb.indeterminate=true;
-            var afterJobCb=document.getElementById('set-after-job-script');
-            afterJobCb.checked=defaultSettings.after_job_script||false;
-            afterJobCb.indeterminate=true;
+            fillPluginSelect('set-after-crawl-plugin','after_crawl', defaultSettings.after_crawl_plugin||'', 'after-crawl-plugin-desc');
+            fillPluginSelect('set-after-job-plugin','after_job', defaultSettings.after_job_plugin||'', 'after-job-plugin-desc');
             var wordCb=document.getElementById('set-enable-word-extraction');
             wordCb.checked=defaultSettings.enable_word_extraction||false;
             wordCb.indeterminate=true;
             var crawlOnlyCb=document.getElementById('set-use-crawl-phrases-only');
             crawlOnlyCb.checked=defaultSettings.use_crawl_phrases_only!=null?defaultSettings.use_crawl_phrases_only:true;
             crawlOnlyCb.indeterminate=true;
+            setRequestMethod('GET');
+            renderHeaderRows([]);
+            document.getElementById('set-request-body').value='';
+            onBodyInput();
         }
         async function resetToDefaultsAndSave(){
             if(!confirm('Reset all settings to global defaults? This will remove any custom configuration for this job.'))return;
@@ -727,9 +1000,9 @@
         async function apiCall(m,u,d){var o={method:m,headers:{'Content-Type':'application/json'}};if(d)o.body=JSON.stringify(d);return(await fetch(u,o)).json();}
         window.duplicateJob=async function(id){var r=await apiCall('POST','/api/jobs/'+id+'/duplicate');if(r.success&&r.data){window.location.href='/jobs/'+r.data.id;}else{alert('Failed to duplicate: '+(r.error||'Unknown error'));}};
         window.startJob=async function(id){await apiCall('POST','/api/jobs/'+id+'/start');location.reload();};
-        window.stopJob=async function(){await apiCall('POST','/api/jobs/stop');location.reload();};
+        window.stopJob=async function(id){await apiCall('POST',id?'/api/jobs/'+id+'/stop':'/api/jobs/stop');location.reload();};
         window.pauseJob=async function(){await apiCall('POST','/api/jobs/pause');location.reload();};
-        window.resumeJob=async function(){await apiCall('POST','/api/jobs/resume');location.reload();};
+        window.resumeJob=async function(id){await apiCall('POST',id?'/api/jobs/'+id+'/resume':'/api/jobs/resume');location.reload();};
         window.discoverSubdomains=async function(id){await apiCall('POST','/api/jobs/'+id+'/subdomains/discover');alert('Subdomain discovery started!');};
 
         /* ── Edit Target URL ── */

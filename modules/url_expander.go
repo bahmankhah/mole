@@ -106,6 +106,12 @@ func tryExpandRange(s string) ([]string, bool) {
 	return vals, true
 }
 
+// ExpandTemplate expands {{VAR}} placeholders in any string (URL, JSON body, etc.)
+// by computing the Cartesian product of all variable values. See ExpandTemplateURL.
+func ExpandTemplate(template string, vars map[string][]string, maxResults int) ([]string, error) {
+	return ExpandTemplateURL(template, vars, maxResults)
+}
+
 // ExpandTemplateURL takes a URL template and a map of variable→values, and
 // returns all expanded URLs by computing the Cartesian product of all variable
 // values.

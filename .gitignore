@@ -1,13 +1,29 @@
 # Build output
 main
 
-# Python virtual environment
+# Python virtual environment and plugin runtime data
+plugins/.venv/
+plugins/.cookies/
+plugins/.cache/
+plugins/__pycache__/
+plugins/*.log
+plugins/after_crawl_data
+plugins/*/.cookies/
+plugins/*/after_crawl_data/
+plugins/*/*.log
+plugins/*/__pycache__/
+
+# Legacy scripts/ paths (pre-rename leftovers)
 scripts/.venv/
 scripts/.cookies/
 scripts/.cache/
 scripts/__pycache__/
 scripts/*.log
 scripts/after_crawl_data
+scripts/*/.cookies/
+scripts/*/after_crawl_data/
+scripts/*/*.log
+scripts/*/__pycache__/
 
 # Python cache
 __pycache__/

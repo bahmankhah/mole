@@ -132,8 +132,10 @@ func main() {
 		api.GET("/jobs/:id", handler.GetJob)
 		api.POST("/jobs/:id/start", handler.StartJob)
 		api.POST("/jobs/stop", handler.StopJob)
+		api.POST("/jobs/:id/stop", handler.StopJob)
 		api.POST("/jobs/pause", handler.PauseJob)
 		api.POST("/jobs/resume", handler.ResumeJob)
+		api.POST("/jobs/:id/resume", handler.ResumeJob)
 		api.POST("/jobs/:id/duplicate", handler.DuplicateJob)
 		api.DELETE("/jobs/:id", handler.DeleteJob)
 
@@ -173,6 +175,7 @@ func main() {
 		api.PUT("/jobs/:id/settings", handler.UpdateJobSettings)
 		api.PUT("/jobs/:id/target", handler.UpdateJobTarget)
 		api.GET("/settings/defaults", handler.GetDefaultSettings)
+		api.GET("/plugins", handler.ListPlugins)
 
 		// Stats
 		api.GET("/stats", handler.GetStats)

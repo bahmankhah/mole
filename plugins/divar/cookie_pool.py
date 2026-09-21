@@ -1,12 +1,12 @@
 """
 cookie_pool.py — round-robin pool of Divar auth cookies.
 
-Layout:
-    scripts/.cookies/auth/<anything>      one auth cookie file per account
-                                          (raw HTTP `Cookie:` header line —
-                                          paste from DevTools)
-    scripts/.cookies/auth_state.json      usage + expired flags + cursor
-    scripts/.cookies/auth_state.json.lock flock target for concurrent workers
+Layout (plugin-local, with a fallback to plugins/.cookies or legacy scripts/.cookies):
+    <plugin>/.cookies/auth/<anything>      one auth cookie file per account
+                                           (raw HTTP `Cookie:` header line —
+                                           paste from DevTools)
+    <plugin>/.cookies/auth_state.json      usage + expired flags + cursor
+    <plugin>/.cookies/auth_state.json.lock flock target for concurrent workers
 
 Each acquire() returns the next non-expired cookie set, round-robin. A cookie
 is flagged expired when:
@@ -31,7 +31,22 @@ import requests
 log = logging.getLogger("after_crawl")
 
 
-COOKIES_DIR = Path(__file__).parent / ".cookies"
+PLUGIN_DIR = Path(__file__).resolve().parent
+_PLUGINS_DIR = PLUGIN_DIR.parent
+
+
+def _resolve_cookies_dir() -> Path:
+    """Prefer plugin-local .cookies; fall back to plugins/.cookies, then scripts/.cookies."""
+    local = PLUGIN_DIR / ".cookies"
+    if local.exists():
+        return local
+    for legacy in (_PLUGINS_DIR / ".cookies", _PLUGINS_DIR.parent / "scripts" / ".cookies"):
+        if legacy.exists():
+            return legacy
+    return local
+
+
+COOKIES_DIR = _resolve_cookies_dir()
 AUTH_DIR = COOKIES_DIR / "auth"
 STATE_FILE = COOKIES_DIR / "auth_state.json"
 LOCK_FILE = Path(str(STATE_FILE) + ".lock")

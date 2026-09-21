@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Setup script for Mole crawler Python dependencies.
-# Creates a virtual environment under scripts/.venv and installs all deps.
+# Creates a virtual environment under plugins/.venv and installs all deps.
 # The Go server auto-detects the venv — no need to "activate" it manually.
 #
 # Usage:
-#   chmod +x scripts/setup_python.sh
-#   ./scripts/setup_python.sh
+#   chmod +x plugins/setup_python.sh
+#   ./plugins/setup_python.sh
 
 set -euo pipefail
 

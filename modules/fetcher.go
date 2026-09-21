@@ -22,6 +22,7 @@ import (
 	"crypto/tls"
 
 	"github.com/resolver/crawler/config"
+	"github.com/resolver/crawler/models"
 )
 
 // FetchResult holds the result of fetching a URL.
@@ -34,11 +35,18 @@ type FetchResult struct {
 	Error       error
 }
 
+// FetchOptions customizes a single fetch. Zero value is a plain GET.
+type FetchOptions struct {
+	Method  string // GET (default) or POST
+	Headers []models.HTTPHeader
+	Body    string // POST payload
+}
+
 // Fetcher is the interface for fetching page content.
 // Implementations can use plain HTTP or a headless browser.
 type Fetcher interface {
 	// Fetch retrieves the content at the given URL.
-	Fetch(ctx context.Context, url string) *FetchResult
+	Fetch(ctx context.Context, url string, opts FetchOptions) *FetchResult
 }
 
 // ---------------------------------------------------------------------------
@@ -137,9 +145,19 @@ func NewHTTPFetcher(cfg config.CrawlerConfig) *HTTPFetcher {
 	}
 }
 
-// Fetch performs an HTTP GET request and returns the result.
-func (f *HTTPFetcher) Fetch(ctx context.Context, url string) *FetchResult {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+// Fetch performs an HTTP request and returns the result.
+func (f *HTTPFetcher) Fetch(ctx context.Context, url string, opts FetchOptions) *FetchResult {
+	method := strings.ToUpper(strings.TrimSpace(opts.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+
+	var bodyReader io.Reader
+	if method == http.MethodPost && opts.Body != "" {
+		bodyReader = strings.NewReader(opts.Body)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
 		return &FetchResult{URL: url, Error: fmt.Errorf("create request: %w", err)}
 	}
@@ -152,21 +170,37 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string) *FetchResult {
 		f.mu.Unlock()
 	}
 
-	// Set browser-like headers
+	// Browser-like defaults, then job-level extra headers override.
 	req.Header = http.Header{}
 	req.Header.Set("Host", req.URL.Host)
-	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
 	req.Header.Set("User-Agent", ua)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
-	req.Header.Set("Sec-Fetch-Site", "none")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-User", "?1")
-	req.Header.Set("Sec-Fetch-Dest", "document")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	req.Header.Set("Cache-Control", "max-age=0")
+	if method == http.MethodPost {
+		req.Header.Set("Accept", "*/*")
+	} else {
+		req.Header.Set("Sec-Ch-Ua", `"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"`)
+		req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+		req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+		req.Header.Set("Upgrade-Insecure-Requests", "1")
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+		req.Header.Set("Sec-Fetch-Site", "none")
+		req.Header.Set("Sec-Fetch-Mode", "navigate")
+		req.Header.Set("Sec-Fetch-User", "?1")
+		req.Header.Set("Sec-Fetch-Dest", "document")
+	}
+
+	for _, h := range opts.Headers {
+		name := strings.TrimSpace(h.Name)
+		if name == "" {
+			continue
+		}
+		req.Header.Set(name, h.Value)
+	}
+
+	if method == http.MethodPost && opts.Body != "" && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", inferPOSTContentType(opts.Body))
+	}
 
 	resp, err := f.client.Do(req)
 	if err != nil {
@@ -175,16 +209,16 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string) *FetchResult {
 	defer resp.Body.Close()
 
 	// Handle gzip safety-net
-	var bodyReader io.Reader = resp.Body
+	var respBodyReader io.Reader = resp.Body
 	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
 		gzReader, gzErr := gzip.NewReader(resp.Body)
 		if gzErr == nil {
 			defer gzReader.Close()
-			bodyReader = gzReader
+			respBodyReader = gzReader
 		}
 	}
 
-	body, err := io.ReadAll(io.LimitReader(bodyReader, 10*1024*1024))
+	body, err := io.ReadAll(io.LimitReader(respBodyReader, 10*1024*1024))
 	if err != nil {
 		return &FetchResult{
 			URL:         url,
@@ -202,11 +236,23 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string) *FetchResult {
 	}
 }
 
+// inferPOSTContentType picks a Content-Type from the payload shape.
+func inferPOSTContentType(body string) string {
+	trim := strings.TrimSpace(body)
+	if strings.HasPrefix(trim, "{") || strings.HasPrefix(trim, "[") {
+		return "application/json"
+	}
+	if strings.Contains(trim, "=") {
+		return "application/x-www-form-urlencoded"
+	}
+	return "application/json"
+}
+
 // ---------------------------------------------------------------------------
 // HeadlessFetcher — renders JS-heavy pages via a Python/Playwright subprocess
 // ---------------------------------------------------------------------------
 
-// headlessFetchResponse matches the JSON output of scripts/headless_fetch.py
+// headlessFetchResponse matches the JSON output of plugins/headless_fetch.py
 type headlessFetchResponse struct {
 	URL         string `json:"url"`
 	StatusCode  int    `json:"status_code"`
@@ -224,6 +270,7 @@ type HeadlessFetcher struct {
 	renderWait   int    // extra seconds to wait after network idle for SPA rendering
 	cookieDir    string // directory for per-domain cookie persistence
 	pythonCmd    string // cached python executable path
+	httpFallback *HTTPFetcher
 }
 
 // NewHeadlessFetcher creates a fetcher that delegates to the headless_fetch.py script.
@@ -231,10 +278,7 @@ func NewHeadlessFetcher(cfg config.CrawlerConfig) *HeadlessFetcher {
 	scriptPath := cfg.HeadlessScriptPath
 	if scriptPath == "" {
 		// Auto-detect: look relative to the working directory
-		candidates := []string{
-			"scripts/headless_fetch.py",
-			filepath.Join(execDir(), "scripts", "headless_fetch.py"),
-		}
+		candidates := pluginPathCandidates("headless_fetch.py")
 		for _, c := range candidates {
 			if _, err := os.Stat(c); err == nil {
 				scriptPath = c
@@ -242,7 +286,7 @@ func NewHeadlessFetcher(cfg config.CrawlerConfig) *HeadlessFetcher {
 			}
 		}
 		if scriptPath == "" {
-			scriptPath = "scripts/headless_fetch.py" // fallback
+			scriptPath = filepath.Join("plugins", "headless_fetch.py")
 		}
 	}
 
@@ -264,6 +308,7 @@ func NewHeadlessFetcher(cfg config.CrawlerConfig) *HeadlessFetcher {
 		renderWait:   renderWait,
 		cookieDir:    filepath.Join(filepath.Dir(scriptPath), ".cookies"),
 		pythonCmd:    FindPython(cfg.PythonPath),
+		httpFallback: NewHTTPFetcher(cfg),
 	}
 
 	log.Printf("[HeadlessFetcher] Initialized: script=%s, python=%s, timeout=%ds, waitSelector=%q, renderWait=%ds, cookieDir=%s",
@@ -273,7 +318,17 @@ func NewHeadlessFetcher(cfg config.CrawlerConfig) *HeadlessFetcher {
 }
 
 // Fetch renders a URL with headless Chromium and returns the result.
-func (f *HeadlessFetcher) Fetch(ctx context.Context, url string) *FetchResult {
+// POST and custom request bodies are fetched over HTTP — the browser script
+// only supports GET navigation.
+func (f *HeadlessFetcher) Fetch(ctx context.Context, url string, opts FetchOptions) *FetchResult {
+	method := strings.ToUpper(strings.TrimSpace(opts.Method))
+	if method == http.MethodPost || opts.Body != "" {
+		log.Printf("[HeadlessFetcher] POST/body request uses HTTP (not the browser): %s", url)
+		return f.httpFallback.Fetch(ctx, url, opts)
+	}
+	if len(opts.Headers) > 0 {
+		log.Printf("[HeadlessFetcher] Extra headers are ignored for headless GET (browser navigation): %s", url)
+	}
 	args := []string{
 		f.scriptPath,
 		url,
@@ -343,16 +398,10 @@ func FindPython(configPath string) string {
 		}
 	}
 
-	// 2. Project venv (scripts/.venv/bin/python3)
-	venvCandidates := []string{
-		"scripts/.venv/bin/python3",
-		filepath.Join(execDir(), "scripts", ".venv", "bin", "python3"),
-	}
+	// 2. Project venv (plugins/.venv/bin/python3)
+	venvCandidates := pluginPathCandidates(".venv", "bin", "python3")
 	if runtime.GOOS == "windows" {
-		venvCandidates = []string{
-			"scripts\\.venv\\Scripts\\python.exe",
-			filepath.Join(execDir(), "scripts", ".venv", "Scripts", "python.exe"),
-		}
+		venvCandidates = pluginPathCandidates(".venv", "Scripts", "python.exe")
 	}
 	for _, c := range venvCandidates {
 		if _, err := os.Stat(c); err == nil {
@@ -396,4 +445,16 @@ func execDir() string {
 		return "."
 	}
 	return filepath.Dir(ex)
+}
+
+// pluginPathCandidates returns plugins/<elem...> and the legacy scripts/<elem...>
+// paths, both relative to the working directory and the executable directory.
+func pluginPathCandidates(elem ...string) []string {
+	var out []string
+	for _, root := range []string{"plugins", "scripts"} {
+		rel := append([]string{root}, elem...)
+		out = append(out, filepath.Join(rel...))
+		out = append(out, filepath.Join(append([]string{execDir()}, rel...)...))
+	}
+	return out
 }

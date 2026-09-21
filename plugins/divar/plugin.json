@@ -1,0 +1,7 @@
+{
+  "name": "Divar",
+  "description": "Extract Divar classified-ad data after each crawled page and bulk-import it when the job ends.",
+  "version": "1.0.0",
+  "after_crawl": "after_crawl.py",
+  "after_job": "after_job.py"
+}

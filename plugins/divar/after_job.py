@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-after_job.py — Custom after-job hook for the Mole crawler.
+after_job.py — Divar plugin after-job hook for the Mole crawler.
 
 Scheduled by the crawler engine ~2 minutes after a job ends (completed,
-cancelled, or stopped) when "Run After-Job Script" is enabled in the job
-settings. It is launched detached (via setsid) so it survives a server
-restart between scheduling and execution.
+cancelled, or stopped) when this plugin is selected as the after-job plugin
+in the job settings. It is launched detached (via setsid) so it survives a
+server restart between scheduling and execution.
 
 Invocation:
     python after_job.py --job-id <uuid>
 
 Input file:
-    scripts/after_crawl_data/{job_id}.json
+    after_crawl_data/{job_id}.json  (plugin-local, or plugins/after_crawl_data/)
     Shape: {"data": [{"ad": {...}, "user": {"phone": "..."}}, ...]}
     The "user" key is only present when after_crawl.py successfully fetched
     the phone for that ad.
@@ -24,7 +24,7 @@ Behavior:
      local file by `token`, build a short Persian SMS body, and send it.
      The SMS sender is a TODO stub — it currently just logs.
   4. Successfully processed entries are MOVED into a per-run archive file at
-     scripts/after_crawl_data/archive/{job_id}-{timestamp}.json with the SAME
+     after_crawl_data/archive/{job_id}-{timestamp}.json with the SAME
      {"data": [...]} shape as the source. Failed/unprocessed entries remain
      in the source file (so a retry later picks them up). If the source file
      is fully drained it is deleted.
@@ -32,8 +32,8 @@ Behavior:
 The archive file is drop-in: replacing the source file with an archive file
 will make a re-run process exactly the same set of entries again.
 
-Runs inside scripts/.venv — add dependencies to scripts/requirements.txt and
-run scripts/setup_python.sh to install them.
+Runs inside plugins/.venv — add dependencies to plugins/requirements.txt and
+run plugins/setup_python.sh to install them.
 """
 
 import argparse
@@ -45,7 +45,24 @@ import time
 import requests
 
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "after_crawl_data")
+PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+_PLUGINS_DIR = os.path.dirname(PLUGIN_DIR)
+
+
+def _resolve_data_dir() -> str:
+    local = os.path.join(PLUGIN_DIR, "after_crawl_data")
+    if os.path.isdir(local):
+        return local
+    for legacy in (
+        os.path.join(_PLUGINS_DIR, "after_crawl_data"),
+        os.path.join(os.path.dirname(_PLUGINS_DIR), "scripts", "after_crawl_data"),
+    ):
+        if os.path.isdir(legacy):
+            return legacy
+    return local
+
+
+DATA_DIR = _resolve_data_dir()
 ARCHIVE_DIR = os.path.join(DATA_DIR, "archive")
 
 # Ingestion endpoint — set via env var; sample default kept obviously fake.

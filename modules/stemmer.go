@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -29,11 +30,9 @@ type Stemmer struct {
 
 // NewStemmer creates a new stemmer backed by the Python stem_lemma.py script.
 func NewStemmer(cfg config.CrawlerConfig) *Stemmer {
-	scriptPath := "scripts/stem_lemma.py"
+	scriptPath := filepath.Join("plugins", "stem_lemma.py")
 	if _, err := os.Stat(scriptPath); err != nil {
-		// Try relative to executable
-		candidates := []string{"./scripts/stem_lemma.py"}
-		for _, c := range candidates {
+		for _, c := range pluginPathCandidates("stem_lemma.py") {
 			if _, err := os.Stat(c); err == nil {
 				scriptPath = c
 				break

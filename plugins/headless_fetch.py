@@ -173,20 +173,22 @@ def fetch(url: str, timeout_ms: int, wait_selector: str | None, user_agent: str 
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-infobars",
-                    "--window-size=1920,1080",
-                    "--start-maximized",
-                    "--lang=en-US,en",
-                ],
-            )
+            launch_args = [
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--window-size=1920,1080",
+                "--start-maximized",
+                "--lang=en-US,en",
+            ]
+            chrome = os.environ.get("PLAYWRIGHT_CHROME_PATH", "/usr/bin/google-chrome")
+            launch_opts = {"headless": True, "args": launch_args}
+            if os.path.exists(chrome):
+                launch_opts["executable_path"] = chrome
+            browser = p.chromium.launch(**launch_opts)
 
             # Default User-Agent if none provided
             effective_ua = user_agent or (

@@ -216,16 +216,16 @@
                                                 class="inline-flex items-center px-2.5 py-1.5 text-xs font-medium rounded bg-yellow-100 text-yellow-700 hover:bg-yellow-200 transition">
                                                 ⏸ Pause
                                             </button>
-                                            <button onclick="stopJob()"
+                                            <button onclick="stopJob('{{.ID}}')"
                                                 class="inline-flex items-center px-2.5 py-1.5 text-xs font-medium rounded bg-red-100 text-red-700 hover:bg-red-200 transition">
                                                 ⏹ Stop
                                             </button>
                                             {{else if eq .Status "paused"}}
-                                            <button onclick="resumeJob()"
+                                            <button onclick="resumeJob('{{.ID}}')"
                                                 class="inline-flex items-center px-2.5 py-1.5 text-xs font-medium rounded bg-green-100 text-green-700 hover:bg-green-200 transition">
                                                 ▶ Resume
                                             </button>
-                                            <button onclick="stopJob()"
+                                            <button onclick="stopJob('{{.ID}}')"
                                                 class="inline-flex items-center px-2.5 py-1.5 text-xs font-medium rounded bg-red-100 text-red-700 hover:bg-red-200 transition">
                                                 ⏹ Stop
                                             </button>
@@ -408,8 +408,12 @@
             location.reload();
         }
 
-        async function stopJob() {
-            await apiCall('POST', '/api/jobs/stop');
+        async function stopJob(id) {
+            if (id) {
+                await apiCall('POST', `/api/jobs/${id}/stop`);
+            } else {
+                await apiCall('POST', '/api/jobs/stop');
+            }
             location.reload();
         }
 
@@ -418,8 +422,12 @@
             location.reload();
         }
 
-        async function resumeJob() {
-            await apiCall('POST', '/api/jobs/resume');
+        async function resumeJob(id) {
+            if (id) {
+                await apiCall('POST', `/api/jobs/${id}/resume`);
+            } else {
+                await apiCall('POST', '/api/jobs/resume');
+            }
             location.reload();
         }
 
