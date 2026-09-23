@@ -42,6 +42,10 @@
                     <p class="text-gray-500 mt-1">Domain: <span class="font-semibold">{{.job.Domain}}</span></p>
                     <p class="text-gray-400 text-sm">Job ID: {{.job.ID}}</p>
                 </div>
+                <button type="button" onclick="deleteDiscovery()"
+                    class="px-3 py-2 text-sm font-medium rounded-md bg-red-100 text-red-700 hover:bg-red-200">
+                    Delete
+                </button>
             </div>
 
             <!-- Stats Grid -->
@@ -95,6 +99,10 @@
                             🕷 Start Crawl
                         </button>
                         {{end}}
+                        <button onclick="scanPortsForSubdomain({{printf "%q" .Subdomain}})"
+                                class="inline-flex items-center text-teal-600 hover:text-teal-800 text-sm font-medium">
+                            🔌 Scan Ports
+                        </button>
                     </div>
                 </div>
                 {{end}}
@@ -113,6 +121,14 @@
     </div>
 
     <script>
+        async function deleteDiscovery() {
+            if (!confirm('Delete this discovery job and its subdomains? Linked crawl jobs are kept.')) return;
+            const res = await fetch('/api/discovery/{{.job.ID}}', { method: 'DELETE' });
+            const data = await res.json();
+            if (data.success) window.location.href = '/discovery';
+            else alert('Failed to delete: ' + (data.error || 'Unknown error'));
+        }
+
         window.startCrawlForSubdomain = async function(subdomainId) {
             try {
                 const response = await fetch(`/api/subdomains/${subdomainId}/crawl`, {
@@ -129,6 +145,24 @@
                 }
             } catch (e) {
                 alert('Error creating crawl job: ' + e.message);
+            }
+        };
+
+        window.scanPortsForSubdomain = async function(target) {
+            try {
+                const response = await fetch('/api/ports', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ target: target })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    window.location.href = '/ports/' + data.data.id;
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error starting port scan: ' + e.message);
             }
         };
 

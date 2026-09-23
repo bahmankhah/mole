@@ -1,0 +1,22 @@
+{{define "pagination"}}
+{{if gt .totalPages 1}}
+<div class="flex flex-wrap items-center justify-center gap-2 mt-6">
+    {{if gt .page 1}}
+    <a href="{{.pageBase}}page={{subtract .page 1}}"
+        class="px-4 py-2 bg-white rounded-lg shadow hover:bg-gray-50 transition text-sm">
+        ← Previous
+    </a>
+    {{end}}
+    {{range pages .page .totalPages}}
+    <a href="{{$.pageBase}}page={{.}}"
+        class="px-3 py-2 rounded-lg shadow text-sm {{if eq . $.page}}bg-indigo-600 text-white{{else}}bg-white hover:bg-gray-50{{end}}">{{.}}</a>
+    {{end}}
+    {{if lt .page .totalPages}}
+    <a href="{{.pageBase}}page={{add .page 1}}"
+        class="px-4 py-2 bg-white rounded-lg shadow hover:bg-gray-50 transition text-sm">
+        Next →
+    </a>
+    {{end}}
+</div>
+{{end}}
+{{end}}

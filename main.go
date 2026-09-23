@@ -114,6 +114,13 @@ func main() {
 	router.GET("/", handler.Index)
 	router.GET("/search", handler.SearchPage)
 	router.GET("/phrases", handler.PhrasesPage)
+	router.GET("/jobs", handler.JobsPage)
+	router.GET("/discovery", handler.DiscoveryJobsPage)
+	router.GET("/ports", handler.PortScansPage)
+	router.GET("/jobs/:id/pages/:pageId", func(c *gin.Context) {
+		c.Request.Header.Set("Accept", "text/html")
+		handler.GetCrawledPage(c)
+	})
 	router.GET("/jobs/:id", func(c *gin.Context) {
 		c.Request.Header.Set("Accept", "text/html")
 		handler.GetJob(c)
@@ -121,6 +128,10 @@ func main() {
 	router.GET("/discovery/:id", func(c *gin.Context) {
 		c.Request.Header.Set("Accept", "text/html")
 		handler.GetDiscoveryJob(c)
+	})
+	router.GET("/ports/:id", func(c *gin.Context) {
+		c.Request.Header.Set("Accept", "text/html")
+		handler.GetPortScan(c)
 	})
 
 	// API routes
@@ -143,6 +154,14 @@ func main() {
 		api.GET("/discovery", handler.GetDiscoveryJobs)
 		api.GET("/discovery/:id", handler.GetDiscoveryJob)
 		api.POST("/discovery", handler.CreateDiscoveryJob)
+		api.DELETE("/discovery/:id", handler.DeleteDiscoveryJob)
+
+		// Port scans
+		api.GET("/ports", handler.GetPortScans)
+		api.GET("/ports/:id", handler.GetPortScan)
+		api.POST("/ports", handler.CreatePortScan)
+		api.POST("/ports/:id/stop", handler.StopPortScan)
+		api.DELETE("/ports/:id", handler.DeletePortScan)
 
 		// Subdomains
 		api.POST("/jobs/:id/subdomains/discover", handler.StartSubdomainDiscovery)
@@ -151,6 +170,7 @@ func main() {
 
 		// Crawled pages
 		api.GET("/jobs/:id/pages", handler.GetCrawledPages)
+		api.GET("/jobs/:id/pages/:pageId", handler.GetCrawledPage)
 
 		// Extracted phrases per job
 		api.GET("/jobs/:id/extracted-phrases", handler.GetJobExtractedPhrases)
@@ -169,6 +189,7 @@ func main() {
 		api.GET("/phrases", handler.GetPhrases)
 		api.POST("/phrases", handler.AddPhrase)
 		api.PUT("/phrases/:id", handler.UpdatePhrase)
+		api.DELETE("/phrases", handler.DeleteAllPhrases)
 		api.DELETE("/phrases/:id", handler.DeletePhrase)
 
 		// Job settings

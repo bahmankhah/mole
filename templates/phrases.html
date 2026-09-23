@@ -30,7 +30,15 @@
     <div class="max-w-7xl mx-auto px-4 py-8">
         <!-- Add Phrase Form -->
         <div class="bg-white rounded-lg shadow p-6 mb-8">
-            <h1 class="text-3xl font-bold text-gray-800 mb-4">📋 Search Phrases</h1>
+            <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4 mb-4">
+                <h1 class="text-3xl font-bold text-gray-800">📋 Search Phrases</h1>
+                {{if gt .total 0}}
+                <button type="button" onclick="deleteAllPhrases()"
+                    class="px-4 py-2 rounded-lg bg-red-100 text-red-700 hover:bg-red-200 transition text-sm font-medium self-start">
+                    Delete all
+                </button>
+                {{end}}
+            </div>
             <form method="POST" action="/api/phrases" class="flex gap-4">
                 <input type="text" name="phrase" placeholder="Add a new search phrase..."
                     class="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-lg"
@@ -45,7 +53,8 @@
         {{if .phrases}}
         <!-- Summary -->
         <div class="mb-4 text-gray-600">
-            <span class="font-semibold text-gray-800">{{len .phrases}}</span> search phrase{{if ne (len .phrases) 1}}s{{end}} configured
+            Showing <span class="font-semibold text-gray-800">{{.from}}</span>–<span class="font-semibold text-gray-800">{{.to}}</span>
+            of <span class="font-semibold text-gray-800">{{.total}}</span> search phrase{{if ne .total 1}}s{{end}}
         </div>
 
         <!-- Phrases List -->
@@ -97,6 +106,8 @@
             {{end}}
         </div>
 
+        {{template "pagination" .}}
+
         {{else}}
         <!-- Empty State -->
         <div class="bg-white rounded-lg shadow p-12 text-center">
@@ -138,6 +149,22 @@
                     location.reload();
                 } else {
                     alert('Failed to delete phrase: ' + (data.error || 'Unknown error'));
+                }
+            } catch (err) {
+                alert('Error: ' + err.message);
+            }
+        }
+
+        async function deleteAllPhrases() {
+            if (!confirm('Delete ALL search phrases? This cannot be undone. Existing crawl matches will not be removed.')) return;
+            if (!confirm('Really delete every phrase?')) return;
+            try {
+                const res = await fetch('/api/phrases', { method: 'DELETE' });
+                const data = await res.json();
+                if (data.success) {
+                    location.href = '/phrases';
+                } else {
+                    alert('Failed to delete phrases: ' + (data.error || 'Unknown error'));
                 }
             } catch (err) {
                 alert('Error: ' + err.message);

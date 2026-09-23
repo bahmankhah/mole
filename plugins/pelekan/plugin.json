@@ -1,0 +1,6 @@
+{
+  "name": "Pelekan",
+  "description": "Turn Peleyad question-list pages into an Azmoon question import file.",
+  "version": "1.0.0",
+  "after_crawl": "after_crawl.py"
+}

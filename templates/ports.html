@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ports: {{.job.Target}} - Mole</title>
+    <script src="/static/js/tailwind.js"></script>
+    <style>
+        .status-pending { color: #f59e0b; }
+        .status-running { color: #0d9488; animation: pulse 2s infinite; }
+        .status-completed { color: #059669; }
+        .status-failed { color: #ef4444; }
+        .status-cancelled { color: #6b7280; }
+        tr.has-risk { box-shadow: inset 3px 0 0 #d97706; }
+        .risk-flag {
+            display: inline-flex;
+            align-items: center;
+            border-radius: 9999px;
+            background: #fef3c7;
+            color: #92400e;
+            font-size: 0.75rem;
+            font-weight: 600;
+            line-height: 1;
+            padding: 0.35rem 0.6rem;
+            cursor: pointer;
+        }
+        .risk-flag:hover, .risk-flag:focus { background: #fde68a; outline: none; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.55; }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <nav class="bg-indigo-600 text-white shadow-lg">
+        <div class="max-w-7xl mx-auto px-4 py-4">
+            <div class="flex items-center justify-between gap-4">
+                <div class="flex items-center space-x-4 min-w-0">
+                    <a href="/" class="text-2xl font-bold hover:text-indigo-200 flex items-center gap-2 shrink-0"><svg class="w-7 h-7" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><ellipse cx="32" cy="38" rx="26" ry="20" fill="#6B4226"/><ellipse cx="32" cy="30" rx="18" ry="16" fill="#8B5E3C"/><ellipse cx="32" cy="28" rx="10" ry="8" fill="#D4A76A"/><circle cx="26" cy="26" r="3" fill="#1a1a2e"/><circle cx="38" cy="26" r="3" fill="#1a1a2e"/><circle cx="27" cy="26.5" r="1" fill="white"/><circle cx="39" cy="26.5" r="1" fill="white"/><ellipse cx="32" cy="31" rx="4" ry="3" fill="#FF8FA3"/><ellipse cx="22" cy="20" rx="5" ry="3" fill="#8B5E3C" transform="rotate(-20 22 20)"/><ellipse cx="42" cy="20" rx="5" ry="3" fill="#8B5E3C" transform="rotate(20 42 20)"/><ellipse cx="15" cy="44" rx="6" ry="4" fill="#6B4226" transform="rotate(-30 15 44)"/><ellipse cx="49" cy="44" rx="6" ry="4" fill="#6B4226" transform="rotate(30 49 44)"/></svg> Mole</a>
+                    <span class="text-indigo-200">/</span>
+                    <span class="truncate">Ports: {{.job.Target}}</span>
+                </div>
+                <span id="nav-status" class="status-{{.job.Status}} text-lg font-semibold capitalize">{{.job.Status}}</span>
+            </div>
+        </div>
+    </nav>
+
+    <div class="max-w-7xl mx-auto px-4 py-8">
+        <div class="bg-white rounded-lg shadow p-6 mb-6">
+            <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between mb-6">
+                <div>
+                    <h1 class="text-3xl font-bold text-gray-800">Port scan</h1>
+                    <p class="text-gray-500 mt-1">Target: <span class="font-semibold text-gray-800">{{.job.Target}}</span>
+                        {{if and .job.ResolvedIP (ne .job.ResolvedIP .job.Target)}}
+                        <span class="text-gray-400">·</span> <span id="resolved-ip">{{.job.ResolvedIP}}</span>
+                        {{else}}
+                        <span id="resolved-ip" class="hidden"></span>
+                        {{end}}
+                    </p>
+                    <p class="text-gray-400 text-sm">Job ID: {{.job.ID}}</p>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    <button id="copy-btn" type="button" onclick="copyPorts()"
+                        class="px-3 py-2 text-sm font-medium rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-40">
+                        Copy open ports
+                    </button>
+                    <button id="stop-btn" type="button" onclick="stopScan()"
+                        class="px-3 py-2 text-sm font-medium rounded-md bg-red-600 text-white hover:bg-red-700 hidden">
+                        Stop scan
+                    </button>
+                    <button id="delete-btn" type="button" onclick="deleteScan()"
+                        class="px-3 py-2 text-sm font-medium rounded-md bg-red-100 text-red-700 hover:bg-red-200 hidden">
+                        Delete
+                    </button>
+                </div>
+            </div>
+
+            <div class="mb-6">
+                <div class="flex items-center justify-between text-sm text-gray-500 mb-2">
+                    <span id="progress-label">Waiting to start</span>
+                    <span id="progress-percent">0%</span>
+                </div>
+                <div class="w-full bg-gray-200 rounded-full h-2.5" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress-wrap">
+                    <div id="progress-bar" class="bg-teal-600 h-2.5 rounded-full transition-all duration-300" style="width:0%"></div>
+                </div>
+                <p id="progress-hint" class="text-xs text-gray-400 mt-2">Important services are checked first. Open ports appear here as soon as they answer.</p>
+            </div>
+
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-gray-500 text-sm">Status</div>
+                    <div id="stat-status" class="text-xl font-bold capitalize status-{{.job.Status}}">{{.job.Status}}</div>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-gray-500 text-sm">Open ports</div>
+                    <div id="stat-open" class="text-2xl font-bold text-teal-700">{{.job.PortsOpen}}</div>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-gray-500 text-sm">Probed</div>
+                    <div id="stat-probed" class="text-2xl font-bold text-gray-800">{{.job.PortsScanned}}<span class="text-base font-medium text-gray-400"> / {{.job.PortsTotal}}</span></div>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-gray-500 text-sm">Finished</div>
+                    <div id="stat-finished" class="text-lg font-medium text-gray-700">{{if .job.CompletedAt}}{{.job.CompletedAt.Format "Jan 02, 15:04"}}{{else}}—{{end}}</div>
+                </div>
+            </div>
+            <p id="error-line" class="mt-4 text-sm text-red-600 {{if not .job.ErrorMessage}}hidden{{end}}">{{.job.ErrorMessage}}</p>
+        </div>
+
+        <div class="bg-white rounded-lg shadow p-6">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
+                <div>
+                    <h2 class="text-xl font-bold text-gray-800">Open ports</h2>
+                    <p id="risk-summary" class="hidden text-sm text-amber-800 mt-1"></p>
+                </div>
+                <input id="filter" type="search" placeholder="Filter by port, service, or banner" oninput="render()"
+                    class="w-full sm:w-72 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-500">
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Port</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Service</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">What answered</th>
+                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Latency</th>
+                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Note</th>
+                        </tr>
+                    </thead>
+                    <tbody id="port-rows" class="divide-y divide-gray-200"></tbody>
+                </table>
+            </div>
+            <p id="empty-state" class="text-center py-12 text-gray-500 hidden"></p>
+            <p class="text-xs text-gray-400 mt-4">Labels are the usual software for that port. The banner is what the service actually sent. A Warning on the right means that open port is often a problem; click it to read why and what to change. Closed and filtered ports are left off the list — a firewall can hide a service that is still running.</p>
+        </div>
+    </div>
+
+    <div id="risk-modal" class="hidden fixed inset-0 z-50" role="dialog" aria-modal="true" aria-labelledby="risk-modal-title">
+        <div class="absolute inset-0 bg-black/40" data-close-risk></div>
+        <div class="relative mx-auto mt-24 w-[min(32rem,calc(100%-2rem))] rounded-lg bg-white shadow-xl p-6">
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <p class="text-xs font-semibold uppercase tracking-wide text-amber-700">Security warning</p>
+                    <h3 id="risk-modal-title" class="text-xl font-bold text-gray-900 mt-1"></h3>
+                </div>
+                <button id="risk-modal-close" type="button" data-close-risk aria-label="Close"
+                    class="text-gray-400 hover:text-gray-700 text-2xl leading-none px-1">&times;</button>
+            </div>
+            <p id="risk-modal-body" class="mt-4 text-sm leading-relaxed text-gray-700"></p>
+        </div>
+    </div>
+
+    <script>
+        const groupClass = {
+            'Remote access': 'bg-red-100 text-red-800',
+            'Web': 'bg-sky-100 text-sky-800',
+            'Database': 'bg-amber-100 text-amber-900',
+            'Mail': 'bg-violet-100 text-violet-800',
+            'Directory': 'bg-indigo-100 text-indigo-800',
+            'File sharing': 'bg-orange-100 text-orange-800',
+            'DevOps': 'bg-teal-100 text-teal-800',
+            'Messaging': 'bg-fuchsia-100 text-fuchsia-800',
+            'Monitoring': 'bg-lime-100 text-lime-900',
+            'Network': 'bg-slate-100 text-slate-700',
+            'Industrial': 'bg-rose-100 text-rose-800',
+            'Media': 'bg-pink-100 text-pink-800',
+            'Proxy': 'bg-cyan-100 text-cyan-800',
+            'Application': 'bg-emerald-100 text-emerald-800',
+            'VPN': 'bg-blue-100 text-blue-800'
+        };
+
+        let state = {{.initial}};
+        let timer = null;
+
+        function esc(value) {
+            return String(value == null ? '' : value).replace(/[&<>"']/g, function (ch) {
+                return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
+            });
+        }
+
+        function fmtTime(value) {
+            if (!value) return '—';
+            const d = new Date(value);
+            if (Number.isNaN(d.getTime())) return '—';
+            return d.toLocaleString(undefined, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+        }
+
+        function visiblePorts() {
+            const q = (document.getElementById('filter').value || '').trim().toLowerCase();
+            const ports = state.ports || [];
+            if (!q) return ports;
+            return ports.filter(function (p) {
+                return [p.port, p.service, p.detail, p.group, p.banner, p.product, p.protocol, p.warning].join(' ').toLowerCase().indexOf(q) !== -1;
+            });
+        }
+
+        function render() {
+            const job = state.job || {};
+            const total = job.ports_total || 0;
+            const scanned = job.ports_scanned || 0;
+            const pct = total ? Math.min(100, Math.round((scanned / total) * 100)) : 0;
+            const running = job.status === 'running' || job.status === 'pending';
+
+            document.getElementById('nav-status').textContent = job.status || '';
+            document.getElementById('nav-status').className = 'text-lg font-semibold capitalize status-' + (job.status || 'pending');
+            const statStatus = document.getElementById('stat-status');
+            statStatus.textContent = job.status || '';
+            statStatus.className = 'text-xl font-bold capitalize status-' + (job.status || 'pending');
+            document.getElementById('stat-open').textContent = job.ports_open || 0;
+            document.getElementById('stat-probed').innerHTML = esc(scanned) + '<span class="text-base font-medium text-gray-400"> / ' + esc(total) + '</span>';
+            document.getElementById('stat-finished').textContent = fmtTime(job.completed_at);
+            document.getElementById('progress-bar').style.width = pct + '%';
+            document.getElementById('progress-wrap').setAttribute('aria-valuenow', String(pct));
+            document.getElementById('progress-percent').textContent = pct + '%';
+            document.getElementById('progress-label').textContent = running
+                ? ('Scanning ' + (job.target || '') + ' · ' + (job.ports_open || 0) + ' open')
+                : (job.status === 'completed' ? 'Scan finished' : (job.status || ''));
+
+            const err = document.getElementById('error-line');
+            if (job.error_message && job.status !== 'completed') {
+                err.textContent = job.error_message;
+                err.classList.remove('hidden');
+            } else {
+                err.textContent = '';
+                err.classList.add('hidden');
+            }
+
+            const stop = document.getElementById('stop-btn');
+            stop.classList.toggle('hidden', !running);
+            if (running) {
+                stop.disabled = false;
+                stop.textContent = 'Stop scan';
+            }
+            document.getElementById('delete-btn').classList.remove('hidden');
+            document.getElementById('copy-btn').disabled = !(state.ports && state.ports.length);
+            const riskCount = (state.ports || []).filter(function (p) { return p.warning; }).length;
+            const riskSummary = document.getElementById('risk-summary');
+            if (riskCount) {
+                riskSummary.textContent = riskCount + (riskCount === 1 ? ' open port needs attention.' : ' open ports need attention.') + ' Click a Warning label to see why and what to change.';
+                riskSummary.classList.remove('hidden');
+            } else {
+                riskSummary.textContent = '';
+                riskSummary.classList.add('hidden');
+            }
+
+            const rows = visiblePorts();
+            const body = document.getElementById('port-rows');
+            const empty = document.getElementById('empty-state');
+            if (!rows.length) {
+                body.innerHTML = '';
+                empty.classList.remove('hidden');
+                const filtering = (document.getElementById('filter').value || '').trim() !== '';
+                if (filtering) {
+                    empty.textContent = 'No open ports match that filter.';
+                } else if (running) {
+                    empty.textContent = 'No open ports yet. The most important services are being checked first.';
+                } else {
+                    empty.textContent = 'No open ports were found on the well-known port list.';
+                }
+                return;
+            }
+            empty.classList.add('hidden');
+            body.innerHTML = rows.map(function (p) {
+                const pill = groupClass[p.group] || 'bg-gray-100 text-gray-700';
+                const detail = p.detail ? '<div class="text-sm text-gray-500 mt-0.5">' + esc(p.detail) + '</div>' : '';
+                const product = p.product ? '<span class="inline-flex mr-2 px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700">' + esc(p.product) + '</span>' : '';
+                const banner = p.banner ? '<span class="text-sm text-gray-600 break-all">' + esc(p.banner) + '</span>' : '<span class="text-sm text-gray-400">No banner</span>';
+                const note = p.warning
+                    ? '<button type="button" class="risk-flag" data-port="' + esc(p.port) + '" aria-label="Security warning for port ' + esc(p.port) + '">Warning</button>'
+                    : '';
+                return '<tr class="' + (p.warning ? 'has-risk ' : '') + 'hover:bg-gray-50">' +
+                    '<td class="px-4 py-3 align-top font-mono text-lg font-semibold text-gray-900">' + esc(p.port) + '<div class="text-xs font-sans font-normal text-gray-400">' + esc(p.protocol || 'tcp') + '</div></td>' +
+                    '<td class="px-4 py-3 align-top"><div class="font-medium text-gray-900">' + esc(p.service) + '</div>' + detail +
+                    (p.group ? '<span class="inline-flex mt-2 px-2 py-0.5 rounded text-xs font-medium ' + pill + '">' + esc(p.group) + '</span>' : '') +
+                    '</td>' +
+                    '<td class="px-4 py-3 align-top">' + product + banner + '</td>' +
+                    '<td class="px-4 py-3 align-top text-right text-sm text-gray-500 whitespace-nowrap">' + (p.latency_ms ? esc(p.latency_ms) + ' ms' : '—') + '</td>' +
+                    '<td class="px-4 py-3 align-top text-right">' + note + '</td>' +
+                    '</tr>';
+            }).join('');
+        }
+
+        function schedule() {
+            if (timer) clearTimeout(timer);
+            const status = state.job && state.job.status;
+            if (status === 'running' || status === 'pending') {
+                timer = setTimeout(refresh, 1000);
+            }
+        }
+
+        async function refresh() {
+            try {
+                const res = await fetch('/api/ports/' + state.job.id, {
+                    headers: { 'Accept': 'application/json' },
+                    cache: 'no-store'
+                });
+                if (res.ok) {
+                    const body = await res.json();
+                    if (body && body.data) {
+                        state.job = body.data.job;
+                        state.ports = body.data.ports || [];
+                        render();
+                    }
+                }
+            } catch (e) {}
+            schedule();
+        }
+
+        async function stopScan() {
+            const btn = document.getElementById('stop-btn');
+            btn.disabled = true;
+            btn.textContent = 'Stopping…';
+            try {
+                await fetch('/api/ports/' + state.job.id + '/stop', { method: 'POST' });
+            } catch (e) {}
+            if (timer) clearTimeout(timer);
+            refresh();
+        }
+
+        async function deleteScan() {
+            if (!confirm('Delete this port scan and its results?')) return;
+            const res = await fetch('/api/ports/' + state.job.id, { method: 'DELETE' });
+            const data = await res.json();
+            if (data.success) window.location.href = '/ports';
+            else alert('Failed to delete: ' + (data.error || 'Unknown error'));
+        }
+
+        function copyPorts() {
+            const lines = (state.ports || []).map(function (p) {
+                const bits = [p.port + '/' + (p.protocol || 'tcp'), p.service];
+                if (p.detail) bits.push(p.detail);
+                if (p.banner) bits.push(p.banner);
+                if (p.warning) bits.push('WARNING: ' + p.warning);
+                return bits.join('  ');
+            });
+            const text = lines.join('\n');
+            const done = function () {
+                const btn = document.getElementById('copy-btn');
+                const prev = btn.textContent;
+                btn.textContent = 'Copied';
+                setTimeout(function () { btn.textContent = prev; }, 1200);
+            };
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(done).catch(function () { fallbackCopy(text); done(); });
+                return;
+            }
+            fallbackCopy(text);
+            done();
+        }
+
+        function fallbackCopy(text) {
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.setAttribute('readonly', '');
+            area.style.position = 'absolute';
+            area.style.left = '-9999px';
+            document.body.appendChild(area);
+            area.select();
+            document.execCommand('copy');
+            area.remove();
+        }
+
+        const portRows = document.getElementById('port-rows');
+        const riskModal = document.getElementById('risk-modal');
+        let riskReturnFocus = null;
+
+        function openRisk(port, trigger) {
+            const found = (state.ports || []).find(function (p) { return String(p.port) === String(port); });
+            if (!found || !found.warning) return;
+            document.getElementById('risk-modal-title').textContent = found.port + ' ' + (found.service || '');
+            document.getElementById('risk-modal-body').textContent = found.warning;
+            riskReturnFocus = trigger || null;
+            riskModal.classList.remove('hidden');
+            document.getElementById('risk-modal-close').focus();
+        }
+
+        function closeRisk() {
+            if (riskModal.classList.contains('hidden')) return;
+            riskModal.classList.add('hidden');
+            if (riskReturnFocus && riskReturnFocus.focus) riskReturnFocus.focus();
+            riskReturnFocus = null;
+        }
+
+        portRows.addEventListener('click', function (event) {
+            const el = event.target.closest && event.target.closest('.risk-flag');
+            if (!el) return;
+            openRisk(el.getAttribute('data-port'), el);
+        });
+        riskModal.addEventListener('click', function (event) {
+            if (event.target.closest('[data-close-risk]')) closeRisk();
+        });
+        document.addEventListener('keydown', function (event) {
+            if (event.key === 'Escape') closeRisk();
+        });
+
+        render();
+        schedule();
+    </script>
+</body>
+</html>

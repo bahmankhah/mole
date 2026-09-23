@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {{if .notFound}}
+    <title>Page not found - Mole</title>
+    {{else}}
+    <title>{{if .page.Title}}{{.page.Title}}{{else}}Crawled page{{end}} - Mole</title>
+    {{end}}
+    <script src="/static/js/tailwind.js"></script>
+    <style>
+        .badge-content { background:#dbeafe; color:#1e40af; }
+        .badge-url    { background:#fef3c7; color:#92400e; }
+        .badge-anchor { background:#d1fae5; color:#065f46; }
+        .prop-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; font-weight: 600; }
+        .prop-value { font-size: 0.875rem; color: #111827; word-break: break-all; }
+        pre.page-body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+        pre.page-body.nowrap { white-space: pre; word-break: normal; overflow-x: auto; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <nav class="bg-indigo-600 text-white shadow-lg">
+        <div class="max-w-7xl mx-auto px-4 py-4">
+            <div class="flex items-center justify-between gap-4">
+                <div class="flex items-center space-x-3 min-w-0">
+                    <a href="/" class="text-2xl font-bold hover:text-indigo-200 flex items-center gap-2 flex-shrink-0"><svg class="w-7 h-7" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><ellipse cx="32" cy="38" rx="26" ry="20" fill="#6B4226"/><ellipse cx="32" cy="30" rx="18" ry="16" fill="#8B5E3C"/><ellipse cx="32" cy="28" rx="10" ry="8" fill="#D4A76A"/><circle cx="26" cy="26" r="3" fill="#1a1a2e"/><circle cx="38" cy="26" r="3" fill="#1a1a2e"/><circle cx="27" cy="26.5" r="1" fill="white"/><circle cx="39" cy="26.5" r="1" fill="white"/><ellipse cx="32" cy="31" rx="4" ry="3" fill="#FF8FA3"/><ellipse cx="22" cy="20" rx="5" ry="3" fill="#8B5E3C" transform="rotate(-20 22 20)"/><ellipse cx="42" cy="20" rx="5" ry="3" fill="#8B5E3C" transform="rotate(20 42 20)"/><ellipse cx="15" cy="44" rx="6" ry="4" fill="#6B4226" transform="rotate(-30 15 44)"/><ellipse cx="49" cy="44" rx="6" ry="4" fill="#6B4226" transform="rotate(30 49 44)"/></svg> Mole</a>
+                    <span class="text-indigo-200">/</span>
+                    {{if .job}}
+                    <a href="/jobs/{{.job.ID}}#pages" class="text-indigo-100 hover:text-white truncate max-w-[12rem] sm:max-w-xs" title="{{.job.Domain}}">{{.job.Domain}}</a>
+                    {{else}}
+                    <a href="/jobs/{{.jobID}}#pages" class="text-indigo-100 hover:text-white">Job</a>
+                    {{end}}
+                    <span class="text-indigo-200">/</span>
+                    <span class="truncate">Page</span>
+                </div>
+                <div class="flex items-center space-x-4 flex-shrink-0">
+                    <a href="/phrases" class="text-indigo-200 hover:text-white transition text-sm">📋 Phrases</a>
+                    <a href="/search" class="text-indigo-200 hover:text-white transition text-sm">🔎 Search</a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="max-w-7xl mx-auto px-4 py-8">
+        {{if .notFound}}
+        <div class="bg-white rounded-lg shadow p-12 text-center">
+            <p class="text-lg text-gray-800 font-semibold">This crawled page was not found</p>
+            <p class="text-sm text-gray-500 mt-2">It may have been archived or belong to a different job.</p>
+            {{if .jobID}}
+            <a href="/jobs/{{.jobID}}#pages" class="inline-block mt-6 px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm">Back to crawled pages</a>
+            {{else}}
+            <a href="/" class="inline-block mt-6 px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm">Back to dashboard</a>
+            {{end}}
+        </div>
+        {{else}}
+        <div class="mb-4">
+            <a href="/jobs/{{.page.CrawlJobID}}#pages" class="text-sm text-indigo-600 hover:text-indigo-800">← Crawled pages</a>
+        </div>
+
+        <div class="bg-white rounded-lg shadow p-6 mb-6">
+            <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+                <div class="min-w-0 flex-1">
+                    <div class="flex flex-wrap items-center gap-2 mb-2">
+                        <span class="px-2 py-1 rounded text-xs font-medium {{.statusClass}}">{{.page.StatusCode}}</span>
+                        {{if .page.ContentType}}<span class="px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-700">{{.page.ContentType}}</span>{{end}}
+                        <span class="px-2 py-1 rounded text-xs font-medium bg-indigo-50 text-indigo-700">Depth {{.page.Depth}}</span>
+                    </div>
+                    <h1 class="text-2xl font-bold text-gray-800 break-words">{{if .page.Title}}{{.page.Title}}{{else}}Untitled page{{end}}</h1>
+                    <a href="{{.page.URL}}" target="_blank" rel="noopener noreferrer" class="mt-2 text-blue-600 hover:text-blue-800 text-sm break-all inline-block">{{.page.URL}}</a>
+                    {{if .page.ErrorMessage}}
+                    <div class="mt-4 p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-800 break-words">{{.page.ErrorMessage}}</div>
+                    {{end}}
+                </div>
+                <div class="flex flex-wrap gap-2 flex-shrink-0">
+                    <a href="{{.page.URL}}" target="_blank" rel="noopener noreferrer" class="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm">Open URL</a>
+                    <a href="/jobs/{{.page.CrawlJobID}}" class="px-4 py-2 border border-gray-300 text-gray-700 rounded-md hover:bg-gray-50 text-sm">View job</a>
+                </div>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mt-6">
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-gray-500 text-sm">Size</div>
+                    <div class="text-xl font-bold text-gray-800">{{.sizeLabel}}</div>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-gray-500 text-sm">Response</div>
+                    <div class="text-xl font-bold text-gray-800">{{.page.ResponseTime}} ms</div>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-gray-500 text-sm">Crawled</div>
+                    <div class="text-sm font-semibold text-gray-800 mt-1">{{.page.CrawledAt.Format "Jan 02, 2006 15:04:05"}}</div>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-gray-500 text-sm">Matches</div>
+                    <div class="text-xl font-bold text-green-600">{{.matchTotal}}</div>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-gray-500 text-sm">Page ID</div>
+                    <div class="text-xl font-bold text-gray-800">{{.page.ID}}</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-white rounded-lg shadow p-6 mb-6">
+            <h2 class="text-lg font-semibold text-gray-800 mb-4">Properties</h2>
+            <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
+                <div>
+                    <dt class="prop-label">Normalized URL</dt>
+                    <dd class="prop-value mt-1 font-mono">{{if .page.NormalizedURL}}{{.page.NormalizedURL}}{{else}}—{{end}}</dd>
+                </div>
+                <div>
+                    <dt class="prop-label">Parent URL</dt>
+                    <dd class="prop-value mt-1 font-mono">{{if .page.ParentURL}}{{.page.ParentURL}}{{else}}—{{end}}</dd>
+                </div>
+                <div>
+                    <dt class="prop-label">URL hash</dt>
+                    <dd class="mt-1 flex items-start gap-2">
+                        <span class="prop-value font-mono flex-1">{{if .page.URLHash}}{{.page.URLHash}}{{else}}—{{end}}</span>
+                        {{if .page.URLHash}}<button type="button" data-copy="{{.page.URLHash}}" onclick="copyText(this.getAttribute('data-copy'), this)" class="text-xs text-indigo-600 hover:text-indigo-800 flex-shrink-0">Copy</button>{{end}}
+                    </dd>
+                </div>
+                <div>
+                    <dt class="prop-label">Document hash</dt>
+                    <dd class="mt-1 flex items-start gap-2">
+                        <span class="prop-value font-mono flex-1">{{if .page.DocHash}}{{.page.DocHash}}{{else}}—{{end}}</span>
+                        {{if .page.DocHash}}<button type="button" data-copy="{{.page.DocHash}}" onclick="copyText(this.getAttribute('data-copy'), this)" class="text-xs text-indigo-600 hover:text-indigo-800 flex-shrink-0">Copy</button>{{end}}
+                    </dd>
+                </div>
+                <div>
+                    <dt class="prop-label">Job ID</dt>
+                    <dd class="prop-value mt-1 font-mono"><a href="/jobs/{{.page.CrawlJobID}}" class="text-indigo-600 hover:text-indigo-800">{{.page.CrawlJobID}}</a></dd>
+                </div>
+                <div>
+                    <dt class="prop-label">Content length</dt>
+                    <dd class="prop-value mt-1">{{.page.ContentLength}} bytes ({{.sizeLabel}})</dd>
+                </div>
+            </dl>
+        </div>
+
+        <div class="bg-white rounded-lg shadow p-6 mb-6">
+            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+                <div>
+                    <h2 class="text-lg font-semibold text-gray-800">Saved content</h2>
+                    {{if .hasText}}
+                    <p class="text-xs text-gray-500 mt-1">{{.textLen}} characters{{if .isJSON}} · pretty-printed JSON{{else if .isHTML}} · HTML{{end}}</p>
+                    {{end}}
+                </div>
+                {{if .hasText}}
+                <div class="flex items-center gap-2">
+                    <button type="button" id="wrap-btn" onclick="toggleWrap()" class="px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-50">Unwrap</button>
+                    <button type="button" onclick="copyBody(this)" class="px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-50">Copy</button>
+                </div>
+                {{end}}
+            </div>
+            {{if .hasText}}
+            <div class="border border-gray-200 rounded-lg bg-gray-50 max-h-[36rem] overflow-auto">
+                <pre id="page-body" class="page-body p-4 text-gray-800">{{.displayText}}</pre>
+            </div>
+            {{else}}
+            <div class="text-center py-10 px-4 border border-dashed border-gray-200 rounded-lg">
+                <p class="text-gray-700 font-medium">No body was stored for this page</p>
+                <p class="text-sm text-gray-500 mt-2">Turn on <strong>Save Text Content</strong> in the job settings and recrawl to keep HTML, JSON, or other text bodies here.</p>
+            </div>
+            {{end}}
+        </div>
+
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-lg font-semibold text-gray-800 mb-4">Phrase matches ({{.matchTotal}})</h2>
+            {{if .matches}}
+            <div class="overflow-auto max-h-[28rem]">
+                <table class="w-full">
+                    <thead class="bg-gray-50 sticky top-0">
+                        <tr>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Phrase</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Context</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-200">
+                        {{range .matches}}
+                        <tr class="hover:bg-gray-50">
+                            <td class="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">{{.FoundAt.Format "Jan 02 15:04:05"}}</td>
+                            <td class="px-4 py-3"><span class="px-2 py-1 bg-yellow-100 text-yellow-800 rounded text-sm font-medium">{{.Phrase}}</span></td>
+                            <td class="px-4 py-3"><span class="px-2 py-0.5 rounded text-xs font-medium {{if eq .MatchType "url"}}badge-url{{else if eq .MatchType "anchor"}}badge-anchor{{else}}badge-content{{end}}">{{if .MatchType}}{{.MatchType}}{{else}}content{{end}}</span></td>
+                            <td class="px-4 py-3 text-center"><span class="font-bold text-green-600">{{.Occurrences}}</span></td>
+                            <td class="px-4 py-3 text-sm text-gray-600 max-w-lg" title="{{.Context}}">{{if .Context}}{{.Context}}{{else}}—{{end}}</td>
+                        </tr>
+                        {{end}}
+                    </tbody>
+                </table>
+            </div>
+            {{else}}
+            <p class="text-sm text-gray-500">No phrase matches on this page.</p>
+            {{end}}
+        </div>
+        {{end}}
+    </div>
+    <script>
+        function copyText(text, btn){
+            if(!text) return;
+            navigator.clipboard.writeText(text).then(function(){
+                if(!btn) return;
+                var orig=btn.textContent;btn.textContent='Copied';
+                setTimeout(function(){btn.textContent=orig;},1200);
+            });
+        }
+        function copyBody(btn){
+            var el=document.getElementById('page-body');
+            if(!el) return;
+            copyText(el.textContent, btn);
+        }
+        function toggleWrap(){
+            var pre=document.getElementById('page-body');
+            var btn=document.getElementById('wrap-btn');
+            if(!pre||!btn) return;
+            pre.classList.toggle('nowrap');
+            btn.textContent=pre.classList.contains('nowrap')?'Wrap':'Unwrap';
+        }
+    </script>
+</body>
+</html>

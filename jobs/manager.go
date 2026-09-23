@@ -28,6 +28,7 @@ type Manager struct {
 	stemmer          *modules.Stemmer
 	wordExtractor    *modules.WordExtractor
 	subdomainScanner *modules.SubdomainScanner
+	portScanner      *modules.PortScanner
 
 	mu              sync.Mutex
 	activeJob       *models.CrawlJob
@@ -35,6 +36,8 @@ type Manager struct {
 	closed          bool
 	subdomainCtx    context.Context
 	subdomainCancel context.CancelFunc
+	portScanMu      sync.Mutex
+	portScans       map[string]context.CancelFunc
 }
 
 // NewManager creates a new job manager
@@ -49,6 +52,8 @@ func NewManager(db *gorm.DB, cfg *config.Config, engine *crawler.Engine) *Manage
 		stemmer:          engine.GetStemmer(),
 		wordExtractor:    engine.GetWordExtractor(),
 		subdomainScanner: scanner,
+		portScanner:      modules.NewPortScanner(cfg.PortScan),
+		portScans:        map[string]context.CancelFunc{},
 	}
 
 	engine.SetOnIdle(m.onEngineIdle)
@@ -92,6 +97,8 @@ func (m *Manager) cleanupStaleJobs() {
 			"status":        models.JobStatusCancelled,
 			"error_message": "Job interrupted by server restart",
 		})
+
+	m.abandonStalePortScans()
 }
 
 // CreateJob creates a new crawl job for a URL or domain
@@ -675,6 +682,7 @@ func (m *Manager) GetCrawledPages(jobID string, limit, offset int) ([]models.Cra
 	m.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ? AND is_archived = ?", jobID, false).Count(&total)
 
 	if err := m.db.Where("crawl_job_id = ? AND is_archived = ?", jobID, false).
+		Omit("TextContent").
 		Order("crawled_at DESC").
 		Limit(limit).
 		Offset(offset).
@@ -683,6 +691,34 @@ func (m *Manager) GetCrawledPages(jobID string, limit, offset int) ([]models.Cra
 	}
 
 	return pages, total, nil
+}
+
+// GetCrawledPage retrieves a single crawled page that belongs to a job.
+func (m *Manager) GetCrawledPage(jobID string, pageID uint) (*models.CrawledPage, error) {
+	var page models.CrawledPage
+	if err := m.db.Where("id = ? AND crawl_job_id = ? AND is_archived = ?", pageID, jobID, false).
+		First(&page).Error; err != nil {
+		return nil, err
+	}
+	return &page, nil
+}
+
+// GetPagePhraseMatches retrieves phrase matches for a crawled page.
+func (m *Manager) GetPagePhraseMatches(jobID string, pageID uint, limit int) ([]models.PhraseMatch, int64, error) {
+	var matches []models.PhraseMatch
+	var total int64
+	where := m.db.Model(&models.PhraseMatch{}).Where("crawl_job_id = ? AND page_id = ? AND is_archived = ?", jobID, pageID, false)
+	where.Count(&total)
+	if limit <= 0 {
+		limit = 100
+	}
+	if err := m.db.Where("crawl_job_id = ? AND page_id = ? AND is_archived = ?", jobID, pageID, false).
+		Order("found_at DESC").
+		Limit(limit).
+		Find(&matches).Error; err != nil {
+		return nil, 0, err
+	}
+	return matches, total, nil
 }
 
 // GetJobStats retrieves statistics for a job
@@ -725,6 +761,13 @@ func (m *Manager) GetSearchPhrases() ([]models.SearchPhrase, error) {
 	return phrases, nil
 }
 
+// CountSearchPhrases returns how many search phrases are stored.
+func (m *Manager) CountSearchPhrases() (int64, error) {
+	var total int64
+	err := m.db.Model(&models.SearchPhrase{}).Count(&total).Error
+	return total, err
+}
+
 // GetRecentSearchPhrases retrieves the most recent search phrases up to the given limit
 func (m *Manager) GetRecentSearchPhrases(limit int) ([]models.SearchPhrase, error) {
 	var phrases []models.SearchPhrase
@@ -734,36 +777,65 @@ func (m *Manager) GetRecentSearchPhrases(limit int) ([]models.SearchPhrase, erro
 	return phrases, nil
 }
 
-// GetSearchPhrasesWithStats retrieves all search phrases with match and URL counts
-func (m *Manager) GetSearchPhrasesWithStats() ([]models.PhraseWithStats, error) {
-	var results []models.PhraseWithStats
-
-	err := m.db.Raw(`
-		SELECT 
-			sp.id,
-			sp.phrase,
-			sp.is_active,
-			sp.created_at,
-			sp.crawl_job_id,
-			COALESCE(stats.match_count, 0) AS match_count,
-			COALESCE(stats.url_count, 0) AS url_count
-		FROM search_phrases sp
-		LEFT JOIN (
-			SELECT 
-				phrase,
-				SUM(occurrences) AS match_count,
-				COUNT(DISTINCT url) AS url_count
-			FROM phrase_matches
-			WHERE is_archived = 0
-			GROUP BY phrase
-		) stats ON sp.phrase = stats.phrase
-		ORDER BY match_count DESC, sp.phrase ASC
-	`).Scan(&results).Error
-
-	if err != nil {
-		return nil, err
+// GetSearchPhrasesWithStats retrieves a page of search phrases with match and URL counts.
+func (m *Manager) GetSearchPhrasesWithStats(limit, offset int) ([]models.PhraseWithStats, int64, error) {
+	var total int64
+	if err := m.db.Model(&models.SearchPhrase{}).Count(&total).Error; err != nil {
+		return nil, 0, err
 	}
-	return results, nil
+
+	if limit <= 0 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	var phrases []models.SearchPhrase
+	if err := m.db.Order("created_at DESC").Limit(limit).Offset(offset).Find(&phrases).Error; err != nil {
+		return nil, 0, err
+	}
+	if len(phrases) == 0 {
+		return nil, total, nil
+	}
+
+	texts := make([]string, len(phrases))
+	for i, p := range phrases {
+		texts[i] = p.Phrase
+	}
+
+	type statRow struct {
+		Phrase     string
+		MatchCount int64
+		URLCount   int64
+	}
+	var stats []statRow
+	if err := m.db.Model(&models.PhraseMatch{}).
+		Select("phrase, SUM(occurrences) AS match_count, COUNT(DISTINCT url) AS url_count").
+		Where("is_archived = ? AND phrase IN ?", false, texts).
+		Group("phrase").
+		Scan(&stats).Error; err != nil {
+		return nil, 0, err
+	}
+	statMap := make(map[string]statRow, len(stats))
+	for _, s := range stats {
+		statMap[s.Phrase] = s
+	}
+
+	results := make([]models.PhraseWithStats, len(phrases))
+	for i, p := range phrases {
+		s := statMap[p.Phrase]
+		results[i] = models.PhraseWithStats{
+			ID:         p.ID,
+			Phrase:     p.Phrase,
+			IsActive:   p.IsActive,
+			CreatedAt:  p.CreatedAt.Format(time.RFC3339),
+			MatchCount: s.MatchCount,
+			URLCount:   s.URLCount,
+			CrawlJobID: p.CrawlJobID,
+		}
+	}
+	return results, total, nil
 }
 
 // AddSearchPhrase adds a new search phrase.
@@ -801,6 +873,25 @@ func (m *Manager) UpdateSearchPhrase(id uint, isActive bool) error {
 // DeleteSearchPhrase deletes a search phrase
 func (m *Manager) DeleteSearchPhrase(id uint) error {
 	return m.db.Delete(&models.SearchPhrase{}, "id = ?", id).Error
+}
+
+// DeleteAllSearchPhrases removes every search phrase. Phrase matches are left in place.
+func (m *Manager) DeleteAllSearchPhrases() error {
+	return m.db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.SearchPhrase{}).Error
+}
+
+// DeleteDiscoveryJob removes a discovery job and its subdomains. Linked crawl jobs are unlinked, not deleted.
+func (m *Manager) DeleteDiscoveryJob(jobID string) error {
+	var job models.DiscoveryJob
+	if err := m.db.First(&job, "id = ?", jobID).Error; err != nil {
+		return err
+	}
+	if job.Status == models.JobStatusRunning {
+		m.StopSubdomainDiscovery()
+	}
+	m.db.Model(&models.CrawlJob{}).Where("discovery_job_id = ?", jobID).Update("discovery_job_id", "")
+	m.db.Where("discovery_job_id = ?", jobID).Delete(&models.Subdomain{})
+	return m.db.Delete(&models.DiscoveryJob{}, "id = ?", jobID).Error
 }
 
 // GetJobExtractedPhrases returns search phrases that were actually found (have
@@ -1466,6 +1557,7 @@ func generateNgrams(words []string) []string {
 // A running crawl is parked as paused so it can be resumed after restart.
 func (m *Manager) Shutdown() {
 	m.StopSubdomainDiscovery()
+	m.StopAllPortScans()
 	m.mu.Lock()
 	m.closed = true
 	m.queuedIDs = nil

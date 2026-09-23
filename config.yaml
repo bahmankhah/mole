@@ -107,3 +107,8 @@ subdomain:
     - 1.1.1.1:53
   concurrent_lookups: 50
   timeout: 5s
+
+port_scan:
+  concurrent: 64
+  timeout: 1s
+  banner_timeout: 700ms

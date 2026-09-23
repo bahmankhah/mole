@@ -12,6 +12,7 @@
         .status-completed { color: #10b981; }
         .status-failed { color: #ef4444; }
         .status-paused { color: #6b7280; }
+        .status-cancelled { color: #6b7280; }
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
@@ -25,7 +26,7 @@
             <div class="flex items-center justify-between">
                 <div class="flex items-center space-x-4">
                     <h1 class="text-2xl font-bold flex items-center gap-2"><svg class="w-8 h-8" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><ellipse cx="32" cy="38" rx="26" ry="20" fill="#6B4226"/><ellipse cx="32" cy="30" rx="18" ry="16" fill="#8B5E3C"/><ellipse cx="32" cy="28" rx="10" ry="8" fill="#D4A76A"/><circle cx="26" cy="26" r="3" fill="#1a1a2e"/><circle cx="38" cy="26" r="3" fill="#1a1a2e"/><circle cx="27" cy="26.5" r="1" fill="white"/><circle cx="39" cy="26.5" r="1" fill="white"/><ellipse cx="32" cy="31" rx="4" ry="3" fill="#FF8FA3"/><ellipse cx="22" cy="20" rx="5" ry="3" fill="#8B5E3C" transform="rotate(-20 22 20)"/><ellipse cx="42" cy="20" rx="5" ry="3" fill="#8B5E3C" transform="rotate(20 42 20)"/><ellipse cx="15" cy="44" rx="6" ry="4" fill="#6B4226" transform="rotate(-30 15 44)"/><ellipse cx="49" cy="44" rx="6" ry="4" fill="#6B4226" transform="rotate(30 49 44)"/></svg> Mole</h1>
-                    <span class="text-indigo-200 text-sm">Web Crawler & Subdomain Discovery</span>
+                    <span class="text-indigo-200 text-sm">Web Crawler, Subdomains & Port Scan</span>
                 </div>
                 <div class="flex items-center space-x-4">
                     <a href="/phrases" class="text-indigo-200 hover:text-white transition text-sm">📋 Phrases</a>
@@ -123,6 +124,23 @@
                     </form>
                 </div>
 
+                <!-- Create Port Scan -->
+                <div class="bg-white rounded-lg shadow p-6 mb-6">
+                    <h2 class="text-xl font-semibold mb-4">🔌 Scan Ports</h2>
+                    <p class="text-sm text-gray-500 mb-4">Check well-known TCP ports on an IP or domain. Important services are scanned first.</p>
+                    <form action="/api/ports" method="POST" class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">IP or domain</label>
+                            <input type="text" name="target" placeholder="example.com or 203.0.113.10" required
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-500">
+                        </div>
+                        <button type="submit"
+                            class="w-full bg-teal-600 text-white py-2 px-4 rounded-md hover:bg-teal-700 transition">
+                            Start Port Scan
+                        </button>
+                    </form>
+                </div>
+
                 <!-- Search Phrases -->
                 <div class="bg-white rounded-lg shadow p-6">
                     <div class="flex items-center justify-between mb-4">
@@ -168,8 +186,9 @@
             <!-- Jobs List -->
             <div class="lg:col-span-2">
                 <div class="bg-white rounded-lg shadow">
-                    <div class="p-6 border-b border-gray-200">
-                        <h2 class="text-xl font-semibold">Crawl Jobs</h2>
+                    <div class="p-6 border-b border-gray-200 flex items-center justify-between">
+                        <h2 class="text-xl font-semibold">Recent Crawl Jobs</h2>
+                        <a href="/jobs" class="text-sm text-indigo-600 hover:text-indigo-800 font-medium">View all →</a>
                     </div>
                     <div class="overflow-x-auto">
                         <table class="w-full">
@@ -272,8 +291,9 @@
 
                 <!-- Discovery Jobs -->
                 <div class="bg-white rounded-lg shadow mt-6">
-                    <div class="p-6 border-b border-gray-200">
-                        <h2 class="text-xl font-semibold">🔎 Subdomain Discovery Jobs</h2>
+                    <div class="p-6 border-b border-gray-200 flex items-center justify-between">
+                        <h2 class="text-xl font-semibold">Recent Discovery Jobs</h2>
+                        <a href="/discovery" class="text-sm text-purple-600 hover:text-purple-800 font-medium">View all →</a>
                     </div>
                     <div class="overflow-x-auto">
                         <table class="w-full">
@@ -304,16 +324,88 @@
                                         {{.CreatedAt.Format "Jan 02 15:04"}}
                                     </td>
                                     <td class="px-6 py-4">
-                                        <a href="/discovery/{{.ID}}"
-                                            class="inline-flex items-center px-2.5 py-1.5 text-xs font-medium rounded bg-purple-100 text-purple-700 hover:bg-purple-200 transition">
-                                            👁 View
-                                        </a>
+                                        <div class="flex items-center gap-2">
+                                            <a href="/discovery/{{.ID}}"
+                                                class="inline-flex items-center px-2.5 py-1.5 text-xs font-medium rounded bg-purple-100 text-purple-700 hover:bg-purple-200 transition">
+                                                View
+                                            </a>
+                                            <button onclick="deleteDiscovery('{{.ID}}')"
+                                                class="inline-flex items-center px-2.5 py-1.5 text-xs font-medium rounded bg-red-100 text-red-700 hover:bg-red-200 transition">
+                                                Delete
+                                            </button>
+                                        </div>
                                     </td>
                                 </tr>
                                 {{else}}
                                 <tr>
                                     <td colspan="5" class="px-6 py-8 text-center text-gray-500">
                                         No discovery jobs yet. Use the form on the left to discover subdomains.
+                                    </td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Port Scans -->
+                <div class="bg-white rounded-lg shadow mt-6">
+                    <div class="p-6 border-b border-gray-200 flex items-center justify-between">
+                        <h2 class="text-xl font-semibold">Recent Port Scans</h2>
+                        <a href="/ports" class="text-sm text-teal-700 hover:text-teal-900 font-medium">View all →</a>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Target</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Open</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Progress</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-200">
+                                {{range .portScans}}
+                                <tr class="hover:bg-gray-50">
+                                    <td class="px-6 py-4">
+                                        <a href="/ports/{{.ID}}" class="text-teal-700 hover:text-teal-900 font-medium">
+                                            {{.Target}}
+                                        </a>
+                                        {{if and .ResolvedIP (ne .ResolvedIP .Target)}}
+                                        <span class="text-xs text-gray-400 block">{{.ResolvedIP}}</span>
+                                        {{end}}
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        <span class="status-{{.Status}}">{{.Status}}</span>
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        <span class="text-teal-700 font-bold">{{.PortsOpen}}</span>
+                                    </td>
+                                    <td class="px-6 py-4 text-sm text-gray-600">
+                                        {{.PortsScanned}} / {{.PortsTotal}}
+                                    </td>
+                                    <td class="px-6 py-4 text-sm text-gray-500">
+                                        {{.CreatedAt.Format "Jan 02 15:04"}}
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        <div class="flex items-center gap-2">
+                                            <a href="/ports/{{.ID}}"
+                                                class="inline-flex items-center px-2.5 py-1.5 text-xs font-medium rounded bg-teal-100 text-teal-800 hover:bg-teal-200 transition">
+                                                View
+                                            </a>
+                                            <button onclick="deletePortScan('{{.ID}}')"
+                                                class="inline-flex items-center px-2.5 py-1.5 text-xs font-medium rounded bg-red-100 text-red-700 hover:bg-red-200 transition">
+                                                Delete
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {{else}}
+                                <tr>
+                                    <td colspan="6" class="px-6 py-8 text-center text-gray-500">
+                                        No port scans yet. Enter an IP or domain on the left.
                                     </td>
                                 </tr>
                                 {{end}}
@@ -463,6 +555,18 @@
                 await apiCall('DELETE', `/api/phrases/${id}`);
                 location.reload();
             }
+        }
+
+        async function deleteDiscovery(id) {
+            if (!confirm('Delete this discovery job and its subdomains? Linked crawl jobs are kept.')) return;
+            await apiCall('DELETE', `/api/discovery/${id}`);
+            location.reload();
+        }
+
+        async function deletePortScan(id) {
+            if (!confirm('Delete this port scan and its results?')) return;
+            await apiCall('DELETE', `/api/ports/${id}`);
+            location.reload();
         }
 
         // Auto-refresh when job is running

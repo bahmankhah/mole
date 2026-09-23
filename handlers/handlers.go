@@ -38,26 +38,27 @@ type Response struct {
 
 // Index renders the main dashboard
 func (h *Handler) Index(c *gin.Context) {
-	jobs, _, _ := h.jobManager.GetJobs(10, 0)
-	discoveryJobs, _, _ := h.jobManager.GetDiscoveryJobs(10, 0)
+	jobs, totalJobs, _ := h.jobManager.GetJobs(10, 0)
+	discoveryJobs, totalDiscovery, _ := h.jobManager.GetDiscoveryJobs(10, 0)
+	portScans, totalPortScans, _ := h.jobManager.GetPortScans(10, 0)
 	matches, _, _ := h.jobManager.GetAllPhraseMatches(10, 0)
 	phrases, _ := h.jobManager.GetRecentSearchPhrases(10)
-	allPhrases, _ := h.jobManager.GetSearchPhrases()
-	totalPhrases := 0
-	if allPhrases != nil {
-		totalPhrases = len(allPhrases)
-	}
+	totalPhrases, _ := h.jobManager.CountSearchPhrases()
 	activeJob := h.jobManager.GetActiveJob()
 	stats := h.jobManager.GetEngineStats()
 
 	c.HTML(http.StatusOK, "index.html", gin.H{
-		"jobs":          jobs,
-		"discoveryJobs": discoveryJobs,
-		"matches":       matches,
-		"phrases":       phrases,
-		"totalPhrases":  totalPhrases,
-		"activeJob":     activeJob,
-		"stats":         stats,
+		"jobs":               jobs,
+		"totalJobs":          int(totalJobs),
+		"discoveryJobs":      discoveryJobs,
+		"totalDiscoveryJobs": int(totalDiscovery),
+		"portScans":          portScans,
+		"totalPortScans":     int(totalPortScans),
+		"matches":            matches,
+		"phrases":            phrases,
+		"totalPhrases":       int(totalPhrases),
+		"activeJob":          activeJob,
+		"stats":              stats,
 	})
 }
 
@@ -322,6 +323,15 @@ func (h *Handler) DeleteJob(c *gin.Context) {
 	c.JSON(http.StatusOK, Response{Success: true, Message: "Job deleted"})
 }
 
+// DeleteDiscoveryJob deletes a subdomain discovery job
+func (h *Handler) DeleteDiscoveryJob(c *gin.Context) {
+	if err := h.jobManager.DeleteDiscoveryJob(c.Param("id")); err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Error: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, Response{Success: true, Message: "Discovery job deleted"})
+}
+
 // StartSubdomainDiscovery starts subdomain discovery for a job
 func (h *Handler) StartSubdomainDiscovery(c *gin.Context) {
 	jobID := c.Param("id")
@@ -544,13 +554,26 @@ func (h *Handler) AddPhrase(c *gin.Context) {
 
 // PhrasesPage renders the dedicated phrases management page
 func (h *Handler) PhrasesPage(c *gin.Context) {
-	phrases, err := h.jobManager.GetSearchPhrasesWithStats()
+	page, limit, offset := parsePage(c, 50)
+	phrases, total, err := h.jobManager.GetSearchPhrasesWithStats(limit, offset)
 	if err != nil {
 		phrases = nil
 	}
+	totalPages := pageCount(total, limit)
+	if page > totalPages && totalPages >= 1 && total > 0 {
+		c.Redirect(http.StatusFound, "/phrases?page="+strconv.Itoa(totalPages))
+		return
+	}
+	from, to := showingRange(total, offset, len(phrases))
 
 	c.HTML(http.StatusOK, "phrases.html", gin.H{
-		"phrases": phrases,
+		"phrases":    phrases,
+		"total":      int(total),
+		"page":       page,
+		"totalPages": totalPages,
+		"pageBase":   "/phrases?",
+		"from":       from,
+		"to":         to,
 	})
 }
 
@@ -585,6 +608,15 @@ func (h *Handler) DeletePhrase(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, Response{Success: true, Message: "Phrase deleted"})
+}
+
+// DeleteAllPhrases deletes every search phrase
+func (h *Handler) DeleteAllPhrases(c *gin.Context) {
+	if err := h.jobManager.DeleteAllSearchPhrases(); err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Success: false, Error: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, Response{Success: true, Message: "All phrases deleted"})
 }
 
 // GetStats returns current crawler statistics
@@ -622,6 +654,119 @@ func (h *Handler) GetCrawledPages(c *gin.Context) {
 			"offset": offset,
 		},
 	})
+}
+
+// GetCrawledPage returns a single crawled page (HTML or JSON).
+func (h *Handler) GetCrawledPage(c *gin.Context) {
+	jobID := c.Param("id")
+	pageID, err := strconv.ParseUint(c.Param("pageId"), 10, 64)
+	if err != nil || pageID == 0 {
+		if wantsHTML(c) {
+			c.HTML(http.StatusBadRequest, "crawled_page.html", gin.H{
+				"notFound": true,
+				"jobID":    jobID,
+			})
+			return
+		}
+		c.JSON(http.StatusBadRequest, Response{Success: false, Error: "Invalid page id"})
+		return
+	}
+
+	page, err := h.jobManager.GetCrawledPage(jobID, uint(pageID))
+	if err != nil {
+		if wantsHTML(c) {
+			c.HTML(http.StatusNotFound, "crawled_page.html", gin.H{
+				"notFound": true,
+				"jobID":    jobID,
+			})
+			return
+		}
+		c.JSON(http.StatusNotFound, Response{Success: false, Error: "Page not found"})
+		return
+	}
+
+	job, _ := h.jobManager.GetJob(jobID)
+	matches, matchTotal, _ := h.jobManager.GetPagePhraseMatches(jobID, page.ID, 100)
+	displayText := displayPageText(page)
+
+	if wantsHTML(c) {
+		c.HTML(http.StatusOK, "crawled_page.html", gin.H{
+			"notFound":    false,
+			"page":        page,
+			"job":         job,
+			"jobID":       jobID,
+			"matches":     matches,
+			"matchTotal":  matchTotal,
+			"displayText": displayText,
+			"hasText":     displayText != "",
+			"sizeLabel":   formatBytes(page.ContentLength),
+			"statusClass": statusBadgeClass(page.StatusCode),
+			"textLen":     len(displayText),
+			"isJSON":      strings.Contains(strings.ToLower(page.ContentType), "json"),
+			"isHTML":      strings.Contains(strings.ToLower(page.ContentType), "html"),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, Response{
+		Success: true,
+		Data: gin.H{
+			"page":        page,
+			"job":         job,
+			"matches":     matches,
+			"match_total": matchTotal,
+		},
+	})
+}
+
+func wantsHTML(c *gin.Context) bool {
+	return c.GetHeader("Accept") == "text/html" || c.Query("format") == "html"
+}
+
+func statusBadgeClass(code int) string {
+	switch {
+	case code >= 200 && code < 300:
+		return "bg-green-100 text-green-800"
+	case code >= 300 && code < 400:
+		return "bg-blue-100 text-blue-800"
+	case code >= 400 && code < 500:
+		return "bg-yellow-100 text-yellow-800"
+	default:
+		return "bg-red-100 text-red-800"
+	}
+}
+
+func formatBytes(b int64) string {
+	if b >= 1048576 {
+		return fmt.Sprintf("%.2f MB", float64(b)/1048576)
+	}
+	if b >= 1024 {
+		return fmt.Sprintf("%.2f KB", float64(b)/1024)
+	}
+	return fmt.Sprintf("%d B", b)
+}
+
+func displayPageText(page *models.CrawledPage) string {
+	if page == nil || page.TextContent == nil {
+		return ""
+	}
+	raw := *page.TextContent
+	if raw == "" {
+		return ""
+	}
+	ct := strings.ToLower(page.ContentType)
+	if !strings.Contains(ct, "json") {
+		return raw
+	}
+	var v interface{}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return raw
+	}
+	pretty, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return raw
+	}
+	return string(pretty)
 }
 
 // DuplicateJob creates a new job by copying an existing job's configuration

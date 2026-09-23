@@ -14,6 +14,7 @@ type Config struct {
 	Crawler   CrawlerConfig   `yaml:"crawler"`
 	Server    ServerConfig    `yaml:"server"`
 	Subdomain SubdomainConfig `yaml:"subdomain"`
+	PortScan  PortScanConfig  `yaml:"port_scan"`
 }
 
 // DatabaseConfig holds database connection settings
@@ -60,6 +61,13 @@ type CrawlerConfig struct {
 type ServerConfig struct {
 	Host string `yaml:"host"`
 	Port string `yaml:"port"`
+}
+
+// PortScanConfig holds TCP port-scan settings.
+type PortScanConfig struct {
+	Concurrent    int           `yaml:"concurrent"`
+	Timeout       time.Duration `yaml:"timeout"`
+	BannerTimeout time.Duration `yaml:"banner_timeout"`
 }
 
 // SubdomainConfig holds subdomain discovery settings
@@ -196,6 +204,11 @@ func DefaultConfig() *Config {
 			ConcurrentLookups: 50,
 			Timeout:           5 * time.Second,
 			CommonSubdomains:  getCommonSubdomains(),
+		},
+		PortScan: PortScanConfig{
+			Concurrent:    64,
+			Timeout:       time.Second,
+			BannerTimeout: 700 * time.Millisecond,
 		},
 	}
 }

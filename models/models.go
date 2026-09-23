@@ -301,6 +301,48 @@ func (j *DiscoveryJob) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
+// PortScanJob is a TCP scan of well-known service ports for one host.
+type PortScanJob struct {
+	ID           string     `gorm:"type:varchar(36);primaryKey" json:"id"`
+	Target       string     `gorm:"type:varchar(255);index;not null" json:"target"`
+	ResolvedIP   string     `gorm:"type:varchar(45)" json:"resolved_ip"`
+	Status       JobStatus  `gorm:"type:varchar(20);index;default:'pending'" json:"status"`
+	PortsTotal   int        `gorm:"default:0" json:"ports_total"`
+	PortsScanned int        `gorm:"default:0" json:"ports_scanned"`
+	PortsOpen    int        `gorm:"default:0" json:"ports_open"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	StartedAt    *time.Time `json:"started_at"`
+	CompletedAt  *time.Time `json:"completed_at"`
+	ErrorMessage string     `gorm:"type:text" json:"error_message,omitempty"`
+}
+
+// BeforeCreate generates UUID for new port scan jobs
+func (j *PortScanJob) BeforeCreate(tx *gorm.DB) error {
+	if j.ID == "" {
+		j.ID = uuid.New().String()
+	}
+	return nil
+}
+
+// DiscoveredPort is an open TCP port found by a port scan.
+type DiscoveredPort struct {
+	ID            uint        `gorm:"primaryKey" json:"id"`
+	PortScanJobID string      `gorm:"type:varchar(36);uniqueIndex:idx_scan_port;not null" json:"port_scan_job_id"`
+	Port          int         `gorm:"uniqueIndex:idx_scan_port;not null" json:"port"`
+	Protocol      string      `gorm:"type:varchar(8);default:'tcp'" json:"protocol"`
+	Service       string      `gorm:"type:varchar(64);not null" json:"service"`
+	Detail        string      `gorm:"type:varchar(255)" json:"detail,omitempty"`
+	Group         string      `gorm:"type:varchar(64)" json:"group,omitempty"`
+	Banner        string      `gorm:"type:text" json:"banner,omitempty"`
+	Product       string      `gorm:"type:varchar(128)" json:"product,omitempty"`
+	Warning       string      `gorm:"type:text" json:"warning,omitempty"`
+	Importance    int         `gorm:"index" json:"importance"`
+	LatencyMS     int64       `json:"latency_ms"`
+	CreatedAt     time.Time   `json:"created_at"`
+	PortScanJob   PortScanJob `gorm:"foreignKey:PortScanJobID;constraint:OnDelete:CASCADE" json:"-"`
+}
+
 // CrawlJob represents a crawling job for a specific target (domain or subdomain)
 type CrawlJob struct {
 	ID             string       `gorm:"type:varchar(36);primaryKey" json:"id"`

@@ -51,6 +51,8 @@ func (d *Database) AutoMigrate() error {
 
 	err := d.DB.AutoMigrate(
 		&models.DiscoveryJob{},
+		&models.PortScanJob{},
+		&models.DiscoveredPort{},
 		&models.CrawlJob{},
 		&models.Subdomain{},
 		&models.CrawledPage{},
