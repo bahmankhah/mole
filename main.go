@@ -109,6 +109,7 @@ func main() {
 
 	// Static files (if needed)
 	router.Static("/static", "./static")
+	router.StaticFile("/favicon.ico", "./static/favicon.ico")
 
 	// Web routes
 	router.GET("/", handler.Index)

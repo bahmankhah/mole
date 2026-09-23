@@ -12,7 +12,7 @@ The body of a question-list page is the Peleyad GetQuestionList2 payload:
 
 Each dataList item that can be a single-answer multiple-choice question is
 appended to after_crawl_data/{job_id}.json. That file is the import document
-described by Azmoon's docs/integration/pelekan-question-import.md.
+described by Azmoon's docs/integration/question-import.md.
 
 Stdout is one short status line. Non-question pages exit 0 and change nothing.
 """
