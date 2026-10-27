@@ -34,18 +34,8 @@
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
-    <nav class="bg-indigo-600 text-white shadow-lg">
-        <div class="max-w-7xl mx-auto px-4 py-4">
-            <div class="flex items-center justify-between gap-4">
-                <div class="flex items-center space-x-4 min-w-0">
-                    <a href="/" class="text-2xl font-bold hover:text-indigo-200 flex items-center gap-2 shrink-0"><img src="/static/logo.png" alt="" class="h-7 w-auto"> Mole</a>
-                    <span class="text-indigo-200">/</span>
-                    <span class="truncate">Ports: {{.job.Target}}</span>
-                </div>
-                <span id="nav-status" class="status-{{.job.Status}} text-lg font-semibold capitalize">{{.job.Status}}</span>
-            </div>
-        </div>
-    </nav>
+    {{template "nav" .}}
+    {{template "statusStyles"}}
 
     <div class="max-w-7xl mx-auto px-4 py-8">
         <div class="bg-white rounded-lg shadow p-6 mb-6">

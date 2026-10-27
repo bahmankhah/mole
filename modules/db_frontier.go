@@ -18,6 +18,9 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// ErrFrontierEmpty is returned by GetNextURL when no URL is pending.
+var ErrFrontierEmpty = errors.New("no pending URLs in frontier")
+
 // DBFrontier implements a database-backed frontier with random surfer model
 type DBFrontier struct {
 	db                  *gorm.DB
@@ -325,11 +328,13 @@ func (f *DBFrontier) GetNextURL() (*models.FrontierURL, error) {
 		Select("COALESCE(MAX(id), 0)").Scan(&maxID)
 
 	if maxID == 0 {
-		return nil, errors.New("no pending URLs in frontier")
+		return nil, ErrFrontierEmpty
 	}
 
 	// Pick a random ID in the range
+	f.mu.Lock() // math/rand.Rand is not safe for concurrent workers
 	randomID := minID + uint(f.rng.Int63n(int64(maxID-minID+1)))
+	f.mu.Unlock()
 
 	var frontierURL models.FrontierURL
 
@@ -355,7 +360,7 @@ func (f *DBFrontier) GetNextURL() (*models.FrontierURL, error) {
 			return result.Error
 		}
 		if frontierURL.ID == 0 {
-			return errors.New("no pending URLs in frontier")
+			return ErrFrontierEmpty
 		}
 
 		// Update status to processing within the same transaction
@@ -376,6 +381,13 @@ func (f *DBFrontier) GetNextURL() (*models.FrontierURL, error) {
 // The URL is already recorded in crawled_pages, so we delete it from the queue
 func (f *DBFrontier) MarkCompleted(urlID uint) error {
 	return f.db.Delete(&models.FrontierURL{}, "id = ?", urlID).Error
+}
+
+// Release puts a claimed URL back to pending without counting a retry.
+func (f *DBFrontier) Release(urlID uint) error {
+	return f.db.Model(&models.FrontierURL{}).
+		Where("id = ?", urlID).
+		Update("status", models.FrontierStatusPending).Error
 }
 
 // MarkFailed marks a URL as failed

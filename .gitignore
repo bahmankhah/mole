@@ -39,3 +39,8 @@ data/faiss/
 # OS
 .DS_Store
 Thumbs.db
+
+# Build output and runtime data
+bin/
+data/objects/
+plugins/*/.env

@@ -1,8 +1,10 @@
 package plugins
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -145,5 +147,65 @@ func TestListFindsBundledDivarPlugin(t *testing.T) {
 	}
 	if filepath.Base(p.Dir) != "divar" {
 		t.Fatalf("dir=%s", p.Dir)
+	}
+}
+
+func TestEnvFileAndCommand(t *testing.T) {
+	root := t.TempDir()
+	writePlugin(t, root, "p1", `{"name":"P1","env":["API_KEY","API_URL"]}`, "after_crawl.py", "after_job.py")
+	p, err := GetFrom(root, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.MissingEnv) != 2 || p.HasEnvFile {
+		t.Fatalf("missing=%v hasEnv=%v", p.MissingEnv, p.HasEnvFile)
+	}
+	if _, err := p.Command(context.Background(), "python3", HookAfterJob, "job-1"); err == nil {
+		t.Fatal("command with missing env must fail")
+	}
+
+	env := "# comment\nexport API_KEY=\"se cret\"\nAPI_URL='http://x'\n\nMULTI=\"a\\nb\"\n"
+	if err := os.WriteFile(filepath.Join(root, "p1", EnvFileName), []byte(env), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DB_PASSWORD", "engine-secret")
+	t.Setenv("API_URL", "from-engine")
+	p, err = GetFrom(root, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.MissingEnv) != 0 || !p.HasEnvFile {
+		t.Fatalf("missing=%v hasEnv=%v", p.MissingEnv, p.HasEnvFile)
+	}
+	cmd, err := p.Command(context.Background(), "python3", HookAfterJob, "job-1", "--job-id", "job-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, kv := range cmd.Env {
+		k, v, _ := strings.Cut(kv, "=")
+		if _, dup := got[k]; dup {
+			t.Fatalf("duplicate env %s", k)
+		}
+		got[k] = v
+	}
+	if got["API_KEY"] != "se cret" || got["API_URL"] != "http://x" || got["MULTI"] != "a\nb" {
+		t.Fatalf("env file values wrong: %q %q %q", got["API_KEY"], got["API_URL"], got["MULTI"])
+	}
+	if _, leaked := got["DB_PASSWORD"]; leaked {
+		t.Fatal("engine secret leaked to plugin")
+	}
+	if got["MOLE_JOB_ID"] != "job-1" || got["MOLE_PLUGIN_HOOK"] != HookAfterJob || got["MOLE_PLUGIN_ID"] != "p1" {
+		t.Fatalf("context vars wrong: %v", got)
+	}
+	if cmd.Dir != p.Dir || !strings.HasSuffix(cmd.Args[1], "after_job.py") || cmd.Args[2] != "--job-id" {
+		t.Fatalf("cmd %v dir %s", cmd.Args, cmd.Dir)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "p1", EnvFileName), []byte("not valid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := GetFrom(root, "p1"); err == nil {
+		t.Fatal("malformed .env accepted")
 	}
 }

@@ -65,10 +65,30 @@ def _resolve_data_dir() -> str:
 DATA_DIR = _resolve_data_dir()
 ARCHIVE_DIR = os.path.join(DATA_DIR, "archive")
 
-# Ingestion endpoint — set via env var; sample default kept obviously fake.
-API_URL = os.environ.get("AFTER_JOB_API_URL", "http://194.56.148.85:8000/api/v1/ads/bulk-import-with-users")
-API_KEY = os.environ.get("AFTER_JOB_API_KEY", "flMliOzL_tJDz67xgaV57c-AqcjK6hAE-7PEXuZ0wrs")
-APP_ID = os.environ.get("AFTER_JOB_APP_ID", "6144412de54d4d709e3ddfbf7b9233f1")
+def _load_env_file() -> None:
+    """Load plugins/divar/.env when run by hand; Mole already passes it in."""
+    path = os.path.join(PLUGIN_DIR, ".env")
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.removeprefix("export ").split("=", 1)
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            os.environ.setdefault(key.strip(), value)
+
+
+_load_env_file()
+
+# Ingestion endpoint and credentials come from the environment. Mole loads
+# them from plugins/divar/.env (see .env.example); they are never in the code.
+API_URL = os.environ.get("AFTER_JOB_API_URL", "")
+API_KEY = os.environ.get("AFTER_JOB_API_KEY", "")
+APP_ID = os.environ.get("AFTER_JOB_APP_ID", "")
 CHUNK_SIZE = int(os.environ.get("AFTER_JOB_CHUNK_SIZE", "30"))
 CHUNK_DELAY_SEC = int(os.environ.get("AFTER_JOB_CHUNK_DELAY_SEC", "30"))
 
@@ -81,10 +101,7 @@ ONLY_WITH_PHONE = False
 # sms.ir bulk endpoint reused for one-mobile-at-a-time sends.
 SMS_API_URL = "https://api.sms.ir/v1/send/bulk"
 SMS_SEND_DELAY_SEC = float(os.environ.get("AFTER_JOB_SMS_DELAY_SEC", "1.5"))
-SMS_API_KEY = os.environ.get(
-    "SMS_IR_API_KEY",
-    "fixtU3DEsfsSoCvhaaa3UBKnFZbAIqmKFPaoXRuZTfDW5JEm",
-)
+SMS_API_KEY = os.environ.get("SMS_IR_API_KEY", "")
 SMS_LINE_NUMBER = int(os.environ.get("SMS_IR_LINE_NUMBER", "50003181890144"))
 
 # Per-ad message template. {ref} is replaced with the ad's token.
@@ -310,6 +327,10 @@ def main() -> int:
     g.add_argument("--file", dest="file_path",
                    help="Path to a JSON file (absolute, or relative to after_crawl_data/)")
     args = ap.parse_args()
+    missing = [name for name, value in (("AFTER_JOB_API_URL", API_URL), ("AFTER_JOB_API_KEY", API_KEY), ("AFTER_JOB_APP_ID", APP_ID)) if not value]
+    if missing:
+        print(f"[after_job] missing settings: {', '.join(missing)} (set them in {os.path.join(PLUGIN_DIR, '.env')})", file=sys.stderr)
+        return 2
     return run(job_id=args.job_id, file_path=args.file_path)
 
 

@@ -6,13 +6,13 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/resolver/crawler/jobs"
 	"github.com/resolver/crawler/models"
-	"github.com/resolver/crawler/modules"
 	"github.com/resolver/crawler/plugins"
 )
 
@@ -44,7 +44,7 @@ func (h *Handler) Index(c *gin.Context) {
 	matches, _, _ := h.jobManager.GetAllPhraseMatches(10, 0)
 	phrases, _ := h.jobManager.GetRecentSearchPhrases(10)
 	totalPhrases, _ := h.jobManager.CountSearchPhrases()
-	activeJob := h.jobManager.GetActiveJob()
+	runningJobs := h.jobManager.GetRunningJobs()
 	stats := h.jobManager.GetEngineStats()
 
 	c.HTML(http.StatusOK, "index.html", gin.H{
@@ -57,8 +57,11 @@ func (h *Handler) Index(c *gin.Context) {
 		"matches":            matches,
 		"phrases":            phrases,
 		"totalPhrases":       int(totalPhrases),
-		"activeJob":          activeJob,
+		"runningJobs":        runningJobs,
 		"stats":              stats,
+		"workers":            h.jobManager.Workers(),
+		"nav":                "dashboard",
+		"error":              c.Query("error"),
 	})
 }
 
@@ -72,6 +75,7 @@ func (h *Handler) CreateJob(c *gin.Context) {
 		MaxDepth     int                 `json:"max_depth" form:"max_depth"`
 		Settings     *models.JobSettings `json:"settings"`
 		TemplateVars map[string]string   `json:"template_vars"` // var_name → value expression (e.g. "1,hamster,5-10")
+		Start        bool                `json:"start"`
 	}
 
 	contentType := c.GetHeader("Content-Type")
@@ -82,6 +86,7 @@ func (h *Handler) CreateJob(c *gin.Context) {
 		req.TargetURL = c.PostForm("target_url")
 		req.Domain = c.PostForm("domain")
 		req.MaxDepth, _ = strconv.Atoi(c.PostForm("max_depth"))
+		req.Start = c.PostForm("start") == "1"
 
 		// Parse template_vars from form: keys like "var_NAME" → value expression.
 		req.TemplateVars = make(map[string]string)
@@ -103,68 +108,23 @@ func (h *Handler) CreateJob(c *gin.Context) {
 	if target == "" {
 		target = req.Domain
 	}
-	if target == "" {
-		c.JSON(http.StatusBadRequest, Response{Success: false, Error: "target_url or domain is required"})
-		return
-	}
-
 	if req.MaxDepth == 0 {
 		req.MaxDepth = 10
 	}
-
-	// ── Expand URL template if it contains {{VAR}} placeholders ──
-	var seedURLs models.StringSlice
-	if modules.HasTemplateVars(target) && len(req.TemplateVars) > 0 {
-		// Expand each variable's value expression.
-		expandedVars := make(map[string][]string, len(req.TemplateVars))
-		for name, expr := range req.TemplateVars {
-			vals, err := modules.ExpandValueExpr(expr)
-			if err != nil {
-				errMsg := fmt.Sprintf("error expanding variable {{%s}}: %v", name, err)
-				if isForm {
-					c.Redirect(http.StatusFound, "/?error="+errMsg)
-					return
-				}
-				c.JSON(http.StatusBadRequest, Response{Success: false, Error: errMsg})
-				return
-			}
-			if len(vals) == 0 {
-				errMsg := fmt.Sprintf("variable {{%s}} has no values", name)
-				if isForm {
-					c.Redirect(http.StatusFound, "/?error="+errMsg)
-					return
-				}
-				c.JSON(http.StatusBadRequest, Response{Success: false, Error: errMsg})
-				return
-			}
-			expandedVars[name] = vals
-		}
-
-		urls, err := modules.ExpandTemplateURL(target, expandedVars, 50000)
-		if err != nil {
-			if isForm {
-				c.Redirect(http.StatusFound, "/?error="+err.Error())
-				return
-			}
-			c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+	job, err := h.jobManager.CreateFromSpec(jobs.JobSpec{
+		URL:          target,
+		TemplateVars: req.TemplateVars,
+		MaxDepth:     &req.MaxDepth,
+		Settings:     req.Settings,
+		Start:        &req.Start,
+	}, true)
+	if err != nil {
+		if isForm {
+			c.Redirect(http.StatusFound, "/?error="+url.QueryEscape(err.Error()))
 			return
 		}
-		seedURLs = urls
-		log.Printf("[Handler] URL template expanded to %d seed URLs", len(seedURLs))
-	}
-
-	job, err := h.jobManager.CreateJobWithSettings(target, req.MaxDepth, req.Settings)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{Success: false, Error: err.Error()})
+		c.JSON(statusFor(err), Response{Success: false, Error: err.Error()})
 		return
-	}
-
-	// Attach seed URLs if template was expanded
-	if len(seedURLs) > 0 {
-		job.SeedURLs = seedURLs
-		if err := h.jobManager.UpdateJobSeedURLs(job.ID, seedURLs); err != nil {
-			log.Printf("[Handler] Warning: failed to save seed URLs: %v", err)
-		}
 	}
 
 	// Check if request is from a form submission
@@ -233,7 +193,41 @@ func (h *Handler) GetJob(c *gin.Context) {
 		}
 		pluginsB, _ := json.Marshal(pluginList)
 
+		catalog, _ := json.Marshal(h.catalog())
+		runStats, isLocalRun := h.jobManager.Engine().RunStatsFor(job.ID)
+		var schedule interface{}
+		if job.ScheduleID != nil {
+			if s, err := h.jobManager.GetSchedule(*job.ScheduleID); err == nil {
+				schedule = s
+			}
+		}
+		opts := gin.H{"priority": job.Priority, "region": job.Region, "limits": job.Limits}
+		if job.Webhook != nil {
+			w := *job.Webhook
+			if w.Secret != "" {
+				w.Secret = secretMask
+			}
+			opts["webhook"] = w
+		}
+		optionsJSON, _ := json.Marshal(opts)
+		changeCounts := h.jobManager.ChangeCounts(job.ID)
+		showChanges := schedule != nil || (job.Settings != nil && job.Settings.ChangeDetection != nil && *job.Settings.ChangeDetection) ||
+			changeCounts["new"]+changeCounts["changed"]+changeCounts["removed"] > 0
+		ps := h.pluginStatus(job)
+		pluginJSON, _ := json.Marshal(ps)
 		c.HTML(http.StatusOK, "job.html", gin.H{
+			"pluginStatus":        ps,
+			"pluginJSON":          template.JS(pluginJSON),
+			"showPlugins":         ps.AfterCrawl != "" || ps.AfterJob != "",
+			"nav":                 "jobs",
+			"optionsJSON":         template.JS(optionsJSON),
+			"showChanges":         showChanges,
+			"catalogJSON":         template.JS(catalog),
+			"runStats":            runStats,
+			"isLocalRun":          isLocalRun,
+			"changeCounts":        changeCounts,
+			"changeTotal":         changeCounts["new"] + changeCounts["changed"] + changeCounts["removed"],
+			"schedule":            schedule,
 			"job":                 job,
 			"subdomains":          subdomains,
 			"matches":             matches,
@@ -266,24 +260,22 @@ func (h *Handler) StartJob(c *gin.Context) {
 	jobID := c.Param("id")
 
 	if err := h.jobManager.StartJob(jobID); err != nil {
-		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+		c.JSON(statusFor(err), Response{Success: false, Error: err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, Response{Success: true, Message: "Job started"})
+	c.JSON(http.StatusOK, Response{Success: true, Message: "Job queued"})
 }
 
 // StopJob stops the current crawl job
 func (h *Handler) StopJob(c *gin.Context) {
-	jobID := c.Param("id")
-	var err error
-	if jobID != "" {
-		err = h.jobManager.StopJobByID(jobID)
-	} else {
-		err = h.jobManager.StopJob()
+	jobID := jobIDParam(c)
+	if jobID == "" {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Error: "job id is required"})
+		return
 	}
-	if err != nil {
-		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+	if err := h.jobManager.StopJobByID(jobID); err != nil {
+		c.JSON(statusFor(err), Response{Success: false, Error: err.Error()})
 		return
 	}
 
@@ -292,8 +284,13 @@ func (h *Handler) StopJob(c *gin.Context) {
 
 // PauseJob pauses the current crawl job
 func (h *Handler) PauseJob(c *gin.Context) {
-	if err := h.jobManager.PauseJob(); err != nil {
-		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+	jobID := jobIDParam(c)
+	if jobID == "" {
+		c.JSON(http.StatusBadRequest, Response{Success: false, Error: "job id is required"})
+		return
+	}
+	if err := h.jobManager.PauseJob(jobID); err != nil {
+		c.JSON(statusFor(err), Response{Success: false, Error: err.Error()})
 		return
 	}
 
@@ -302,9 +299,8 @@ func (h *Handler) PauseJob(c *gin.Context) {
 
 // ResumeJob resumes a paused crawl job
 func (h *Handler) ResumeJob(c *gin.Context) {
-	jobID := c.Param("id")
-	if err := h.jobManager.ResumeJob(jobID); err != nil {
-		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+	if err := h.jobManager.ResumeJob(jobIDParam(c)); err != nil {
+		c.JSON(statusFor(err), Response{Success: false, Error: err.Error()})
 		return
 	}
 
@@ -316,7 +312,7 @@ func (h *Handler) DeleteJob(c *gin.Context) {
 	jobID := c.Param("id")
 
 	if err := h.jobManager.DeleteJob(jobID); err != nil {
-		c.JSON(http.StatusInternalServerError, Response{Success: false, Error: err.Error()})
+		c.JSON(statusFor(err), Response{Success: false, Error: err.Error()})
 		return
 	}
 
@@ -462,6 +458,7 @@ func (h *Handler) GetDiscoveryJob(c *gin.Context) {
 	// Check if request accepts HTML
 	if c.GetHeader("Accept") == "text/html" || c.Query("format") == "html" {
 		c.HTML(http.StatusOK, "discovery.html", gin.H{
+			"nav":        "discovery",
 			"job":        job,
 			"subdomains": subdomains,
 		})
@@ -567,6 +564,7 @@ func (h *Handler) PhrasesPage(c *gin.Context) {
 	from, to := showingRange(total, offset, len(phrases))
 
 	c.HTML(http.StatusOK, "phrases.html", gin.H{
+		"nav":        "phrases",
 		"phrases":    phrases,
 		"total":      int(total),
 		"page":       page,
@@ -621,14 +619,11 @@ func (h *Handler) DeleteAllPhrases(c *gin.Context) {
 
 // GetStats returns current crawler statistics
 func (h *Handler) GetStats(c *gin.Context) {
-	stats := h.jobManager.GetEngineStats()
-	activeJob := h.jobManager.GetActiveJob()
-
 	c.JSON(http.StatusOK, Response{
 		Success: true,
 		Data: gin.H{
-			"engine":    stats,
-			"activeJob": activeJob,
+			"engine":      h.jobManager.GetEngineStats(),
+			"runningJobs": h.jobManager.GetRunningJobs(),
 		},
 	})
 }
@@ -663,6 +658,7 @@ func (h *Handler) GetCrawledPage(c *gin.Context) {
 	if err != nil || pageID == 0 {
 		if wantsHTML(c) {
 			c.HTML(http.StatusBadRequest, "crawled_page.html", gin.H{
+				"nav":      "jobs",
 				"notFound": true,
 				"jobID":    jobID,
 			})
@@ -676,6 +672,7 @@ func (h *Handler) GetCrawledPage(c *gin.Context) {
 	if err != nil {
 		if wantsHTML(c) {
 			c.HTML(http.StatusNotFound, "crawled_page.html", gin.H{
+				"nav":      "jobs",
 				"notFound": true,
 				"jobID":    jobID,
 			})
@@ -687,23 +684,62 @@ func (h *Handler) GetCrawledPage(c *gin.Context) {
 
 	job, _ := h.jobManager.GetJob(jobID)
 	matches, matchTotal, _ := h.jobManager.GetPagePhraseMatches(jobID, page.ID, 100)
+	if page.TextContent == nil && page.BodyKey != "" {
+		if full, err := h.jobManager.GetPageResult(jobID, page.ID); err == nil {
+			page.TextContent = full.Body // body offloaded to the object store
+		}
+	}
 	displayText := displayPageText(page)
+	pc := h.jobManager.GetPageContent(page.ID)
+	extra := gin.H{}
+	if pc != nil {
+		if pc.Markdown != nil {
+			extra["mdText"] = *pc.Markdown
+		} else if pc.Text != nil {
+			extra["mdText"] = *pc.Text
+		}
+		extra["extractedPretty"] = prettyJSON(pc.Extracted)
+		extra["llmPretty"] = prettyJSON(pc.LLMExtracted)
+		extra["actionsPretty"] = prettyJSON(pc.ActionResults)
+		if pc.Metadata != nil {
+			b, _ := json.MarshalIndent(pc.Metadata, "", "  ")
+			extra["metadataPretty"] = string(b)
+		}
+		extra["screenshotURL"] = fmt.Sprintf("/api/v1/crawls/%s/pages/%d/screenshot", jobID, page.ID)
+	}
+	if changes, _, err := h.jobManager.ListChanges(jobID, "", 0, 500, true); err == nil {
+		for i := range changes {
+			if changes[i].PageID != nil && *changes[i].PageID == page.ID {
+				extra["change"] = &changes[i]
+				break
+			}
+		}
+	}
 
 	if wantsHTML(c) {
 		c.HTML(http.StatusOK, "crawled_page.html", gin.H{
-			"notFound":    false,
-			"page":        page,
-			"job":         job,
-			"jobID":       jobID,
-			"matches":     matches,
-			"matchTotal":  matchTotal,
-			"displayText": displayText,
-			"hasText":     displayText != "",
-			"sizeLabel":   formatBytes(page.ContentLength),
-			"statusClass": statusBadgeClass(page.StatusCode),
-			"textLen":     len(displayText),
-			"isJSON":      strings.Contains(strings.ToLower(page.ContentType), "json"),
-			"isHTML":      strings.Contains(strings.ToLower(page.ContentType), "html"),
+			"nav":             "jobs",
+			"notFound":        false,
+			"page":            page,
+			"job":             job,
+			"jobID":           jobID,
+			"matches":         matches,
+			"matchTotal":      matchTotal,
+			"displayText":     displayText,
+			"hasText":         displayText != "",
+			"sizeLabel":       formatBytes(page.ContentLength),
+			"statusClass":     statusBadgeClass(page.StatusCode),
+			"textLen":         len(displayText),
+			"isJSON":          strings.Contains(strings.ToLower(page.ContentType), "json"),
+			"isHTML":          strings.Contains(strings.ToLower(page.ContentType), "html"),
+			"content":         pc,
+			"mdText":          extra["mdText"],
+			"extractedPretty": extra["extractedPretty"],
+			"llmPretty":       extra["llmPretty"],
+			"actionsPretty":   extra["actionsPretty"],
+			"metadataPretty":  extra["metadataPretty"],
+			"screenshotURL":   extra["screenshotURL"],
+			"change":          extra["change"],
 		})
 		return
 	}
@@ -744,6 +780,19 @@ func formatBytes(b int64) string {
 		return fmt.Sprintf("%.2f KB", float64(b)/1024)
 	}
 	return fmt.Sprintf("%d B", b)
+}
+
+// prettyJSON indents a stored JSON value; empty or null values give "".
+func prettyJSON(raw models.JSONRaw) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var v interface{}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return string(raw)
+	}
+	b, _ := json.MarshalIndent(v, "", "  ")
+	return string(b)
 }
 
 func displayPageText(page *models.CrawledPage) string {
@@ -822,7 +871,7 @@ func (h *Handler) UpdateJobSettings(c *gin.Context) {
 
 	if settings.IsEmpty() {
 		if err := h.jobManager.UpdateJobSettings(jobID, nil); err != nil {
-			c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+			c.JSON(statusFor(err), Response{Success: false, Error: err.Error()})
 			return
 		}
 		c.JSON(http.StatusOK, Response{Success: true, Message: "Settings reset to defaults"})
@@ -830,7 +879,7 @@ func (h *Handler) UpdateJobSettings(c *gin.Context) {
 	}
 
 	if err := h.jobManager.UpdateJobSettings(jobID, &settings); err != nil {
-		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+		c.JSON(statusFor(err), Response{Success: false, Error: err.Error()})
 		return
 	}
 
@@ -873,37 +922,14 @@ func (h *Handler) UpdateJobTarget(c *gin.Context) {
 		return
 	}
 
-	var seedURLs models.StringSlice
-	if modules.HasTemplateVars(target) {
-		if len(req.TemplateVars) == 0 {
-			c.JSON(http.StatusBadRequest, Response{Success: false, Error: "template_vars required when URL contains {{VAR}}"})
-			return
-		}
-		expandedVars := make(map[string][]string, len(req.TemplateVars))
-		for name, expr := range req.TemplateVars {
-			vals, err := modules.ExpandValueExpr(expr)
-			if err != nil {
-				c.JSON(http.StatusBadRequest, Response{Success: false,
-					Error: fmt.Sprintf("error expanding {{%s}}: %v", name, err)})
-				return
-			}
-			if len(vals) == 0 {
-				c.JSON(http.StatusBadRequest, Response{Success: false,
-					Error: fmt.Sprintf("variable {{%s}} has no values", name)})
-				return
-			}
-			expandedVars[name] = vals
-		}
-		urls, err := modules.ExpandTemplateURL(target, expandedVars, 50000)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
-			return
-		}
-		seedURLs = urls
+	seedURLs, err := jobs.ExpandTemplateURL(target, req.TemplateVars)
+	if err != nil {
+		c.JSON(statusFor(err), Response{Success: false, Error: err.Error()})
+		return
 	}
 
 	if err := h.jobManager.UpdateJobTarget(jobID, target, seedURLs); err != nil {
-		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err.Error()})
+		c.JSON(statusFor(err), Response{Success: false, Error: err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, Response{Success: true, Data: gin.H{
@@ -969,6 +995,7 @@ func (h *Handler) SearchPage(c *gin.Context) {
 	}
 
 	c.HTML(http.StatusOK, "search.html", gin.H{
+		"nav":             "search",
 		"query":           query,
 		"mode":            mode,
 		"crawlJobID":      crawlJobID,

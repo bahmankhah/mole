@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="icon" href="/static/favicon-32.png" type="image/png">
+    <title>Scrape &amp; Map - Mole</title>
+    <script src="/static/js/tailwind.js"></script>
+    <style>
+        .mode-btn { padding: .5rem 1rem; font-size: .875rem; font-weight: 500; }
+        .mode-active { background: #4f46e5; color: #fff; }
+        .out-tab { padding: .75rem 0; color: #6b7280; border-bottom: 2px solid transparent; }
+        .out-tab-active { color: #4f46e5; border-bottom-color: #4f46e5; font-weight: 500; }
+        pre.out { white-space: pre-wrap; word-break: break-word; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    {{template "nav" .}}
+    {{template "statusStyles"}}
+
+    <div class="max-w-7xl mx-auto px-4 py-8">
+        <div class="flex flex-wrap items-end justify-between gap-4 mb-6">
+            <div>
+                <h1 class="text-2xl font-bold text-gray-800">Scrape &amp; Map</h1>
+                <p class="text-sm text-gray-500 mt-1">Try a single page instantly, or list a site's URLs without crawling it. The same calls are available as <code class="bg-white px-1 rounded">POST /v1/scrape</code> and <code class="bg-white px-1 rounded">POST /v1/map</code>.</p>
+            </div>
+            <div class="inline-flex rounded-md border border-gray-300 overflow-hidden bg-white">
+                <button type="button" id="mode-scrape" class="mode-btn mode-active" onclick="setMode('scrape')">Scrape a page</button>
+                <button type="button" id="mode-map" class="mode-btn border-l border-gray-300" onclick="setMode('map')">Map a site</button>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
+            <!-- Request -->
+            <form id="req-form" class="lg:col-span-2 space-y-4" onsubmit="run(event)">
+                <div class="bg-white rounded-lg shadow p-5 space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">URL</label>
+                        <input type="text" id="url" required value="{{.initialURL}}" placeholder="https://www.digikala.com/product/dkp-…" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+                    </div>
+
+                    <div id="scrape-opts" class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Outputs</label>
+                            <div id="formats"></div>
+                        </div>
+                        <label class="flex items-center gap-2 text-sm text-gray-700"><input type="checkbox" id="main-only" class="h-4 w-4 text-indigo-600 rounded"> Main content only <span class="text-xs text-gray-400">(drop navigation, footer, ads)</span></label>
+                    </div>
+
+                    <div id="map-opts" class="space-y-4 hidden">
+                        <div class="grid grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Only URLs containing</label>
+                                <input type="text" id="map-search" placeholder="/product/" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Limit</label>
+                                <input type="number" id="map-limit" value="5000" min="1" max="50000" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            </div>
+                        </div>
+                        <label class="flex items-center gap-2 text-sm text-gray-700"><input type="checkbox" id="map-subdomains" class="h-4 w-4 text-indigo-600 rounded"> Include other subdomains</label>
+                        <label class="flex items-center gap-2 text-sm text-gray-700"><input type="checkbox" id="map-nositemap" class="h-4 w-4 text-indigo-600 rounded"> Skip sitemaps (links only)</label>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-lg shadow p-5 space-y-4">
+                    <h3 class="text-sm font-semibold text-gray-700">Fetching</h3>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <label class="flex items-start gap-2 text-sm text-gray-700"><input type="radio" name="fetch" value="http" checked class="mt-0.5"> <span>Fast HTTP<span class="block text-xs text-gray-400">browser TLS fingerprint</span></span></label>
+                        <label class="flex items-start gap-2 text-sm text-gray-700"><input type="radio" name="fetch" value="fallback" class="mt-0.5"> <span>HTTP, browser if blocked<span class="block text-xs text-gray-400">CDN challenge / empty SPA</span></span></label>
+                        <label class="flex items-start gap-2 text-sm text-gray-700"><input type="radio" name="fetch" value="browser" class="mt-0.5"> <span>Headless browser<span class="block text-xs text-gray-400">renders JavaScript</span></span></label>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1">Proxy pool</label>
+                            <select id="proxy-pool" class="w-full px-2 py-1.5 border border-gray-300 rounded-md text-sm bg-white"></select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1">TLS fingerprint</label>
+                            <select id="fingerprint" class="w-full px-2 py-1.5 border border-gray-300 rounded-md text-sm bg-white"></select>
+                        </div>
+                    </div>
+                    <div class="browser-only hidden space-y-3">
+                        <div class="grid grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-xs font-medium text-gray-600 mb-1">Wait for selector</label>
+                                <input type="text" id="wait-selector" placeholder="#content" class="w-full px-2 py-1.5 border border-gray-300 rounded-md text-sm font-mono">
+                            </div>
+                            <div class="flex flex-col justify-end gap-1">
+                                <label class="flex items-center gap-2 text-sm text-gray-700"><input type="checkbox" id="screenshot" class="h-4 w-4 text-indigo-600 rounded"> Screenshot</label>
+                                <label class="flex items-center gap-2 text-sm text-gray-700"><input type="checkbox" id="full-page" class="h-4 w-4 text-indigo-600 rounded"> Full page</label>
+                            </div>
+                        </div>
+                        <details>
+                            <summary class="text-sm font-medium text-gray-700 cursor-pointer">Page actions</summary>
+                            <div id="actions" class="mt-2"></div>
+                        </details>
+                    </div>
+                </div>
+
+                <div id="extract-card" class="bg-white rounded-lg shadow p-5 space-y-3">
+                    <details>
+                        <summary class="text-sm font-semibold text-gray-700 cursor-pointer">Structured extraction</summary>
+                        <p class="text-xs text-gray-400 mt-2 mb-2">CSS or <code>xpath:</code> selectors. <b>price</b>/<b>number</b>/<b>date</b> understand Persian digits, تومان/ریال and Jalali dates.</p>
+                        <div id="fields"></div>
+                    </details>
+                    <details id="llm-box">
+                        <summary class="text-sm font-semibold text-gray-700 cursor-pointer">LLM extraction <span id="llm-state" class="text-xs font-normal"></span></summary>
+                        <textarea id="llm-prompt" rows="2" placeholder="Extract the product name, price in Toman and availability" class="mt-2 w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></textarea>
+                        <textarea id="llm-schema" rows="2" placeholder='{"name":"string","price":"number","in_stock":"boolean"}' class="mt-2 w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></textarea>
+                    </details>
+                </div>
+
+                <div class="flex gap-3">
+                    <button type="submit" id="run-btn" class="flex-1 bg-indigo-600 text-white py-2.5 px-4 rounded-md hover:bg-indigo-700 transition font-medium">Scrape</button>
+                    <button type="button" onclick="createCrawl()" id="crawl-btn" class="px-4 py-2.5 border border-indigo-300 text-indigo-700 rounded-md hover:bg-indigo-50 text-sm font-medium" title="Create a crawl job with these settings">Crawl whole site →</button>
+                </div>
+            </form>
+
+            <!-- Result -->
+            <div class="lg:col-span-3">
+                <div class="bg-white rounded-lg shadow min-h-[24rem]">
+                    <div id="result-empty" class="flex flex-col items-center justify-center text-center py-24 px-6 text-gray-400">
+                        <div class="text-4xl mb-3">🕸️</div>
+                        <p>Enter a URL and press <b>Scrape</b> to see Markdown, metadata, links, a screenshot and extracted data.</p>
+                    </div>
+                    <div id="result-loading" class="hidden flex-col items-center justify-center py-24 text-gray-500">
+                        <svg class="animate-spin h-8 w-8 text-indigo-600 mb-3" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" class="opacity-25"></circle><path fill="currentColor" class="opacity-75" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path></svg>
+                        <p id="loading-text">Fetching…</p>
+                    </div>
+                    <div id="result" class="hidden">
+                        <div class="px-5 pt-4 flex flex-wrap items-center gap-2 text-xs" id="result-meta"></div>
+                        <div class="border-b border-gray-200 mt-3"><nav id="out-tabs" class="flex gap-6 px-5 overflow-x-auto whitespace-nowrap text-sm"></nav></div>
+                        <div class="p-5" id="out-panels"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        var catalog = {{.catalogJSON}};
+        var mode = 'scrape';
+        var formats, fields, actions;
+
+        function setMode(m) {
+            mode = m;
+            document.getElementById('mode-scrape').classList.toggle('mode-active', m === 'scrape');
+            document.getElementById('mode-map').classList.toggle('mode-active', m === 'map');
+            document.getElementById('scrape-opts').classList.toggle('hidden', m !== 'scrape');
+            document.getElementById('map-opts').classList.toggle('hidden', m !== 'map');
+            document.getElementById('extract-card').classList.toggle('hidden', m !== 'scrape');
+            document.getElementById('run-btn').textContent = m === 'scrape' ? 'Scrape' : 'Map URLs';
+        }
+
+        function fetchMode() { return document.querySelector('input[name="fetch"]:checked').value; }
+        function syncFetch() {
+            document.querySelectorAll('.browser-only').forEach(function (el) { el.classList.toggle('hidden', fetchMode() === 'http'); });
+        }
+
+        function buildSettings() {
+            var s = {};
+            var fm = fetchMode();
+            if (fm === 'browser') s.use_headless_browser = true;
+            if (fm === 'fallback') s.headless_fallback = true;
+            var pool = document.getElementById('proxy-pool').value; if (pool) s.proxy_pool = pool;
+            var fp = document.getElementById('fingerprint').value; if (fp) s.tls_fingerprint = fp;
+            if (fm !== 'http') {
+                var ws = document.getElementById('wait-selector').value.trim(); if (ws) s.headless_wait_selector = ws;
+                if (document.getElementById('screenshot').checked) { s.screenshot = true; s.use_headless_browser = true; }
+                if (document.getElementById('full-page').checked) s.full_page_screenshot = true;
+                var a = actions.get(); if (a.length) { s.browser_actions = a; s.use_headless_browser = true; }
+            }
+            if (mode === 'scrape') {
+                var f = formats.get(); if (f.length) s.formats = f;
+                if (document.getElementById('main-only').checked) s.only_main_content = true;
+                var ef = fields.get(); if (ef.length) s.extract_fields = ef;
+                var lp = document.getElementById('llm-prompt').value.trim(); if (lp) s.llm_prompt = lp;
+                var ls = document.getElementById('llm-schema').value.trim(); if (ls) s.llm_schema = ls;
+            }
+            return s;
+        }
+
+        function showState(state) {
+            document.getElementById('result-empty').classList.toggle('hidden', state !== 'empty');
+            var l = document.getElementById('result-loading');
+            l.classList.toggle('hidden', state !== 'loading');
+            l.classList.toggle('flex', state === 'loading');
+            document.getElementById('result').classList.toggle('hidden', state !== 'result');
+        }
+
+        async function run(e) {
+            e.preventDefault();
+            var url = document.getElementById('url').value.trim();
+            var btn = document.getElementById('run-btn');
+            btn.disabled = true;
+            showState('loading');
+            document.getElementById('loading-text').textContent = mode === 'scrape' ? (fetchMode() === 'http' ? 'Fetching…' : 'Rendering in the browser…') : 'Reading robots.txt, sitemaps and links…';
+            history.replaceState(null, '', '/scrape?url=' + encodeURIComponent(url));
+            try {
+                var res;
+                if (mode === 'scrape') {
+                    res = await Mole.api('POST', '/api/v1/scrape', { url: url, settings: buildSettings() });
+                    renderScrape(res.data);
+                } else {
+                    res = await Mole.api('POST', '/api/v1/map', {
+                        url: url, search: document.getElementById('map-search').value.trim(),
+                        limit: parseInt(document.getElementById('map-limit').value, 10) || 5000,
+                        include_subdomains: document.getElementById('map-subdomains').checked,
+                        ignore_sitemap: document.getElementById('map-nositemap').checked,
+                        settings: buildSettings()
+                    });
+                    renderMap(res.data);
+                }
+                showState('result');
+            } catch (err) {
+                showState('empty');
+                Mole.toast(err.message, false);
+            }
+            btn.disabled = false;
+        }
+
+        function chip(text, cls) { return '<span class="px-2 py-0.5 rounded ' + (cls || 'bg-gray-100 text-gray-600') + '">' + text + '</span>'; }
+        // pre renders code-like output; prose (Markdown, text) uses the sans font so Persian reads naturally.
+        function pre(text, rtl, prose) { return '<pre class="out text-sm bg-gray-50 border border-gray-200 rounded-lg p-4 max-h-[40rem] overflow-auto' + (prose ? ' font-sans leading-7' : '') + '"' + (rtl ? ' dir="auto"' : '') + '>' + Mole.esc(text) + '</pre>'; }
+
+        function renderTabs(tabs) {
+            var nav = document.getElementById('out-tabs'), panels = document.getElementById('out-panels');
+            nav.innerHTML = tabs.map(function (t, i) { return '<button type="button" class="out-tab' + (i === 0 ? ' out-tab-active' : '') + '" data-t="' + i + '">' + t.title + '</button>'; }).join('');
+            panels.innerHTML = tabs.map(function (t, i) { return '<div class="out-panel' + (i === 0 ? '' : ' hidden') + '" data-t="' + i + '">' + t.html + '</div>'; }).join('');
+            nav.querySelectorAll('.out-tab').forEach(function (b) {
+                b.onclick = function () {
+                    nav.querySelectorAll('.out-tab').forEach(function (x) { x.classList.toggle('out-tab-active', x === b); });
+                    panels.querySelectorAll('.out-panel').forEach(function (p) { p.classList.toggle('hidden', p.getAttribute('data-t') !== b.getAttribute('data-t')); });
+                };
+            });
+        }
+
+        function renderScrape(d) {
+            var ok = d.status_code >= 200 && d.status_code < 300;
+            document.getElementById('result-meta').innerHTML =
+                chip('HTTP ' + d.status_code, ok ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800') +
+                chip('via ' + (d.fetched_with || '?')) + chip(Mole.fmtMs(d.duration_ms)) + chip(Mole.fmtBytes(d.usage.bytes)) +
+                (d.final_url && d.final_url !== d.url ? chip('→ ' + Mole.esc(d.final_url)) : '') +
+                (d.error ? chip(Mole.esc(d.error), 'bg-red-100 text-red-800') : '') +
+                (d.extract_error ? chip(Mole.esc(d.extract_error), 'bg-amber-100 text-amber-800') : '');
+            var tabs = [];
+            if (d.markdown) tabs.push({ title: 'Markdown', html: '<div class="flex justify-end mb-2"><button type="button" onclick="Mole.copy(document.getElementById(\'md-out\').textContent)" class="px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-50">Copy</button></div>' + pre(d.markdown, true, true).replace('<pre ', '<pre id="md-out" ') });
+            if (d.extracted) tabs.push({ title: 'Extracted', html: pre(JSON.stringify(d.extracted, null, 2), true) });
+            if (d.llm_extracted) tabs.push({ title: 'LLM', html: pre(JSON.stringify(d.llm_extracted, null, 2), true) });
+            if (d.screenshot) tabs.push({ title: 'Screenshot', html: '<img class="max-w-full border border-gray-200 rounded-lg" src="data:image/png;base64,' + d.screenshot + '" alt="Screenshot">' });
+            if (d.metadata) tabs.push({ title: 'Metadata', html: pre(JSON.stringify(d.metadata, null, 2), true) });
+            if (d.links && d.links.length) tabs.push({ title: 'Links (' + d.links.length + ')', html: '<ul class="text-sm space-y-1 max-h-[40rem] overflow-auto">' + d.links.map(function (l) { return '<li><a class="text-blue-600 hover:underline break-all" target="_blank" rel="noopener" href="' + Mole.esc(l) + '">' + Mole.esc(l) + '</a></li>'; }).join('') + '</ul>' });
+            if (d.text) tabs.push({ title: 'Text', html: pre(d.text, true, true) });
+            if (d.html) tabs.push({ title: 'HTML', html: pre(d.html) });
+            if (d.action_results) tabs.push({ title: 'Actions', html: pre(JSON.stringify(d.action_results, null, 2)) });
+            var copy = Object.assign({}, d); if (copy.screenshot) copy.screenshot = '(base64 PNG, ' + Math.round(copy.screenshot.length * 0.75 / 1024) + ' KB)';
+            tabs.push({ title: 'JSON', html: pre(JSON.stringify(copy, null, 2)) });
+            renderTabs(tabs);
+        }
+
+        function renderMap(d) {
+            document.getElementById('result-meta').innerHTML =
+                chip(d.total + ' URLs', 'bg-indigo-100 text-indigo-800') + chip(d.from_sitemap + ' from ' + (d.sitemaps || []).length + ' sitemaps') +
+                chip(d.from_links + ' from links') + chip(Mole.fmtMs(d.duration_ms)) + (d.truncated ? chip('limit reached', 'bg-amber-100 text-amber-800') : '');
+            var list = '<div class="flex justify-end mb-2"><button type="button" onclick="Mole.copy(document.getElementById(\'map-out\').textContent)" class="px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-50">Copy all</button></div>' +
+                '<pre id="map-out" class="out text-sm bg-gray-50 border border-gray-200 rounded-lg p-4 max-h-[40rem] overflow-auto">' + Mole.esc((d.urls || []).join('\n')) + '</pre>';
+            var tabs = [{ title: 'URLs', html: list }];
+            if (d.sitemaps && d.sitemaps.length) tabs.push({ title: 'Sitemaps', html: pre(d.sitemaps.join('\n')) });
+            renderTabs(tabs);
+        }
+
+        async function createCrawl() {
+            var url = document.getElementById('url').value.trim();
+            if (!url) { Mole.toast('Enter a URL first', false); return; }
+            var s = buildSettings();
+            if (mode === 'map') { var f = formats.get(); if (f.length) s.formats = f; }
+            try {
+                var res = await Mole.api('POST', '/api/v1/crawls', { url: url, settings: s, start: false });
+                location.href = '/jobs/' + res.data.id + '#settings';
+            } catch (err) { Mole.toast(err.message, false); }
+        }
+
+        document.addEventListener('DOMContentLoaded', function () {
+            formats = Mole.checkboxGroup(document.getElementById('formats'), catalog.formats, ['markdown', 'metadata'],
+                { labels: { markdown: 'Markdown', html: 'Clean HTML', text: 'Text', links: 'Links', metadata: 'Metadata' } });
+            fields = Mole.fieldEditor(document.getElementById('fields'), [], { types: catalog.field_types });
+            actions = Mole.actionsEditor(document.getElementById('actions'), [], { types: catalog.browser_actions });
+            document.getElementById('proxy-pool').innerHTML = '<option value="">Default</option><option value="auto">Automatic routing</option><option value="direct">Direct</option>' +
+                (catalog.proxy_pools || []).map(function (n) { return '<option value="' + Mole.esc(n) + '">' + Mole.esc(n) + '</option>'; }).join('');
+            document.getElementById('fingerprint').innerHTML = '<option value="">Default</option>' + catalog.fingerprints.map(function (f) { return '<option>' + f + '</option>'; }).join('');
+            var llm = document.getElementById('llm-state');
+            llm.textContent = catalog.llm_enabled ? '· ' + catalog.llm_model : '· not configured';
+            llm.className = 'text-xs font-normal ' + (catalog.llm_enabled ? 'text-green-600' : 'text-amber-600');
+            if (!catalog.llm_enabled) { document.getElementById('llm-prompt').disabled = true; document.getElementById('llm-schema').disabled = true; }
+            document.querySelectorAll('input[name="fetch"]').forEach(function (r) { r.addEventListener('change', syncFetch); });
+            syncFetch();
+        });
+    </script>
+</body>
+</html>

@@ -3,6 +3,7 @@ package database
 import (
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/resolver/crawler/config"
 	"github.com/resolver/crawler/models"
@@ -26,8 +27,12 @@ func New(cfg config.DatabaseConfig) (*Database, error) {
 		cfg.DBName,
 	)
 
+	logLevel := logger.Warn
+	if os.Getenv("MOLE_SQL_DEBUG") != "" {
+		logLevel = logger.Info
+	}
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
+		Logger: logger.Default.LogMode(logLevel),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
@@ -60,6 +65,12 @@ func (d *Database) AutoMigrate() error {
 		&models.SearchPhrase{},
 		&models.PhraseMatch{},
 		&models.PageEmbedding{},
+		&models.PageContent{},
+		&models.PageChange{},
+		&models.Schedule{},
+		&models.WebhookDelivery{},
+		&models.IdempotencyKey{},
+		&models.WorkerHeartbeat{},
 	)
 	if err != nil {
 		return err
@@ -73,6 +84,11 @@ func (d *Database) AutoMigrate() error {
 	// Create composite index for doc_hash + crawl_job_id deduplication (ignore if exists)
 	if !d.indexExists("crawled_pages", "idx_doc_crawl_job") {
 		d.DB.Exec("CREATE INDEX idx_doc_crawl_job ON crawled_pages(doc_hash, crawl_job_id)")
+	}
+
+	// Queue claim order: highest priority first, then oldest.
+	if !d.indexExists("crawl_jobs", "idx_crawl_jobs_queue") {
+		d.DB.Exec("CREATE INDEX idx_crawl_jobs_queue ON crawl_jobs(status, priority, queued_at)")
 	}
 
 	// Migration: drop the old global unique index on url_hash if it exists,

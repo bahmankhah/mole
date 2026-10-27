@@ -21,23 +21,8 @@
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
-    <nav class="bg-indigo-600 text-white shadow-lg">
-        <div class="max-w-7xl mx-auto px-4 py-4">
-            <div class="flex items-center justify-between">
-                <div class="flex items-center space-x-4">
-                    <a href="/" class="text-2xl font-bold hover:text-indigo-200 flex items-center gap-2"><img src="/static/logo.png" alt="" class="h-7 w-auto"> Mole</a>
-                    <span class="text-indigo-200">/</span>
-                    <span>Crawl Jobs</span>
-                </div>
-                <div class="flex items-center space-x-4">
-                    <a href="/discovery" class="text-indigo-200 hover:text-white transition text-sm">🔎 Discovery</a>
-                    <a href="/ports" class="text-indigo-200 hover:text-white transition text-sm">🔌 Ports</a>
-                    <a href="/phrases" class="text-indigo-200 hover:text-white transition text-sm">📋 Phrases</a>
-                    <a href="/search" class="text-indigo-200 hover:text-white transition text-sm">🔎 Search</a>
-                </div>
-            </div>
-        </div>
-    </nav>
+    {{template "nav" .}}
+    {{template "statusStyles"}}
 
     <div class="max-w-7xl mx-auto px-4 py-8">
         <div class="flex items-center justify-between mb-4">
@@ -66,15 +51,20 @@
                                 <a href="/jobs/{{.ID}}" class="text-indigo-600 hover:text-indigo-800 font-medium block truncate" title="{{.TargetURL}}">
                                     {{.TargetURL}}
                                 </a>
-                                {{if ne .TargetURL (printf "https://%s" .Domain)}}
-                                <span class="text-xs text-gray-400 block">{{.Domain}}</span>
-                                {{end}}
+                                <span class="text-xs text-gray-400 flex flex-wrap gap-x-2">
+                                    {{if .OwnerRef}}<span title="Owner">👤 {{.OwnerRef}}</span>{{end}}
+                                    {{if .ScheduleID}}<a href="/schedules/{{.ScheduleID}}" class="hover:text-indigo-600" title="Created by a schedule">🕑 scheduled</a>{{end}}
+                                    {{if .Region}}<span title="Runs only on workers in this region">📍 {{.Region}}</span>{{end}}
+                                    {{if gt .Priority 0}}<span title="Queue priority">⬆ {{.Priority}}</span>{{end}}
+                                </span>
                             </td>
                             <td class="px-6 py-4">
-                                <span class="status-{{.Status}}">{{.Status}}</span>
+                                {{template "statusBadge" .Status}}
+                                {{if .StopReason}}<span class="block text-xs text-gray-400 mt-1">{{.StopReason}}</span>{{end}}
                             </td>
-                            <td class="px-6 py-4">
+                            <td class="px-6 py-4 text-sm">
                                 {{.CrawledURLs}} / {{.TotalURLs}}
+                                <span class="block text-xs text-gray-400">{{.Usage.Requests}} req · {{bytes .Usage.Bytes}}</span>
                             </td>
                             <td class="px-6 py-4">
                                 <span class="{{if gt .FoundMatches 0}}text-green-600 font-bold{{end}}">
@@ -88,8 +78,17 @@
                                         class="inline-flex items-center px-2.5 py-1.5 text-xs font-medium rounded bg-green-100 text-green-700 hover:bg-green-200 transition">
                                         ▶ Start
                                     </button>
+                                    {{else if eq .Status "queued"}}
+                                    <button onclick="pauseJob('{{.ID}}')"
+                                        class="inline-flex items-center px-2.5 py-1.5 text-xs font-medium rounded bg-yellow-100 text-yellow-700 hover:bg-yellow-200 transition">
+                                        ⏸ Hold
+                                    </button>
+                                    <button onclick="stopJob('{{.ID}}')"
+                                        class="inline-flex items-center px-2.5 py-1.5 text-xs font-medium rounded bg-red-100 text-red-700 hover:bg-red-200 transition">
+                                        ⏹ Cancel
+                                    </button>
                                     {{else if eq .Status "running"}}
-                                    <button onclick="pauseJob()"
+                                    <button onclick="pauseJob('{{.ID}}')"
                                         class="inline-flex items-center px-2.5 py-1.5 text-xs font-medium rounded bg-yellow-100 text-yellow-700 hover:bg-yellow-200 transition">
                                         ⏸ Pause
                                     </button>
@@ -171,7 +170,7 @@
             else await apiCall('POST', '/api/jobs/stop');
             location.reload();
         }
-        async function pauseJob() { await apiCall('POST', '/api/jobs/pause'); location.reload(); }
+        async function pauseJob(id) { await apiCall('POST', `/api/jobs/${id}/pause`); location.reload(); }
         async function resumeJob(id) {
             if (id) await apiCall('POST', `/api/jobs/${id}/resume`);
             else await apiCall('POST', '/api/jobs/resume');

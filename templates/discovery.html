@@ -20,20 +20,8 @@
 </head>
 <body class="bg-gray-100 min-h-screen">
     <!-- Navigation -->
-    <nav class="bg-indigo-600 text-white shadow-lg">
-        <div class="max-w-7xl mx-auto px-4 py-4">
-            <div class="flex items-center justify-between">
-                <div class="flex items-center space-x-4">
-                    <a href="/" class="text-2xl font-bold hover:text-indigo-200 flex items-center gap-2"><img src="/static/logo.png" alt="" class="h-7 w-auto"> Mole</a>
-                    <span class="text-indigo-200">/</span>
-                    <span>Discovery: {{.job.Domain}}</span>
-                </div>
-                <div class="flex items-center space-x-4">
-                    <span class="status-{{.job.Status}} text-lg font-semibold">{{.job.Status}}</span>
-                </div>
-            </div>
-        </div>
-    </nav>
+    {{template "nav" .}}
+    {{template "statusStyles"}}
 
     <div class="max-w-7xl mx-auto px-4 py-8">
         <!-- Discovery Job Header -->

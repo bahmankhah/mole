@@ -44,8 +44,11 @@ func (p *SimplePhraseDetector) AddPhrase(phrase string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Create case-insensitive regex for the phrase
-	escapedPhrase := regexp.QuoteMeta(phrase)
+	// Create case-insensitive regex for the phrase, normalized the same way as content
+	escapedPhrase := regexp.QuoteMeta(strings.TrimSpace(normalizeContent(phrase)))
+	if escapedPhrase == "" {
+		return
+	}
 	re, err := regexp.Compile("(?i)" + escapedPhrase)
 	if err != nil {
 		log.Printf("[%s] Failed to compile phrase regex: %s", p.Name(), err)
@@ -174,10 +177,12 @@ var contentWhitespaceRegex = regexp.MustCompile(`[\s]+`)
 var punctuationToSpaceRegex = regexp.MustCompile(`[,،;؛.·•:!?/\\|()[\]{}<>@#$%^&*_=+~` + "`" + `"""''«»‹›—–\-\x{200c}\x{200d}\x{00ad}\x{2000}-\x{200a}]+`)
 
 // normalizeContent prepares content for phrase detection.
-// Punctuation marks are first replaced with spaces so that adjacent tokens
+// Persian text is canonicalized first (Arabic yeh/kaf, diacritics, Persian and
+// Arabic digits → ASCII) so spelling variants match. Punctuation marks are first replaced with spaces so that adjacent tokens
 // (e.g. "hello,world" or "هوش،مصنوعی") become separate words, then
 // excessive whitespace is collapsed.
 func normalizeContent(content string) string {
+	content = ToLatinDigits(NormalizePersian(content))
 	content = punctuationToSpaceRegex.ReplaceAllString(content, " ")
 	return contentWhitespaceRegex.ReplaceAllString(content, " ")
 }

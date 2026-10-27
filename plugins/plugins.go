@@ -43,14 +43,22 @@ type Plugin struct {
 	AfterJob       string `json:"after_job,omitempty"`
 	AfterCrawlPath string `json:"-"`
 	AfterJobPath   string `json:"-"`
+	// Env lists the environment variables the plugin needs (plugin.json "env").
+	Env []string `json:"env,omitempty"`
+	// MissingEnv lists required variables set neither in the plugin's .env
+	// file nor in the engine's environment.
+	MissingEnv []string `json:"missing_env,omitempty"`
+	// HasEnvFile reports whether plugins/<id>/.env exists.
+	HasEnvFile bool `json:"has_env_file"`
 }
 
 type pluginMeta struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Version     string `json:"version"`
-	AfterCrawl  string `json:"after_crawl"`
-	AfterJob    string `json:"after_job"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Version     string   `json:"version"`
+	AfterCrawl  string   `json:"after_crawl"`
+	AfterJob    string   `json:"after_job"`
+	Env         []string `json:"env"`
 }
 
 // ValidID reports whether id is a safe plugin folder name (no path separators).
@@ -214,6 +222,22 @@ func loadPlugin(dir, id string) (*Plugin, error) {
 
 	p.AfterCrawl, p.AfterCrawlPath, p.HasAfterCrawl = resolveHook(absDir, meta.AfterCrawl, defaultAfterCrawlFile)
 	p.AfterJob, p.AfterJobPath, p.HasAfterJob = resolveHook(absDir, meta.AfterJob, defaultAfterJobFile)
+	for _, name := range meta.Env {
+		if name = strings.TrimSpace(name); name != "" {
+			p.Env = append(p.Env, name)
+		}
+	}
+	fileEnv, err := p.LoadEnvFile()
+	if err != nil {
+		return nil, err
+	}
+	_, statErr := os.Stat(filepath.Join(absDir, EnvFileName))
+	p.HasEnvFile = statErr == nil
+	for _, name := range p.Env {
+		if fileEnv[name] == "" && os.Getenv(name) == "" {
+			p.MissingEnv = append(p.MissingEnv, name)
+		}
+	}
 	return p, nil
 }
 

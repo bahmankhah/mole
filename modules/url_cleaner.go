@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"regexp"
 	"sort"
@@ -281,6 +282,9 @@ func (u *URLCleaner) ExtractBaseDomain(rawURL string) string {
 	if domain == "" {
 		return ""
 	}
+	if net.ParseIP(domain) != nil {
+		return domain // IP addresses have no subdomains
+	}
 
 	parts := strings.Split(domain, ".")
 	if len(parts) <= 2 {
@@ -291,6 +295,7 @@ func (u *URLCleaner) ExtractBaseDomain(rawURL string) string {
 	commonSecondLevel := map[string]bool{
 		"co": true, "com": true, "net": true, "org": true,
 		"edu": true, "gov": true, "ac": true,
+		"id": true, "sch": true, // Iranian second-level domains (.id.ir, .sch.ir)
 	}
 
 	if len(parts) >= 3 && commonSecondLevel[parts[len(parts)-2]] {

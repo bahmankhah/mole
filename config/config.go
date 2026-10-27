@@ -1,8 +1,11 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -15,6 +18,109 @@ type Config struct {
 	Server    ServerConfig    `yaml:"server"`
 	Subdomain SubdomainConfig `yaml:"subdomain"`
 	PortScan  PortScanConfig  `yaml:"port_scan"`
+	API       APIConfig       `yaml:"api"`
+	UI        UIConfig        `yaml:"ui"`
+	Worker    WorkerConfig    `yaml:"worker"`
+	Security  SecurityConfig  `yaml:"security"`
+	Network   NetworkConfig   `yaml:"network"`
+	Headless  HeadlessConfig  `yaml:"headless"`
+	Storage   StorageConfig   `yaml:"storage"`
+	LLM       LLMConfig       `yaml:"llm"`
+	Webhooks  WebhooksConfig  `yaml:"webhooks"`
+	Plugins   PluginsConfig   `yaml:"plugins"`
+}
+
+// APIConfig secures the versioned /v1 API used by external control planes.
+type APIConfig struct {
+	Tokens []string `yaml:"tokens"` // bearer tokens accepted by /v1; empty = open (local use only)
+}
+
+// UIConfig controls the built-in web UI and its /api endpoints.
+type UIConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Username string `yaml:"username"` // optional HTTP basic auth for the UI
+	Password string `yaml:"password"`
+}
+
+// WorkerConfig controls how this process claims and runs queued jobs.
+type WorkerConfig struct {
+	ID                 string        `yaml:"id"`                    // unique worker id; default hostname-pid
+	Region             string        `yaml:"region"`                // e.g. "ir" or "intl"; jobs pinned to another region are skipped
+	MaxRunningJobs     int           `yaml:"max_running_jobs"`      // concurrent crawl jobs in this process
+	MaxRunningPerOwner int           `yaml:"max_running_per_owner"` // fairness cap across all workers (0 = unlimited)
+	LeaseTTL           time.Duration `yaml:"lease_ttl"`             // a running job whose lease expires is requeued
+	PollInterval       time.Duration `yaml:"poll_interval"`
+}
+
+// SecurityConfig protects the engine and the networks around it.
+type SecurityConfig struct {
+	AllowPrivateNetworks bool     `yaml:"allow_private_networks"` // allow crawling loopback/RFC1918/link-local targets
+	AllowedCIDRs         []string `yaml:"allowed_cidrs"`          // private ranges that stay reachable when blocked
+	MaxBodyBytes         int64    `yaml:"max_body_bytes"`         // response bodies are truncated beyond this size
+}
+
+// ProxyRoute sends hosts matching Match to a proxy pool and tags them with a region.
+type ProxyRoute struct {
+	Match  string `yaml:"match" json:"match"`
+	Pool   string `yaml:"pool" json:"pool"`
+	Region string `yaml:"region" json:"region"`
+}
+
+// NetworkConfig holds outbound networking defaults.
+type NetworkConfig struct {
+	TLSFingerprint   string              `yaml:"tls_fingerprint"`    // chrome, firefox, safari, edge, ios, go
+	HostRateLimit    float64             `yaml:"host_rate_limit"`    // max requests/sec per host across all jobs (0 = off)
+	ProxyPools       map[string][]string `yaml:"proxy_pools"`        // name -> proxy URLs (http, https, socks5)
+	ProxyRoutes      []ProxyRoute        `yaml:"proxy_routes"`       // first match wins
+	DefaultProxyPool string              `yaml:"default_proxy_pool"` // pool for hosts no route matches ("" = direct)
+}
+
+// HeadlessConfig controls the pool of long-lived headless browser processes.
+type HeadlessConfig struct {
+	PoolSize int `yaml:"pool_size"` // browser processes (each renders one page at a time)
+}
+
+// S3Config configures an S3-compatible object store (MinIO, ArvanCloud, AWS...).
+type S3Config struct {
+	Endpoint  string `yaml:"endpoint"`
+	Region    string `yaml:"region"`
+	Bucket    string `yaml:"bucket"`
+	AccessKey string `yaml:"access_key"`
+	SecretKey string `yaml:"secret_key"`
+	UseSSL    bool   `yaml:"use_ssl"`
+	Prefix    string `yaml:"prefix"`
+}
+
+// StorageConfig selects where screenshots and offloaded page bodies are stored.
+type StorageConfig struct {
+	Driver        string   `yaml:"driver"`         // "local" or "s3"
+	LocalDir      string   `yaml:"local_dir"`      // for the local driver
+	S3            S3Config `yaml:"s3"`             // for the s3 driver
+	OffloadBodies bool     `yaml:"offload_bodies"` // store saved page bodies in the object store instead of MySQL
+}
+
+// LLMConfig points at an OpenAI-compatible chat completions endpoint used for
+// LLM extraction (self-hosted models or a local gateway work too).
+type LLMConfig struct {
+	BaseURL       string        `yaml:"base_url"` // e.g. http://127.0.0.1:3001/v1
+	APIKey        string        `yaml:"api_key"`
+	Model         string        `yaml:"model"`
+	Timeout       time.Duration `yaml:"timeout"`
+	MaxInputChars int           `yaml:"max_input_chars"`
+}
+
+// WebhooksConfig controls outgoing webhook delivery.
+type WebhooksConfig struct {
+	Timeout      time.Duration `yaml:"timeout"`
+	MaxAttempts  int           `yaml:"max_attempts"`
+	AllowPrivate bool          `yaml:"allow_private"` // allow webhooks to private addresses (e.g. a control plane on the LAN)
+}
+
+// PluginsConfig controls the Python after-crawl / after-job plugins.
+type PluginsConfig struct {
+	AllowInAPI    bool          `yaml:"allow_in_api"` // let /v1 clients select plugins (they run arbitrary code)
+	AfterJobDelay time.Duration `yaml:"after_job_delay"`
+	Timeout       time.Duration `yaml:"timeout"` // per plugin invocation
 }
 
 // DatabaseConfig holds database connection settings
@@ -164,6 +270,89 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("SERVER_PORT"); v != "" {
 		c.Server.Port = v
 	}
+
+	if v := os.Getenv("MOLE_API_TOKENS"); v != "" {
+		c.API.Tokens = splitList(v)
+	}
+	if v := os.Getenv("MOLE_UI_USERNAME"); v != "" {
+		c.UI.Username = v
+	}
+	if v := os.Getenv("MOLE_UI_PASSWORD"); v != "" {
+		c.UI.Password = v
+	}
+	if v := os.Getenv("MOLE_WORKER_ID"); v != "" {
+		c.Worker.ID = v
+	}
+	if v := os.Getenv("MOLE_WORKER_REGION"); v != "" {
+		c.Worker.Region = v
+	}
+	if v := os.Getenv("MOLE_MAX_RUNNING_JOBS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Worker.MaxRunningJobs = n
+		}
+	}
+	if v := os.Getenv("MOLE_ALLOW_PRIVATE_NETWORKS"); v != "" {
+		c.Security.AllowPrivateNetworks = v == "1" || strings.EqualFold(v, "true")
+	}
+	if v := os.Getenv("MOLE_LLM_BASE_URL"); v != "" {
+		c.LLM.BaseURL = v
+	}
+	if v := os.Getenv("MOLE_LLM_API_KEY"); v != "" {
+		c.LLM.APIKey = v
+	}
+	if v := os.Getenv("MOLE_LLM_MODEL"); v != "" {
+		c.LLM.Model = v
+	}
+	if v := os.Getenv("MOLE_S3_ACCESS_KEY"); v != "" {
+		c.Storage.S3.AccessKey = v
+	}
+	if v := os.Getenv("MOLE_S3_SECRET_KEY"); v != "" {
+		c.Storage.S3.SecretKey = v
+	}
+}
+
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// Validate reports configuration errors that would make the engine misbehave.
+func (c *Config) Validate() error {
+	if c.Worker.MaxRunningJobs < 1 {
+		return fmt.Errorf("worker.max_running_jobs must be >= 1")
+	}
+	if c.Worker.LeaseTTL < 10*time.Second {
+		return fmt.Errorf("worker.lease_ttl must be at least 10s")
+	}
+	if c.Headless.PoolSize < 1 {
+		return fmt.Errorf("headless.pool_size must be >= 1")
+	}
+	switch c.Storage.Driver {
+	case "local", "s3":
+	default:
+		return fmt.Errorf("storage.driver must be \"local\" or \"s3\"")
+	}
+	if c.Storage.Driver == "s3" && (c.Storage.S3.Endpoint == "" || c.Storage.S3.Bucket == "") {
+		return fmt.Errorf("storage.s3.endpoint and storage.s3.bucket are required for the s3 driver")
+	}
+	return nil
+}
+
+// WorkerIdentity returns the configured worker id or hostname-pid.
+func (c *Config) WorkerIdentity() string {
+	if c.Worker.ID != "" {
+		return c.Worker.ID
+	}
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "worker"
+	}
+	return fmt.Sprintf("%s-%d", host, os.Getpid())
 }
 
 // DefaultConfig returns the default configuration
@@ -209,6 +398,37 @@ func DefaultConfig() *Config {
 			Concurrent:    64,
 			Timeout:       time.Second,
 			BannerTimeout: 700 * time.Millisecond,
+		},
+		UI: UIConfig{Enabled: true},
+		Worker: WorkerConfig{
+			MaxRunningJobs:     4,
+			MaxRunningPerOwner: 2,
+			LeaseTTL:           60 * time.Second,
+			PollInterval:       2 * time.Second,
+		},
+		Security: SecurityConfig{
+			MaxBodyBytes: 10 * 1024 * 1024,
+		},
+		Network: NetworkConfig{
+			TLSFingerprint: "chrome",
+			HostRateLimit:  2,
+		},
+		Headless: HeadlessConfig{PoolSize: 2},
+		Storage: StorageConfig{
+			Driver:   "local",
+			LocalDir: "data/objects",
+		},
+		LLM: LLMConfig{
+			Timeout:       90 * time.Second,
+			MaxInputChars: 24000,
+		},
+		Webhooks: WebhooksConfig{
+			Timeout:     10 * time.Second,
+			MaxAttempts: 8,
+		},
+		Plugins: PluginsConfig{
+			AfterJobDelay: 2 * time.Minute,
+			Timeout:       60 * time.Second,
 		},
 	}
 }

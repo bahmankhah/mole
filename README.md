@@ -1,910 +1,317 @@
-# Mole — Web Crawler & Information Retrieval Engine
+# Mole — crawling, scraping and change-monitoring engine
 
-Mole is a high-performance, concurrent web crawler and information retrieval system built in Go with Python-based auxiliary services. It provides full-domain crawling, subdomain discovery, phrase detection, keyword search, and optional semantic (vector) search powered by sentence-transformers and FAISS. It exposes both a web UI (Gin + HTML templates) and a JSON REST API.
+Mole crawls websites, renders JavaScript pages in a headless browser, turns pages into clean Markdown, extracts structured data (CSS / XPath / LLM), detects changes between runs and delivers results through a REST API, signed webhooks and CSV/JSON exports. It is built to be the engine behind a multi-tenant crawling service: a control plane (for example a Laravel app) owns users, plans and billing, and talks to Mole over the versioned `/v1` API.
 
----
-
-## Table of Contents
-
-1. [Architecture Overview](#architecture-overview)
-2. [Project Structure](#project-structure)
-3. [Technology Stack](#technology-stack)
-4. [Database Schema](#database-schema)
-5. [Core Components](#core-components)
-   - [Crawler Engine](#crawler-engine)
-   - [Job Manager](#job-manager)
-   - [Modules](#modules)
-6. [Features](#features)
-   - [Web Crawling](#web-crawling)
-   - [Subdomain Discovery](#subdomain-discovery)
-   - [Phrase Detection](#phrase-detection)
-   - [Keyword Search (N-Gram)](#keyword-search-n-gram)
-   - [Semantic Search (Vector)](#semantic-search-vector)
-   - [Headless Browser Rendering](#headless-browser-rendering)
-   - [URL Normalization & Deduplication](#url-normalization--deduplication)
-   - [Robots.txt & Sitemap Compliance](#robotstxt--sitemap-compliance)
-   - [Per-Job Settings Override](#per-job-settings-override)
-   - [Job Lifecycle Management](#job-lifecycle-management)
-7. [API Reference](#api-reference)
-8. [Web UI Pages](#web-ui-pages)
-9. [Configuration](#configuration)
-10. [Deployment](#deployment)
-11. [Python Environment Setup](#python-environment-setup)
+It understands Persian content: prices in تومان/ریال with Persian digits and «هزار/میلیون», Jalali dates, Arabic/Persian letter variants. It also routes `.ir` sites and international sites through different proxies and workers.
 
 ---
 
-## Architecture Overview
+## Contents
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                        Gin HTTP Server                           │
-│         (Web UI templates + JSON REST API on :5050)              │
-├───────────────────┬──────────────────────────────────────────────┤
-│   Handlers        │             Job Manager                      │
-│   (handlers.go)   │             (manager.go)                     │
-├───────────────────┴──────────────┬───────────────────────────────┤
-│                                  │                               │
-│          Crawler Engine          │     Subdomain Scanner         │
-│          (engine.go)             │     (subdomain_scanner.go)    │
-│                                  │                               │
-├───────┬──────┬──────┬────────┬───┴────┬──────────┬──────────────┤
-│Fetcher│Link  │Phrase│Sitemap │Robots  │ DB       │ Semantic     │
-│(HTTP/ │Extr. │Det.  │Parser  │Parser  │ Frontier │ Searcher     │
-│Headl.)│      │      │        │        │          │              │
-├───────┴──────┴──────┴────────┴────────┴──────────┴──────────────┤
-│                     MySQL 8.0 (GORM ORM)                         │
-├──────────────────────────────────────────────────────────────────┤
-│              Python Subprocess Services (optional)                │
-│     headless_fetch.py (Playwright)  │  semantic_embed.py (FAISS) │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-The system follows a modular, pipeline-based architecture. The **Job Manager** orchestrates job lifecycle. The **Crawler Engine** runs concurrent workers that pull URLs from a **DB-backed Frontier**, fetch pages via an **HTTP Fetcher** (or **Headless Fetcher**), extract links, detect phrases, and optionally generate embeddings. All state is persisted in MySQL.
+1. [Quick start](#quick-start)
+2. [Concepts](#concepts)
+3. [Architecture](#architecture)
+4. [Command-line interface](#command-line-interface)
+5. [HTTP API and webhooks](#http-api-and-webhooks) → [docs/laravel-integration.md](docs/laravel-integration.md)
+6. [Job settings reference](#job-settings-reference)
+7. [Configuration](#configuration)
+8. [Deployment](#deployment)
+9. [Security](#security)
+10. [Web UI](#web-ui)
+11. [Search, phrases and recon tools](#search-phrases-and-recon-tools)
+12. [Database tables](#database-tables)
+13. [Development](#development)
+14. [Upgrading from the single-job version](#upgrading-from-the-single-job-version)
 
 ---
 
-## Project Structure
+## Quick start
 
+Requirements: Go 1.22, MySQL 8, Python 3.10+ (for the headless browser).
+
+```bash
+./plugins/setup_python.sh          # venv + Playwright + Chromium (needed for browser rendering)
+make build                         # → bin/mole
+./bin/mole migrate                 # create tables (serve/worker also migrate on start)
+./bin/mole serve                   # web UI + API + worker on http://localhost:5050
+./bin/mole doctor                  # check database, Python, browser, storage, LLM
 ```
-.
-├── main.go                       # Application entry point, Gin router setup, route registration
-├── config.yaml                   # Runtime configuration (database, crawler, server, subdomain)
-├── go.mod                        # Go module definition and dependencies
-├── Makefile                      # Build, test, Docker, and utility commands
-├── Dockerfile                    # Multi-stage Docker build (Go binary + Alpine)
-├── docker-compose.yml            # Docker Compose for MySQL + crawler service
-│
-├── config/
-│   └── config.go                 # Configuration structs, YAML loading, env overrides, defaults
-│
-├── models/
-│   └── models.go                 # GORM model definitions for all database tables
-│
-├── database/
-│   └── database.go               # Database connection, migrations, index creation, seeding
-│
-├── crawler/
-│   └── engine.go                 # Core crawler engine: workers, crawl loop, content processing
-│
-├── jobs/
-│   └── manager.go                # Job lifecycle manager: create, start, stop, pause, resume, stats
-│
-├── handlers/
-│   └── handlers.go               # Gin HTTP handlers for all web and API routes
-│
-├── modules/
-│   ├── interfaces.go             # Module interfaces (Module, Fetcher, LinkExtractor, PhraseDetector, etc.)
-│   ├── fetcher.go                # HTTPFetcher (Chrome-mimicking TLS) + HeadlessFetcher (Playwright subprocess)
-│   ├── db_frontier.go            # Database-backed URL frontier with random surfer model
-│   ├── frontier.go               # In-memory random surfer frontier (alternative implementation)
-│   ├── link_extractor.go         # HTML link extraction, sitemap/robots.txt parsing, text extraction
-│   ├── url_cleaner.go            # URL normalization, tracking param removal, deduplication hashing
-│   ├── phrase_detector.go        # Regex-based phrase detection in content, URLs, and anchor text
-│   ├── duplicate_detector.go     # In-memory exact duplicate detector (hash set)
-│   ├── subdomain_scanner.go      # DNS-based subdomain enumeration with concurrent lookups
-│   └── semantic_search.go        # Embedding generation, FAISS index management, semantic search
-│
-├── plugins/
-│   ├── plugins.go                # Discovers after-crawl / after-job plugins from this folder
-│   ├── headless_fetch.py         # Playwright-based headless Chromium page renderer
-│   ├── semantic_embed.py         # Sentence-transformer embedding + FAISS index/search service
-│   ├── stem_lemma.py             # Stemming / lemmatization helper
-│   ├── requirements.txt          # Python dependencies (playwright, sentence-transformers, faiss-cpu, numpy)
-│   ├── setup_python.sh           # Automated Python venv creation and dependency installation
-│   └── <plugin-id>/              # One folder per after-crawl / after-job plugin
-│       ├── plugin.json           # Name, description, optional hook filenames
-│       ├── after_crawl.py        # Optional: runs after each crawled page (JSON on stdin)
-│       └── after_job.py          # Optional: runs ~2 minutes after the job ends (--job-id)
-│
-├── templates/
-│   ├── index.html                # Dashboard: recent jobs, discovery jobs, matches, phrases
-│   ├── job.html                  # Single job detail: stats, pages, matches, settings editor
-│   ├── discovery.html            # Discovery job detail: subdomains list
-│   ├── search.html               # Search page: keyword and semantic search interface
-│   └── phrases.html              # Phrase management page: add, toggle, delete phrases
-│
-├── static/
-│   └── js/
-│       └── tailwind.js           # Tailwind CSS (CDN build) for UI styling
-│
-└── data/
-    └── faiss/
-        └── pages.index           # FAISS vector index file (generated at runtime)
+
+Try it without a database:
+
+```bash
+./bin/mole scrape https://example.com                          # Markdown to stdout
+./bin/mole scrape https://shop.ir/p/1 --extract fields.json -o json
+./bin/mole map https://example.com --search /blog/
 ```
+
+With Docker: `MOLE_API_TOKENS=secret docker compose up -d` (UI at `127.0.0.1:5050`, user `admin`).
 
 ---
 
-## Technology Stack
+## Concepts
 
-| Layer | Technology | Purpose |
-|---|---|---|
-| **Language** | Go 1.21 | Core application, concurrency, HTTP server |
-| **Web Framework** | Gin v1.9 | HTTP routing, middleware, template rendering |
-| **ORM** | GORM v1.25 | Database operations, migrations, model mapping |
-| **Database** | MySQL 8.0 | Persistent storage for all crawl data |
-| **HTML Parsing** | goquery (PuerkitoBio) | DOM traversal, link extraction, text extraction |
-| **Configuration** | gopkg.in/yaml.v3 | YAML config file parsing |
-| **UUID** | google/uuid | Unique job identifiers |
-| **Python Runtime** | Python 3.x | Subprocess services for headless rendering and embeddings |
-| **Headless Browser** | Playwright (Python) | JavaScript-rendered page fetching via Chromium |
-| **Embeddings** | sentence-transformers | Text-to-vector encoding (default: `paraphrase-multilingual-MiniLM-L12-v2`) |
-| **Vector Index** | FAISS (faiss-cpu) | Approximate nearest neighbor search for semantic search |
-| **Containerization** | Docker + Docker Compose | Deployment packaging |
-| **UI** | Tailwind CSS | Frontend styling via HTML templates |
+| Term | Meaning |
+|---|---|
+| **Crawl job** | One crawl of a site: start URL(s), settings, limits, optional webhook. Status: `pending` → `queued` → `running` → `completed` / `failed` / `cancelled`, plus `paused`. |
+| **Queue** | Starting a job sets it to `queued`. Any worker with a free slot claims it. Higher `priority` goes first, then older jobs. |
+| **Worker** | A Mole process that runs jobs (`mole serve` or `mole worker`). Many workers can share one database. Each holds a *lease* on its running jobs and renews it every 5 s; if a worker dies, its jobs are requeued when the lease expires and continue from the saved frontier. |
+| **Owner ref** | An opaque id (e.g. a Laravel team id) set by the control plane. Mole uses it only for fairness (`worker.max_running_per_owner`), usage reports and bulk deletion. |
+| **Region** | Pins a job to workers started with `--region`, e.g. a worker with an Iranian IP for `.ir` sites. `"auto"` derives the region from `network.proxy_routes`. |
+| **Limits** | Per-job caps on pages, requests, bytes, browser seconds, LLM tokens and duration. A job that reaches one stops cleanly with `stop_reason` such as `limit:max_pages`. |
+| **Usage** | What a job consumed (requests, pages, bytes, browser ms, LLM tokens, screenshots, proxy requests). Control planes bill from it. |
+| **Page content** | Per-page derived output: Markdown, HTML, text, links, metadata, extracted fields, LLM output, screenshot, browser action results. |
+| **Schedule** | A cron expression plus a job template. Each run is compared with the previous run (change detection). |
+| **Change** | `new`, `changed` (with a line diff) or `removed` page compared with a baseline job. |
 
 ---
 
-## Database Schema
-
-The application uses **8 tables**, all managed via GORM `AutoMigrate`. The database is MySQL with `utf8mb4` character set.
-
-### `discovery_jobs`
-
-Tracks subdomain discovery operations for a root domain.
-
-| Column | Type | Constraints | Description |
-|---|---|---|---|
-| `id` | `VARCHAR(36)` | PK | UUID, auto-generated |
-| `domain` | `VARCHAR(255)` | INDEX, NOT NULL | Target root domain (e.g. `example.com`) |
-| `status` | `VARCHAR(20)` | INDEX, default `pending` | `pending`, `running`, `paused`, `completed`, `failed`, `cancelled` |
-| `subdomains_found` | `INT` | default `0` | Count of discovered subdomains |
-| `created_at` | `DATETIME` | | Creation timestamp |
-| `updated_at` | `DATETIME` | | Last update timestamp |
-| `started_at` | `DATETIME` | nullable | When discovery began |
-| `completed_at` | `DATETIME` | nullable | When discovery finished |
-| `error_message` | `TEXT` | | Error details if failed |
-
-### `crawl_jobs`
-
-Tracks individual crawl operations. Each crawl targets a specific URL/domain.
-
-| Column | Type | Constraints | Description |
-|---|---|---|---|
-| `id` | `VARCHAR(36)` | PK | UUID, auto-generated |
-| `discovery_job_id` | `VARCHAR(36)` | INDEX | FK to `discovery_jobs.id` (optional, if spawned from discovery) |
-| `target_url` | `VARCHAR(512)` | NOT NULL | The seed URL to begin crawling |
-| `domain` | `VARCHAR(255)` | INDEX, NOT NULL | Base domain extracted from target URL |
-| `status` | `VARCHAR(20)` | INDEX, default `pending` | `pending`, `running`, `paused`, `completed`, `failed`, `cancelled` |
-| `total_urls` | `INT` | default `0` | Total URLs known (frontier + crawled) |
-| `crawled_urls` | `INT` | default `0` | Count of URLs successfully fetched |
-| `found_matches` | `INT` | default `0` | Total phrase match count |
-| `max_depth` | `INT` | default `10` | Maximum crawl depth for this job |
-| `settings` | `JSON` | nullable | Per-job settings override (serialized `JobSettings`) |
-| `created_at` | `DATETIME` | | Creation timestamp |
-| `updated_at` | `DATETIME` | | Last update timestamp |
-| `started_at` | `DATETIME` | nullable | When crawl began |
-| `completed_at` | `DATETIME` | nullable | When crawl finished |
-| `error_message` | `TEXT` | | Error details if failed |
-
-### `subdomains`
-
-Stores discovered subdomains for a domain.
-
-| Column | Type | Constraints | Description |
-|---|---|---|---|
-| `id` | `UINT` | PK, auto-increment | |
-| `discovery_job_id` | `VARCHAR(36)` | INDEX, NOT NULL, FK → `discovery_jobs` ON DELETE CASCADE | Parent discovery job |
-| `domain` | `VARCHAR(255)` | INDEX, NOT NULL | Root domain |
-| `subdomain` | `VARCHAR(255)` | NOT NULL | Full subdomain name (e.g. `api.example.com`) |
-| `full_url` | `VARCHAR(512)` | | HTTPS URL of the subdomain |
-| `ip_address` | `VARCHAR(45)` | | Resolved IP address |
-| `is_active` | `BOOL` | default `true` | Whether the subdomain resolved |
-| `crawl_job_id` | `VARCHAR(36)` | INDEX, FK → `crawl_jobs` ON DELETE SET NULL | Linked crawl job (if crawl was created from this subdomain) |
-| `created_at` | `DATETIME` | | Discovery timestamp |
-
-### `crawled_pages`
-
-Stores metadata for every page the crawler has fetched.
-
-| Column | Type | Constraints | Description |
-|---|---|---|---|
-| `id` | `UINT` | PK, auto-increment | |
-| `crawl_job_id` | `VARCHAR(36)` | UNIQUE(`crawl_job_id`,`url_hash`), NOT NULL, FK → `crawl_jobs` ON DELETE CASCADE | Parent crawl job |
-| `url` | `VARCHAR(2048)` | INDEX (prefix 255) | Original URL as fetched |
-| `url_hash` | `VARCHAR(64)` | UNIQUE (composite with `crawl_job_id`) | SHA-256 hash of the normalized URL |
-| `doc_hash` | `VARCHAR(64)` | INDEX (composite with `crawl_job_id`) | SHA-256 hash of the response body (for content dedup) |
-| `normalized_url` | `VARCHAR(2048)` | | Cleaned/normalized version of the URL |
-| `title` | `VARCHAR(512)` | | HTML `<title>` extracted from content |
-| `status_code` | `INT` | | HTTP response status code |
-| `content_type` | `VARCHAR(128)` | | Response Content-Type header |
-| `content_length` | `BIGINT` | | Response body size in bytes |
-| `depth` | `INT` | | Crawl depth from seed URL |
-| `parent_url` | `VARCHAR(2048)` | | URL of the page that linked to this one |
-| `crawled_at` | `DATETIME` | | When the page was fetched |
-| `response_time` | `BIGINT` | | Response time in milliseconds |
-| `error_message` | `TEXT` | | Error if fetch failed |
-| `is_archived` | `BOOL` | INDEX, default `false` | Soft-delete flag |
-
-**Custom indexes:**
-- `idx_doc_crawl_job` on `(doc_hash, crawl_job_id)` — fast content duplicate detection
-
-### `frontier_urls`
-
-The URL frontier queue. Pending URLs to be crawled, managed by the DB Frontier module. Completed URLs are **deleted** from this table (they exist in `crawled_pages`).
-
-| Column | Type | Constraints | Description |
-|---|---|---|---|
-| `id` | `UINT` | PK, auto-increment | |
-| `crawl_job_id` | `VARCHAR(36)` | INDEX (composite `idx_job_status`), UNIQUE (composite with `url_hash`), NOT NULL, FK → `crawl_jobs` ON DELETE CASCADE | Parent crawl job |
-| `url` | `VARCHAR(2048)` | NOT NULL | Raw URL |
-| `url_hash` | `VARCHAR(64)` | UNIQUE (composite with `crawl_job_id`) | SHA-256 hash of the normalized URL |
-| `normalized_url` | `VARCHAR(2048)` | | Cleaned URL |
-| `depth` | `INT` | | Crawl depth |
-| `priority` | `INT` | INDEX, default `0` | Priority score (reserved for future use) |
-| `status` | `VARCHAR(20)` | INDEX (composite `idx_job_status`), default `pending` | `pending`, `processing`, `failed` |
-| `parent_url` | `VARCHAR(2048)` | | Referrer URL |
-| `anchor_text` | `TEXT` | | Anchor text of the link pointing to this URL |
-| `retry_count` | `INT` | default `0` | Number of fetch retries |
-| `created_at` | `DATETIME` | | When added to frontier |
-| `updated_at` | `DATETIME` | | Last status change |
-
-### `search_phrases`
-
-User-defined phrases to search for during crawling.
-
-| Column | Type | Constraints | Description |
-|---|---|---|---|
-| `id` | `UINT` | PK, auto-increment | |
-| `phrase` | `VARCHAR(255)` | UNIQUE INDEX, NOT NULL | The search phrase text |
-| `is_active` | `BOOL` | default `true` | Whether this phrase is currently active |
-| `created_at` | `DATETIME` | | Creation timestamp |
-
-### `phrase_matches`
-
-Records every occurrence of a search phrase found during crawling.
-
-| Column | Type | Constraints | Description |
-|---|---|---|---|
-| `id` | `UINT` | PK, auto-increment | |
-| `crawl_job_id` | `VARCHAR(36)` | INDEX, NOT NULL, FK → `crawl_jobs` ON DELETE CASCADE | Parent crawl job |
-| `page_id` | `UINT` | INDEX, FK → `crawled_pages` ON DELETE CASCADE | The crawled page where the match was found |
-| `search_phrase_id` | `UINT` | INDEX, FK → `search_phrases` ON DELETE SET NULL | Linked search phrase (nullable) |
-| `url` | `VARCHAR(2048)` | NOT NULL | URL where the phrase was found |
-| `phrase` | `VARCHAR(255)` | INDEX (`idx_phrase`), NOT NULL | The matched phrase text |
-| `match_type` | `VARCHAR(20)` | INDEX, default `content` | `content` (page body), `url` (the URL itself), `anchor` (link anchor text) |
-| `context` | `TEXT` | | ~100 characters of surrounding text for context |
-| `occurrences` | `INT` | default `1` | Number of times the phrase appears |
-| `found_at` | `DATETIME` | | Discovery timestamp |
-| `is_archived` | `BOOL` | INDEX, default `false` | Soft-delete flag |
-
-**Custom indexes:**
-- `idx_phrase_match_phrase_url` on `(phrase(255), url(255))` — optimized search performance
-
-### `page_embeddings`
-
-Stores vector embeddings for semantic search.
-
-| Column | Type | Constraints | Description |
-|---|---|---|---|
-| `id` | `UINT` | PK, auto-increment | |
-| `crawl_job_id` | `VARCHAR(36)` | INDEX, NOT NULL, FK → `crawl_jobs` ON DELETE CASCADE | Parent crawl job |
-| `page_id` | `UINT` | UNIQUE INDEX, NOT NULL, FK → `crawled_pages` ON DELETE CASCADE | The source page |
-| `url` | `VARCHAR(2048)` | NOT NULL | Page URL |
-| `title` | `VARCHAR(512)` | | Page title |
-| `embedding` | `MEDIUMBLOB` | | Serialized float32 vector (384 dimensions × 4 bytes = 1,536 bytes typically) |
-| `text_hash` | `VARCHAR(64)` | | SHA-256 hash of the embedded text (avoids re-embedding identical content) |
-| `created_at` | `DATETIME` | | Embedding generation timestamp |
-
-### Entity Relationship Summary
+## Architecture
 
 ```
-discovery_jobs 1──N subdomains N──1 crawl_jobs
-crawl_jobs     1──N crawled_pages
-crawl_jobs     1──N frontier_urls
-crawl_jobs     1──N phrase_matches
-crawl_jobs     1──N page_embeddings
-crawled_pages  1──N phrase_matches
-crawled_pages  1──1 page_embeddings
-search_phrases 1──N phrase_matches
+            Laravel / any control plane                  Browser (web UI)
+                     │  /v1  (bearer token)                 │  /, /api, /api/v1 (basic auth)
+┌────────────────────▼──────────────────────────────────────▼──────────────────┐
+│ handlers  — v1 API, UI pages, auth                                           │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ jobs.Manager — lifecycle, durable queue + leases, scheduler (cron), webhook   │
+│                outbox, after-job plugins, exports, owners, idempotency        │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ crawler.Engine (shared)              │ crawler.Run (one per running job)      │
+│  netx: SSRF guard, proxy pools,      │  DB frontier, workers, robots,         │
+│        uTLS fingerprints, host limit │  limits, lease renewal, control,       │
+│  BrowserPool (long-lived Chromium)   │  page analysis, change detection       │
+│  content: Markdown, metadata,        │                                        │
+│           CSS/XPath extraction, LLM  │  crawler.Scrape / crawler.Map (sync)   │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ MySQL (jobs, frontier, pages, content, changes, schedules, outbox)           │
+│ Object storage: local disk or S3-compatible (screenshots, offloaded bodies)  │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+| Package | Responsibility |
+|---|---|
+| `cmd/` | Cobra CLI (`serve`, `worker`, `scrape`, `map`, `crawl`, `jobs`, `schedules`, `owners`, `doctor`, …) |
+| `app/` | Wires config, database, storage, engine and manager |
+| `jobs/` | Job lifecycle, queue/leases, scheduler, webhooks, schedules, results/export, owners |
+| `crawler/` | Shared engine, per-job runs, fetch strategy, page processing, scrape/map |
+| `netx/` | SSRF guard, proxy selection/routing, TLS-fingerprinted HTTP/1.1 + HTTP/2 transport, per-host rate limiter |
+| `content/` | Metadata, readability main content, HTML→Markdown, structured extraction, LLM client |
+| `modules/` | Frontier, link/sitemap/robots parsing, URL cleaning, phrases, Persian text and Jalali dates, text diff, browser pool, stemming, semantic search, recon scanners |
+| `storage/` | Local and S3 object stores |
+| `handlers/` | `/v1` API, UI handlers and pages, auth |
+| `plugins/` | `headless_fetch.py` (browser server), embeddings, stemming, after-crawl/after-job plugins |
+
+### Fetching strategy
+
+1. Wait for the per-host rate limiter. It is shared by all jobs in the process, so two customers crawling the same site do not overload it together. `429`/`503` responses with `Retry-After` pause that host.
+2. Choose a proxy: job proxies, then the job's pool, then routing rules (`.ir` → Iranian pool), then the default pool. A sticky proxy keeps one exit IP per site.
+3. Fetch with **HTTP** using a browser TLS fingerprint (Chrome by default; HTTP/2 when the server supports it), or with the **headless browser** from a pool of long-lived Chromium processes.
+4. With **browser fallback**, an HTTP response that looks like a CDN/WAF challenge (ArvanCloud, Cloudflare, openresty) or an unrendered SPA shell is fetched again in the browser.
+5. Every destination, including redirects, is checked by the SSRF guard (see [Security](#security)).
+
+---
+
+## Command-line interface
+
+`mole --help` and `mole <command> --help` describe every flag. Global flags: `-c/--config`, `-o/--output table|json`, `-v/--verbose` (engine logs). Running `mole` without a command starts the server.
+
+| Command | Purpose |
+|---|---|
+| `mole serve [--addr --no-ui --no-worker --region --max-jobs]` | Web UI, `/api`, `/v1` and a worker |
+| `mole worker [--region --max-jobs --health-addr]` | Worker only (scale out; one per region) |
+| `mole scrape <url>` | One page → Markdown/text/HTML/links/metadata/extracted JSON. `--browser`, `--fallback`, `--main-only`, `-f markdown,links`, `--extract fields.json`, `--actions actions.json`, `--screenshot shot.png --full-page`, `--llm-prompt`, `--proxy`, `--fingerprint`, `-H "Name: value"`, `--settings settings.json` |
+| `mole map <url>` | URLs from robots.txt, sitemaps and the start page. `--search`, `--limit`, `--subdomains`, `--no-sitemap` |
+| `mole crawl <url>` | Crawl and wait (Ctrl+C pauses). `-d`, `--max-pages`, `--max-duration`, `-f`, `--include/--exclude`, `--extract`, `--compare-with <job>`, `--owner`, `--priority`, `--region`, `--webhook`, `--export csv --out file`, `--detach` |
+| `mole jobs list/get/watch/pages/changes/export` | Inspect jobs (`export --format csv\|json\|jsonl`) |
+| `mole jobs start/pause/resume/cancel/delete/duplicate <id>…` | Control jobs from any machine; the owning worker applies the change within seconds |
+| `mole schedules list/get/create/run/enable/disable/delete/next` | Recurring crawls (`create <url> --cron "0 */6 * * *" --tz Asia/Tehran`) |
+| `mole owners usage <ref> [--from --to]` / `owners delete <ref>` | Billing data / account deletion |
+| `mole migrate`, `mole doctor`, `mole config show\|validate`, `mole plugins list`, `mole version`, `mole completion bash` | Operations |
+
+Extraction schema file (`--extract fields.json`):
+
+```json
+[
+  {"name": "title", "selector": "h1"},
+  {"name": "price", "selector": ".price", "type": "price"},
+  {"name": "image", "selector": "img.main", "type": "url"},
+  {"name": "date",  "selector": "xpath://time/@datetime", "type": "date"},
+  {"name": "specs", "selector": "table.specs tr", "type": "list",
+   "fields": [{"name": "key", "selector": "th"}, {"name": "value", "selector": "td"}]}
+]
 ```
 
 ---
 
-## Core Components
+## HTTP API and webhooks
 
-### Crawler Engine
-
-**File:** `crawler/engine.go` (940 lines)
-
-The engine is the heart of the system. It manages concurrent crawl workers and orchestrates the entire fetch-extract-detect-store pipeline.
-
-**Lifecycle:**
-
-1. **Initialization** — `NewEngine()` creates all modules: HTTPFetcher/HeadlessFetcher, URLCleaner, HTMLLinkExtractor, SimplePhraseDetector, SitemapParser, RobotsParser, DBFrontier, and SemanticSearcher.
-2. **Start** — `Start(job)` transitions to `StateRunning`, merges per-job settings into the effective config, recreates the fetcher, resets robots rules, seeds the frontier, spawns `N` worker goroutines (default 10), starts a monitor goroutine, and a completion watcher.
-3. **Worker loop** — Each worker:
-   - Pulls a URL from the DB frontier using the random surfer model
-   - Checks depth limit, robots.txt compliance, max pages limit
-   - Calls `Fetcher.Fetch()` to retrieve the page
-   - Saves the `CrawledPage` record (with URL hash and doc hash dedup)
-   - Calls `processContent()` which:
-     - Extracts text content and runs phrase detection (content, URL, anchor text)
-     - Extracts links from HTML and filters by base domain
-     - Processes sitemaps and robots.txt for URL discovery
-     - Optionally generates semantic embeddings in a background goroutine
-   - Sleeps for a randomized politeness delay (±1 second jitter)
-   - Exits after 30 consecutive empty frontier checks (~15 seconds of inactivity)
-4. **Completion** — When all workers exit naturally, `watchForCompletion()` marks the job as completed and optionally rebuilds the FAISS index.
-5. **Stop/Pause/Resume** — Atomic state transitions (`StateRunning` ↔ `StatePaused` ↔ `StateStopping` → `StateIdle`). Pause holds workers in a 100ms sleep loop. Resume resets stuck "processing" URLs back to "pending".
-
-**State Machine:**
-
-```
-StateIdle ──Start──▶ StateRunning ──Pause──▶ StatePaused
-     ▲                     │                      │
-     │                     Stop                  Resume
-     │                     ▼                      │
-     └───────────── StateStopping ◀───────────────┘
-```
-
-**Content Processing Pipeline:**
-
-```
-Fetch URL → Check Content-Type → Save CrawledPage → Extract Text
-     │                                                     │
-     │                                                     ├─▶ Detect Phrases (content)
-     │                                                     ├─▶ Detect Phrases (URL)
-     │                                                     ├─▶ Detect Phrases (anchor text)
-     │                                                     └─▶ Generate Embedding (async, optional)
-     │
-     └─ If HTML → Extract Links → Filter by domain → Add to DB Frontier
-     └─ If Sitemap XML → Parse URLs → Add to DB Frontier
-     └─ If robots.txt → Parse rules → Store disallow/allow + discover sitemaps
-```
-
-**Deduplication Strategy:**
-
-1. **URL dedup** — SHA-256 hash of the normalized URL. Composite unique index `(crawl_job_id, url_hash)` on both `frontier_urls` and `crawled_pages`. Uses `ON CONFLICT DO NOTHING` upserts.
-2. **Content dedup** — SHA-256 hash of the response body (`doc_hash`). If `skip_content_duplicates` is enabled, pages with identical body hashes within a job are skipped (the page is recorded but not re-processed).
-
-### Job Manager
-
-**File:** `jobs/manager.go` (888 lines)
-
-Central orchestrator for job lifecycle and data access. Wraps the crawler engine and subdomain scanner.
-
-**Responsibilities:**
-- **Job CRUD** — Create, read, update, delete crawl jobs and discovery jobs
-- **Job control** — Start, stop, pause, resume crawl jobs (delegates to engine)
-- **Subdomain discovery** — Creates a `DiscoveryJob`, runs `SubdomainScanner` in a goroutine, saves results
-- **Data queries** — Paginated retrieval of crawled pages, phrase matches, stats
-- **Phrase management** — CRUD for search phrases with match/URL count aggregation
-- **Search** — Keyword search via n-gram matching, semantic search via FAISS
-- **Stale job cleanup** — On startup, marks any `running`/`paused` jobs as `cancelled` (from previous crashes)
-- **Job duplication** — Deep-copies job configuration for re-crawling
-- **Settings management** — Per-job settings override with reset-to-defaults support
-
-### Modules
-
-All modules implement the base `Module` interface (`Name()`, `Initialize()`, `Shutdown()`).
-
-#### HTTPFetcher (`modules/fetcher.go`)
-
-Standard HTTP client that mimics a real Chrome browser to avoid bot detection:
-
-- **TLS fingerprint** — Custom cipher suite ordering matching Chrome 131, TLS 1.2–1.3, curve preferences (X25519, P256, P384)
-- **User-Agent rotation** — Pool of 7 real browser User-Agent strings (Chrome, Firefox, Safari, Edge), randomly selected per request
-- **Chrome-like headers** — Sets `Sec-Ch-Ua`, `Sec-Fetch-*`, `Upgrade-Insecure-Requests`, `Accept-Language`, `Cache-Control`
-- **Connection pooling** — 100 max idle connections, 10 per host, 20 max per host, HTTP/2 support
-- **Gzip handling** — Automatic gzip decompression safety net
-- **Cookie jar** — Maintains cookies across redirects
-- **Redirect handling** — Follows up to 10 redirects, forwarding original headers
-- **Body limit** — 10 MB max response body
-
-#### HeadlessFetcher (`modules/fetcher.go`)
-
-For JavaScript-heavy SPAs. Delegates to `plugins/headless_fetch.py` via subprocess:
-
-- Launches Playwright Chromium in headless mode
-- Waits for `domcontentloaded`, then optionally waits for a CSS selector
-- Waits for `networkidle` state (up to 10s) for dynamic content
-- Returns the fully rendered HTML
-- Auto-detects the Python binary (checks project venv → system PATH)
-- Timeout: script timeout + 15s buffer for browser startup/teardown
-
-#### DBFrontier (`modules/db_frontier.go`)
-
-Database-backed URL frontier implementing the **random surfer model**:
-
-- **Random URL selection** — Instead of FIFO, uses a random selection strategy. Picks a random ID in the range `[min_id, max_id]` of pending rows, then finds the nearest pending URL. This creates `O(1)` random access vs `O(n)` from `ORDER BY RAND()` or large-offset `LIMIT`.
-- **Teleport probability** (default 0.2) — 20% chance of selecting a random URL from the entire frontier instead of following linked URLs sequentially. Based on the PageRank random surfer model.
-- **URL filtering** — Configurable file extension skip list (images, documents, archives, media, fonts, binaries). Optional regex-based include/exclude URL patterns.
-- **Seed URL handling** — Seed URLs (target URL, robots.txt, sitemap.xml, sitemap_index.xml) bypass extension and URL pattern filters. Discovery seeds are only added for root URLs (not deep paths or SPA fragment routes).
-- **SPA fragment support** — Detects meaningful URL fragments (e.g. `#/search?q=foo`) and preserves them through normalization.
-- **Upsert insertion** — Uses `ON CONFLICT DO NOTHING` to prevent duplicate frontier entries without race conditions.
-- **Cross-check dedup** — Before adding a URL, checks both `frontier_urls` and `crawled_pages` tables to prevent re-crawling.
-- **Status management** — `pending` → `processing` → deleted (on success) or `failed`/re-queued (on failure with retry count).
-- **Recovery** — `ResetProcessingURLs()` moves stuck "processing" URLs back to "pending" on resume or recovery.
-
-#### URLCleaner (`modules/url_cleaner.go`)
-
-Comprehensive URL normalization and cleaning:
-
-- **Scheme normalization** — Defaults to `https://`, only allows `http`/`https`
-- **Case normalization** — Lowercases scheme and host
-- **Default port removal** — Strips `:80` (HTTP) and `:443` (HTTPS)
-- **Fragment removal** — Strips `#fragment` (with SPA exception via `ProcessURLKeepFragment`)
-- **Tracking parameter removal** — Strips 50+ known tracking parameters: UTM (`utm_source`, `utm_medium`, etc.), ad networks (`fbclid`, `gclid`, `msclkid`, `zanpid`), analytics (`_ga`, `_gl`, `_hsenc`), site-specific (`redirect_url`, `callback_url`, `return_url`, etc.)
-- **Per-job extra tracking params** — Jobs can specify additional params to strip
-- **Query parameter sorting** — Alphabetical for consistency
-- **Path normalization** — Removes duplicate slashes, trailing slashes (except root)
-- **Domain extraction** — `ExtractDomain()` for full hostname, `ExtractBaseDomain()` for registrable domain (handles `.co.uk`, `.com.br`, etc.)
-- **URL hashing** — SHA-256 of the normalized URL for deduplication
-
-#### HTMLLinkExtractor (`modules/link_extractor.go`)
-
-Extracts links from HTML using goquery DOM traversal. Covers a comprehensive set of sources:
-
-| Source | HTML Elements | Details |
-|---|---|---|
-| Hyperlinks | `<a href>` | With anchor text preservation and deduplication |
-| Resources | `<img src>`, `<script src>`, `<iframe src>` | Static assets |
-| Stylesheets | `<link href>` | CSS and other linked resources |
-| Forms | `<form action>` | Form submission targets |
-| Data attributes | `[data-href]`, `[data-url]`, `[data-src]`, `[data-link]` | SPA/JavaScript integration |
-| SEO | `<link rel="canonical">`, `<link rel="alternate">` | Canonical and alternate URLs |
-| Meta refresh | `<meta http-equiv="refresh" content="0;url=...">` | Page redirects |
-| OpenGraph | `<meta property="og:*">`, `<meta name="twitter:*">` | Social media URLs |
-| Responsive images | `[srcset]` | All candidates from srcset attribute |
-| Inline scripts | `<script>` text content | Bare URL regex extraction (up to 200 URLs per block, max 512KB scripts) |
-
-Also provides:
-- **Text extraction** — `ExtractTextContent()` strips `<script>`, `<style>`, `<noscript>` and normalizes whitespace
-- **Title extraction** — `ExtractTitle()` reads the `<title>` tag
-
-#### SitemapParser (`modules/link_extractor.go`)
-
-Parses XML sitemaps and sitemap index files:
-
-- Extracts URLs from `<url><loc>` tags
-- Extracts nested sitemap references from `<sitemap><loc>` tags
-- Normalizes all discovered URLs through the URLCleaner
-
-#### RobotsParser (`modules/link_extractor.go`)
-
-Parses `robots.txt` with compliance enforcement:
-
-- Extracts `Sitemap:` directives → added to frontier for discovery
-- Extracts `Allow:` and `Disallow:` paths for the `*` user-agent
-- **Path-prefix matching** — When checking compliance, the longest matching `Disallow` path wins, unless a longer `Allow` path overrides it
-- Rules are cached per-domain in the engine's `robotRules` map
-
-#### SimplePhraseDetector (`modules/phrase_detector.go`)
-
-Finds user-defined phrases in crawled content using regex matching:
-
-- Compiles each phrase into a case-insensitive `(?i)` regex (with `QuoteMeta` escaping for special characters)
-- Detects in three contexts: **content** (page body text), **URL** (the page URL), **anchor** (link anchor text pointing to the page)
-- Returns occurrence count and ~100-character context window around the first match
-- UTF-8 safe context extraction (never cuts multi-byte characters)
-
-#### SubdomainScanner (`modules/subdomain_scanner.go`)
-
-DNS-based subdomain enumeration:
-
-- Tests ~100+ common subdomain prefixes (www, mail, api, cdn, admin, blog, dev, staging, etc.) via DNS A-record lookups
-- Uses configurable DNS servers (default: Google 8.8.8.8/8.8.4.4, Cloudflare 1.1.1.1)
-- Concurrent lookups with configurable parallelism (default: 50 concurrent)
-- Per-lookup timeout (default: 5 seconds)
-- Reports discovered subdomains via callback with IP address
-
-#### SemanticSearcher (`modules/semantic_search.go`)
-
-Vector-based semantic search using sentence-transformers and FAISS:
-
-- **Embedding generation** — Calls `plugins/semantic_embed.py` with `command: embed`. Uses `paraphrase-multilingual-MiniLM-L12-v2` model (384-dimensional, multilingual). Truncates page content to ~1,000 words. Prepends page title to the text.
-- **Content hashing** — SHA-256 of the embedded text prevents re-embedding identical content.
-- **Storage** — Embeddings stored as `MEDIUMBLOB` in MySQL (float64 → float32 serialization, 4 bytes per dimension). Upserted on `page_id` conflict.
-- **Index building** — Calls `plugins/semantic_embed.py` with `command: index`. Reads all embeddings from DB, builds a FAISS `IndexIDMap(IndexFlatIP)` index (inner product = cosine similarity for normalized vectors), writes to `data/faiss/pages.index`.
-- **Search** — Calls `plugins/semantic_embed.py` with `command: search`. Embeds the query text, searches the FAISS index for top-K nearest neighbors, returns page IDs with similarity scores. Results are enriched with page metadata and domain info from the database.
-- **Auto-rebuild** — FAISS index is automatically rebuilt when a crawl job completes with semantic search enabled.
-- **Environment handling** — Strips proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) before calling Python to prevent interference with model downloads.
-
-#### ExactDuplicateDetector (`modules/duplicate_detector.go`)
-
-In-memory hash set for fast URL deduplication:
-
-- Thread-safe with `sync.RWMutex`
-- Atomic `IsDuplicateOrMark()` for check-and-mark in one operation
-- `LoadFromHashes()` for resuming crawls from existing state
-- Used by the in-memory `RandomSurferFrontier` (the DB frontier uses database-level dedup instead)
+The `/v1` API reference, the webhook events and their signature, and the requirements for the Laravel control plane are in **[docs/laravel-integration.md](docs/laravel-integration.md)**. The web UI calls the same handlers under `/api/v1`, authenticated with the UI password.
 
 ---
 
-## Features
+## Job settings reference
 
-### Web Crawling
+All settings are optional; empty means "use the global default from `config.yaml`". They are the same in the API, the UI Settings tab, `--settings` files and schedule templates.
 
-The core crawling pipeline:
+| Group | Fields |
+|---|---|
+| Crawl | `max_concurrent_requests`, `request_timeout_seconds`, `politeness_delay_ms` (±1 s jitter), `max_depth`, `max_pages`, `max_retries`, `user_agent`, `respect_robots_txt`, `skip_extensions`, `url_include_patterns`, `url_exclude_patterns`, `extra_tracking_params`, `skip_content_duplicates` |
+| Request | `request_method` (`POST` for seed URLs), `request_body` with `{{VAR}}` placeholders, `request_body_vars`, `request_headers` |
+| Network | `proxy_pool` (`""`/`auto`/`direct`/pool name), `proxies` (URLs), `sticky_proxy`, `tls_fingerprint` (`chrome`, `firefox`, `safari`, `edge`, `ios`, `go`), `host_rate_limit` (req/s, can only slow down) |
+| Browser | `use_headless_browser`, `headless_fallback`, `headless_wait_selector`, `headless_render_wait`, `block_resources` (`image`, `font`, `media`, `stylesheet`), `screenshot`, `full_page_screenshot`, `browser_actions` |
+| Output | `formats` (`markdown`, `html`, `text`, `links`, `metadata`), `only_main_content`, `save_text_content` |
+| Extraction | `extract_fields`, `extract_url_match` (regex), `llm_prompt`, `llm_schema` |
+| Matching | `phrases` (job-specific; otherwise the global phrase list), `enable_word_extraction`, `use_crawl_phrases_only`, `enable_stemming`, `enable_lemmatization`, `default_language`, `enable_semantic_search` |
+| Monitoring | `change_detection`, `compare_with_job_id` (schedules compare with their previous run automatically) |
+| Plugins | `after_crawl_plugin`, `after_job_plugin` (refused for `/v1` clients unless `plugins.allow_in_api`) |
 
-1. **Seed URL** → Added to the DB frontier. For root domains, also seeds `robots.txt`, `sitemap.xml`, `sitemap_index.xml`.
-2. **Concurrent workers** (configurable, default 10) → Each pulls a URL from the frontier using the random surfer selection model.
-3. **Fetch** → HTTP GET with Chrome-mimicking TLS and headers, or headless Chromium for JS-rendered pages.
-4. **Content-Type check** → Only processes `text/html`, `application/xhtml+xml`, `*xml`, `text/plain`, `application/json`, RSS, Atom.
-5. **Save** → Stores `CrawledPage` with URL hash dedup (upsert) and optional content dedup (doc hash).
-6. **Extract links** → From HTML elements, data attributes, meta tags, srcset, inline scripts.
-7. **Filter links** → Only same base domain. Extension filter. URL include/exclude patterns.
-8. **Add to frontier** → Normalized, deduplicated, at `depth + 1`.
-9. **Detect phrases** → In page text, URL, and anchor text.
-10. **Generate embedding** → Async, if semantic search is enabled.
-11. **Politeness delay** → Randomized delay (base ± 1 second jitter) between requests.
+**Extraction field types:** `text` (default), `html` (outer HTML), `attr` (needs `attr`), `url` (absolute; `href`/`src` by default), `number`, `price` (`{"amount", "currency": "IRT|IRR|USD|…", "raw"}`), `date` (RFC3339; reads `datetime`/`content` attributes, ISO and Jalali dates), `exists` (bool), `list` (an array of objects built from `fields`, relative to each match). `multiple: true` returns every match; `regex` keeps the first capture group. Selectors are CSS, or XPath prefixed with `xpath:`.
 
-**Resumability:** Jobs can be paused and resumed. The DB frontier preserves state. Stuck "processing" URLs are reset to "pending" on resume.
+**Browser actions:** `{"type": "click|type|press|scroll|wait|wait_for_selector|evaluate", "selector", "value", "ms", "count", "script"}`. For example, `{"type": "scroll", "value": "bottom", "count": 5}` loads lazy content, and `evaluate` results are saved with the page.
 
-### Subdomain Discovery
-
-DNS enumeration to discover subdomains before or during crawling:
-
-1. User submits a domain (e.g. `example.com`)
-2. Creates a `DiscoveryJob` with status `running`
-3. Tests 100+ common subdomain prefixes via DNS A-record lookups
-4. 50 concurrent DNS resolution workers
-5. Each discovered subdomain is saved with its IP address
-6. From the discovery results, individual crawl jobs can be created per subdomain
-
-### Phrase Detection
-
-Three-dimensional phrase matching:
-
-1. **Content matching** — Searches the extracted text content of each HTML page (stripped of scripts/styles/noscript)
-2. **URL matching** — Searches the URL itself for phrases
-3. **Anchor text matching** — Searches the anchor text of links pointing to each page
-
-Each match records: phrase, match type (`content`/`url`/`anchor`), occurrence count, ~100-char context snippet, timestamp. Uses case-insensitive regex with `regexp.QuoteMeta` for safe matching of special characters.
-
-### Keyword Search (N-Gram)
-
-Post-crawl search across all recorded phrase matches:
-
-1. User enters a query (e.g. "web scraping tools")
-2. System generates all possible n-grams: `["web scraping tools", "web scraping", "scraping tools", "web", "scraping", "tools"]`
-3. Searches `phrase_matches` table with `LIKE %ngram%` conditions (OR combined)
-4. Results grouped by `(url, phrase, match_type)` with summed occurrences
-5. Paginated, ordered by total occurrences descending
-
-### Semantic Search (Vector)
-
-AI-powered similarity search across all crawled pages:
-
-1. **During crawl** — Each HTML page's text (title + first 1,000 words) is embedded using `paraphrase-multilingual-MiniLM-L12-v2` (384-dim vectors). Stored in `page_embeddings` table.
-2. **Index build** — After crawl completes, FAISS `IndexFlatIP` index is built from all embeddings. Stored at `data/faiss/pages.index`.
-3. **Search** — User query is embedded with the same model, then searched against the FAISS index using inner product (cosine similarity for normalized vectors). Returns top-K results with similarity scores (0–1).
-
-**Dependencies:** Python 3, `sentence-transformers`, `faiss-cpu`, `numpy`. Optional — disabled by default (`enable_semantic_search: false`).
-
-### Headless Browser Rendering
-
-For JavaScript-heavy SPAs that don't render content server-side:
-
-1. Enabled via `use_headless_browser: true` in config or per-job settings
-2. Go launches `plugins/headless_fetch.py` as a subprocess
-3. Playwright launches headless Chromium with anti-detection flags (`--no-sandbox`, etc.)
-4. Navigates to URL, waits for `domcontentloaded`
-5. Optionally waits for a CSS selector (`headless_wait_selector`)
-6. Waits for network to settle (`networkidle`, up to 10s)
-7. Returns fully rendered HTML as JSON
-
-**Dependencies:** Python 3, `playwright`. Requires `playwright install chromium` after pip install.
-
-### URL Normalization & Deduplication
-
-Multi-layer dedup prevents crawling the same content twice:
-
-1. **URL normalization** — Lowercase, strip tracking params, sort query params, remove default ports, remove fragments, remove trailing slashes → canonical URL form
-2. **URL hash** — SHA-256 of normalized URL → composite unique index per job
-3. **Content hash** — SHA-256 of response body → skip pages with identical content (optional, via `skip_content_duplicates`)
-4. **Frontier check** — Before adding a URL, checks both `frontier_urls` (pending/processing/failed) and `crawled_pages` (already fetched)
-5. **Upsert** — `ON CONFLICT DO NOTHING` on the composite unique index `(crawl_job_id, url_hash)` → race-condition safe
-
-### Robots.txt & Sitemap Compliance
-
-- **robots.txt parsing** — Extracts `Allow`, `Disallow` (for `User-agent: *`) and `Sitemap` directives
-- **Path-prefix matching** — Longest matching rule wins; `Allow` overrides `Disallow` if more specific
-- **Configurable** — `respect_robots_txt: true/false` in config or per-job settings
-- **Sitemap discovery** — URLs from `Sitemap:` directives are added to the frontier
-- **Sitemap parsing** — Handles both sitemap XML (`<url><loc>`) and sitemap index files (`<sitemap><loc>`)
-
-### Per-Job Settings Override
-
-Each crawl job can override global crawler config with a JSON `settings` field:
-
-| Setting | Type | Description |
-|---|---|---|
-| `max_concurrent_requests` | int | Worker count |
-| `request_timeout_seconds` | int | HTTP timeout |
-| `politeness_delay_ms` | int | Delay between requests |
-| `max_depth` | int | Maximum crawl depth |
-| `max_pages` | int | Maximum pages to crawl (0 = unlimited) |
-| `user_agent` | string | Custom User-Agent |
-| `max_retries` | int | Retry count on failure |
-| `respect_robots_txt` | bool | Robots.txt compliance |
-| `skip_content_duplicates` | bool | Content dedup |
-| `skip_extensions` | string[] | File extensions to skip |
-| `url_include_patterns` | string[] | Regex allowlist (if set, only matching URLs are crawled) |
-| `url_exclude_patterns` | string[] | Regex denylist |
-| `extra_tracking_params` | string[] | Additional URL params to strip |
-| `use_headless_browser` | bool | Enable Playwright rendering |
-| `headless_wait_selector` | string | CSS selector to wait for |
-| `enable_semantic_search` | bool | Generate embeddings |
-| `after_crawl_plugin` | string | Plugin id under `plugins/` to run after each crawled page (empty = disabled) |
-| `after_job_plugin` | string | Plugin id under `plugins/` to run ~2 minutes after the job ends (empty = disabled) |
-
-Null/omitted values fall back to global defaults. Settings can be updated via API for `pending` jobs and reset to defaults.
-
-### Job Lifecycle Management
-
-```
-Created (pending) ──Start──▶ Running ──Pause──▶ Paused
-       │                        │                   │
-       │                       Stop              Resume
-       │                        ▼                   │
-       │                   Completed ◀──────────────┘
-       │                   (or Cancelled/Failed)
-       │
-       └──Delete──▶ (cascades to pages, matches, frontier, subdomains, embeddings)
-```
-
-- **Duplicate job** — Creates a new `pending` job copying the source job's target URL, domain, max depth, and settings (deep-copied)
-- **Stale cleanup** — On server restart, all `running`/`paused` jobs are marked as `cancelled`
-- **Soft-delete** — `crawled_pages` and `phrase_matches` have `is_archived` flags
-- **Cascade delete** — Deleting a job removes all associated pages, matches, frontier URLs, and subdomains
-
----
-
-## API Reference
-
-Base URL: `http://<host>:<port>/api`
-
-### Jobs
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/jobs` | Create a new crawl job. Body: `{"target_url": "...", "max_depth": 10, "settings": {...}}` |
-| `GET` | `/api/jobs` | List all crawl jobs. Query: `limit`, `offset` |
-| `GET` | `/api/jobs/:id` | Get job details with subdomains, matches, pages, stats |
-| `POST` | `/api/jobs/:id/start` | Start a pending/cancelled crawl job |
-| `POST` | `/api/jobs/stop` | Stop the currently running job |
-| `POST` | `/api/jobs/pause` | Pause the currently running job |
-| `POST` | `/api/jobs/resume` | Resume the currently paused job |
-| `POST` | `/api/jobs/:id/duplicate` | Duplicate a job's configuration into a new pending job |
-| `DELETE` | `/api/jobs/:id` | Delete a job and all associated data |
-| `PUT` | `/api/jobs/:id/settings` | Update settings for a pending job. Body: `{...settings}` or `{"reset": true}` |
-| `GET` | `/api/settings/defaults` | Get default crawler settings |
-| `GET` | `/api/plugins` | List after-crawl / after-job plugins discovered from `plugins/` |
-
-### Discovery
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/discovery` | Create and start subdomain discovery. Body: `{"domain": "example.com"}` |
-| `GET` | `/api/discovery` | List all discovery jobs |
-| `GET` | `/api/discovery/:id` | Get discovery job with subdomains |
-
-### Subdomains
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/jobs/:id/subdomains/discover` | Start subdomain discovery for a crawl job's domain |
-| `GET` | `/api/jobs/:id/subdomains` | Get subdomains for a job |
-| `POST` | `/api/subdomains/:id/crawl` | Create crawl job from a subdomain. Body: `{"max_depth": 10, "auto_start": true}` |
-
-### Pages & Matches
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/api/jobs/:id/pages` | Get crawled pages for a job. Query: `limit`, `offset` |
-| `GET` | `/api/matches` | Get phrase matches. Query: `job_id`, `limit`, `offset` |
-
-### Search
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/api/search` | Search phrase matches. Query: `q`, `mode` (`keyword`/`semantic`), `limit`, `offset` |
-
-### Semantic Search
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/semantic/rebuild` | Trigger FAISS index rebuild (async) |
-| `GET` | `/api/semantic/stats` | Get semantic search stats (embedding count, index status) |
-
-### Phrases
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/api/phrases` | List all search phrases |
-| `POST` | `/api/phrases` | Add a phrase. Body: `{"phrase": "..."}` |
-| `PUT` | `/api/phrases/:id` | Update phrase active status. Body: `{"is_active": true/false}` |
-| `DELETE` | `/api/phrases/:id` | Delete a phrase |
-
-### Stats
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/api/stats` | Get engine statistics and active job info |
-
----
-
-## Web UI Pages
-
-| Route | Template | Description |
-|---|---|---|
-| `/` | `index.html` | Dashboard with recent crawl jobs, discovery jobs, phrase matches, and search phrase summary |
-| `/jobs/:id` | `job.html` | Single job detail page with live stats, crawled pages list, phrase matches, and a settings editor |
-| `/discovery/:id` | `discovery.html` | Discovery job detail with list of discovered subdomains and option to create crawl jobs |
-| `/search` | `search.html` | Unified search interface supporting both keyword (n-gram) and semantic (vector) search modes |
-| `/phrases` | `phrases.html` | Phrase management page: add new phrases, toggle active/inactive, delete, view match counts per phrase |
-
-All pages use Tailwind CSS for styling and are server-rendered with Go's `html/template`.
+**Metadata** includes title, description, language, direction, canonical, favicon, Open Graph/Twitter tags, `published_at`, JSON-LD and word count.
 
 ---
 
 ## Configuration
 
-Configuration is loaded from `config.yaml` (or the path specified in `CONFIG_PATH` env var) with environment variable overrides.
+`config.yaml` (or `$CONFIG_PATH` / `-c`). Every section has defaults; `mole config show` prints the effective configuration with secrets redacted.
 
-### `config.yaml` Structure
+| Section | Key settings |
+|---|---|
+| `database` | MySQL connection (env: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`) |
+| `server` | `host`, `port` (env: `SERVER_HOST`, `SERVER_PORT`) |
+| `crawler` | Global crawl defaults (see job settings) and Python paths |
+| `api.tokens` | Bearer tokens for `/v1` (env `MOLE_API_TOKENS`, comma-separated) |
+| `ui` | `enabled`, `username`, `password` (env `MOLE_UI_USERNAME`, `MOLE_UI_PASSWORD`) |
+| `worker` | `id` (env `MOLE_WORKER_ID`), `region` (env `MOLE_WORKER_REGION`), `max_running_jobs`, `max_running_per_owner`, `lease_ttl`, `poll_interval` |
+| `security` | `allow_private_networks` (env `MOLE_ALLOW_PRIVATE_NETWORKS`), `allowed_cidrs`, `max_body_bytes` |
+| `network` | `tls_fingerprint`, `host_rate_limit`, `proxy_pools`, `proxy_routes` (`{match, pool, region}`), `default_proxy_pool` |
+| `headless` | `pool_size` — Chromium processes per worker |
+| `storage` | `driver: local\|s3`, `local_dir`, `s3.{endpoint,bucket,access_key,secret_key,use_ssl,region,prefix}`, `offload_bodies` |
+| `llm` | OpenAI-compatible `base_url`, `api_key`, `model`, `timeout`, `max_input_chars` (env `MOLE_LLM_*`). Works with self-hosted models and local gateways |
+| `webhooks` | `timeout`, `max_attempts`, `allow_private` |
+| `plugins` | `allow_in_api`, `after_job_delay`, `timeout` |
+
+Iran-oriented proxy routing example:
 
 ```yaml
-database:
-  host: localhost          # MySQL host
-  port: "3306"             # MySQL port
-  user: root               # MySQL user
-  password: "1234"         # MySQL password
-  dbname: crawler_db       # Database name
-
-server:
-  host: 0.0.0.0            # HTTP listen address
-  port: "5050"             # HTTP listen port
-
-crawler:
-  max_concurrent_requests: 10       # Number of concurrent worker goroutines
-  request_timeout: 30s              # HTTP request timeout
-  politeness_delay: 0s              # Base delay between requests (±1s jitter)
-  teleport_probability: 0.2         # Random surfer teleport probability (0.0–1.0)
-  max_depth: 10                     # Maximum crawl depth from seed
-  max_pages: 0                      # Max pages per job (0 = unlimited)
-  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"  # Default User-Agent (rotated with pool)
-  max_retries: 3                    # Max retries on fetch failure
-  respect_robots_txt: false         # Honor robots.txt rules
-  skip_content_duplicates: true     # Skip pages with identical body hash
-  use_headless_browser: false       # Use Playwright for JS rendering
-  headless_wait_selector: ""        # CSS selector to wait for (headless mode)
-  enable_semantic_search: false     # Generate embeddings + FAISS index
-  after_crawl_plugin: ""            # Plugin folder under plugins/ (empty = disabled)
-  after_job_plugin: ""
-  embedding_model: "paraphrase-multilingual-MiniLM-L12-v2"  # Sentence-transformer model
-  skip_extensions:                  # File extensions to skip
-    - .jpg
-    - .png
-    - .pdf
-    - .zip
-    # ... (images, documents, archives, media, fonts, binaries)
-
-subdomain:
-  dns_servers:                      # DNS servers for subdomain scanning
-    - 8.8.8.8:53
-    - 8.8.4.4:53
-    - 1.1.1.1:53
-  concurrent_lookups: 50            # Concurrent DNS workers
-  timeout: 5s                       # Per-lookup timeout
+worker: {region: ir}
+network:
+  proxy_pools:
+    ir:   ["http://user:pass@10.0.0.5:3128"]
+    intl: ["socks5://user:pass@de.example.net:1080"]
+  proxy_routes:
+    - {match: ".ir", pool: ir, region: ir}
+    - {match: "*",  pool: intl}
+security:
+  allowed_cidrs: ["10.0.0.5/32"]   # only needed if a proxy or webhook receiver is on a private network
 ```
-
-### Environment Variable Overrides
-
-| Variable | Overrides |
-|---|---|
-| `CONFIG_PATH` | Path to config file |
-| `DB_HOST` | `database.host` |
-| `DB_PORT` | `database.port` |
-| `DB_USER` | `database.user` |
-| `DB_PASSWORD` | `database.password` |
-| `DB_NAME` | `database.dbname` |
-| `SERVER_HOST` | `server.host` |
-| `SERVER_PORT` | `server.port` |
 
 ---
 
 ## Deployment
 
-### Local Development
-
-```bash
-# 1. Prerequisites: Go 1.21+, MySQL 8.0
-
-# 2. Create database
-mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS crawler_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-
-# 3. Build and run
-make build
-./crawler
-
-# Or in one step:
-make run
-```
-
-### Docker Compose
-
-```bash
-# Start MySQL + crawler
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Stop
-docker-compose down
-```
-
-The Docker setup runs:
-- **MySQL 8.0** on port 3306 with health checks
-- **Crawler** on port 8080, auto-migrates database on startup
-
-### Makefile Commands
-
-| Command | Description |
-|---|---|
-| `make build` | Download deps + build binary |
-| `make run` | Build and run |
-| `make dev` | Run with hot reload (requires `air`) |
-| `make test` | Run all tests |
-| `make test-coverage` | Run tests with HTML coverage report |
-| `make docker-build` | Build Docker image |
-| `make docker-up` | Start Docker Compose services |
-| `make docker-down` | Stop Docker Compose services |
-| `make docker-logs` | Tail Docker Compose logs |
-| `make setup-mysql` | Create local MySQL database |
-| `make lint` | Run golangci-lint |
-| `make fmt` | Format all Go files |
+* **Single machine:** `mole serve` behind a reverse proxy that terminates TLS. Set `api.tokens`, a UI password, and keep `allow_private_networks: false`.
+* **Scale out:** run `mole worker` processes on more machines against the same MySQL. Give each a stable `worker.id` so a restarted worker immediately resumes its own jobs (others are requeued after `lease_ttl`). Use `storage.driver: s3` so every node sees the same screenshots and bodies.
+* **Regions:** start Iranian-IP workers with `--region ir` and foreign ones with `--region intl`. Jobs with `"region": "auto"` follow `network.proxy_routes`. A job pinned to a region with no running worker stays queued; the System page shows this.
+* **API-only engine:** `mole serve --no-ui` for an instance that only serves the control plane.
+* **Docker:** see `Dockerfile` (Go binary plus Python/Playwright/Chromium) and `docker-compose.yml`. Add workers with `docker compose --profile scale up -d --scale worker=3`. Set `INSTALL_ALL_PLUGINS=true` at build time for semantic search and stemming.
+* **Graceful shutdown:** `SIGTERM` stops runs and puts their jobs back in the queue. Nothing is lost, and in-flight pages are re-fetched.
 
 ---
 
-## Python Environment Setup
+## Security
 
-Required only for **headless browser rendering** and/or **semantic search**.
+* **SSRF protection:** user-supplied URLs, redirects and webhook targets may not reach loopback, RFC1918, link-local (cloud metadata), CGNAT, multicast or reserved ranges. For HTTP fetches the check runs on the resolved IP at connect time, which closes the DNS-rebinding gap. In the headless browser, every request is checked by hostname/IP before it is sent and the final URL is re-checked after navigation (DNS rebinding inside the browser is not covered). Exceptions go in `security.allowed_cidrs`. Turn on `allow_private_networks` only for local, single-user use.
+* `/v1` requires a bearer token once `api.tokens` is set; the UI and `/api` use HTTP basic auth when `ui.username` is set. Both compare credentials in constant time.
+* Webhooks are signed with HMAC-SHA256 and include a timestamp; secrets are never returned by the API.
+* Python plugins execute code on workers, so `/v1` clients cannot select them unless `plugins.allow_in_api` is on.
+* Port scanning and subdomain discovery are UI-only admin tools and are not exposed in `/v1`.
+
+---
+
+## Web UI
+
+| Page | What it is for |
+|---|---|
+| **Dashboard** | Running/queued counts, throughput, workers, live runs with progress, create a crawl |
+| **Crawls** | All jobs with status, owner, schedule, region, usage |
+| **Crawl detail** | Live metrics; tabs for phrase matches, **Pages & Data** (every page with status, Markdown and extracted fields; filters, live refresh, CSV/JSON export), extracted words, **Changes** (diffs), **Webhooks** (delivery log, redeliver) and **Settings** (every option in this README) |
+| **Page detail** | Stored body plus Markdown, extracted data, LLM output, metadata, links, screenshot, browser action results and this page's change diff |
+| **Scrape & Map** | Playground for `/v1/scrape` and `/v1/map`; "Crawl whole site" turns the same settings into a job |
+| **Schedules** | Cron schedules with presets, run history with change counts, run now, enable/disable |
+| **System** | Workers, live runs, queue, capabilities, security warnings, API quick start |
+| Search, Phrases, Subdomains, Ports | Keyword/semantic search over crawled content and the recon tools |
+
+---
+
+## Search, phrases and recon tools
+
+* **Phrase detection:** global or per-job phrases are matched in page text, URLs and anchor texts. Matching normalizes Persian/Arabic letters and digits, so `كتاب` matches `کتاب` and `۱۴۰۲` matches `1402`.
+* **Word extraction:** an optional per-crawl inverted index with Persian/English stemming and lemmatization (hazm/NLTK via `plugins/stem_lemma.py`).
+* **Keyword search:** TF-IDF ranking over phrase matches with n-gram expansion, exact-match and URL/anchor boosts.
+* **Semantic search:** multilingual sentence-transformer embeddings with a FAISS index (`plugins/semantic_embed.py`, optional).
+* **Subdomain discovery** (DNS) and **port scanning** (TCP with banners and risk notes) are kept as admin tools.
+
+Python setup for the browser, embeddings and stemming:
 
 ```bash
-# Automated setup (creates venv, installs deps)
-chmod +x plugins/setup_python.sh
-./plugins/setup_python.sh
-
-# Manual setup
-cd plugins
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# For headless browser support
-playwright install chromium
+./plugins/setup_python.sh                       # or manually:
+python3 -m venv plugins/.venv && plugins/.venv/bin/pip install -r plugins/requirements.txt
+plugins/.venv/bin/python -m playwright install chromium
 ```
 
-The Go server auto-detects the Python venv at `plugins/.venv/bin/python3`. No manual activation needed.
+Mole finds `plugins/.venv/bin/python3` automatically. `plugins/headless_fetch.py --serve` is the long-lived browser server the engine pools; it also still works as a one-shot CLI.
 
-### Python Dependencies
+### Plugins
 
-| Package | Version | Purpose |
-|---|---|---|
-| `playwright` | ≥1.40 | Headless Chromium browser for JS rendering |
-| `sentence-transformers` | ≥2.2 | Text embedding models |
-| `faiss-cpu` | ≥1.7 | Approximate nearest neighbor vector search |
-| `numpy` | ≥1.24 | Numerical operations for embedding serialization |
+Operator-written Python hooks live in `plugins/<id>/`:
+
+| File | Purpose |
+|---|---|
+| `plugin.json` | `name`, `description`, `version`, optional `after_crawl`/`after_job` file names and `env` (the variables the plugin requires) |
+| `after_crawl.py` | Runs for every fetched page; receives `{url, status_code, content_type, depth, body, job_id}` as JSON on stdin; limited by `plugins.timeout`. At most as many run at once as the job has parallel requests. |
+| `after_job.py` | Runs once, `plugins.after_job_delay` after the job completes or is cancelled, with `--job-id`; 30-minute limit. Output is appended to `after_job.log` and the last 8 KB are shown on the job page. |
+| `.env` | Secrets and settings as `KEY=VALUE` (gitignored; commit a `.env.example`). Passed to every run of the plugin. |
+
+Every run gets `MOLE_PLUGIN_ID`, `MOLE_PLUGIN_DIR`, `MOLE_PLUGIN_HOOK` and `MOLE_JOB_ID`; the engine's own secrets (`DB_PASSWORD`, `MOLE_API_TOKENS`, …) are removed from the environment.
+
+* **Same machine:** plugins often keep per-page files on disk, so the after-job run goes to the worker that ran the crawl; another worker takes it only if that worker is gone. An interrupted run is marked failed after 45 minutes.
+* **Visibility:** the job page's **Plugins** tab shows after-crawl runs, failures and the last error, plus the after-job state and output, with **Run now**.
+* **Commands:** `mole plugins list` shows hooks and missing environment variables, `mole plugins run-after-job <job-id> [--plugin id]` runs it in the terminal, and `mole doctor` checks every plugin's environment.
+* **API:** `POST /v1/crawls/{id}/after-job` (needs `plugins.allow_in_api`).
+* **Not for customers:** plugins execute arbitrary code, so `/v1` clients cannot select or run them unless `plugins.allow_in_api` is on.
+
+---
+
+## Database tables
+
+`crawl_jobs` (job, settings, limits, webhook, usage, queue/lease state), `frontier_urls`, `crawled_pages`, `page_contents`, `page_changes`, `schedules`, `webhook_deliveries` (outbox), `idempotency_keys`, `worker_heartbeats`, `phrase_matches`, `search_phrases`, `page_embeddings`, `discovery_jobs`, `subdomains`, `port_scan_jobs`, `discovered_ports`. Migrations run automatically on `serve`/`worker` (and with `mole migrate`).
+
+---
+
+## Development
+
+```bash
+make build          # bin/mole
+make test           # unit tests
+make test-integration   # live TLS-fingerprint check and real Chromium browser-pool test
+make lint           # gofmt + go vet
+MOLE_SQL_DEBUG=1 ./bin/mole serve -v   # log every SQL query and HTTP request
+```
+
+The module targets Go 1.22 (`GOTOOLCHAIN=local` in the Makefile). Dependencies are pinned to versions that build on 1.22.
+
+---
+
+## Upgrading from the single-job version
+
+* **Several jobs now run at once** (`worker.max_running_jobs`). "Start" queues a job instead of running it immediately, and pause, resume and stop take a job id.
+* **Restarts:** jobs that were running continue automatically after a restart; they used to be parked as paused.
+* **Private targets are blocked by default.** To crawl `localhost`/LAN targets, set `security.allow_private_networks: true` or list them in `security.allowed_cidrs`.
+* **Per-host politeness:** `network.host_rate_limit` defaults to 2 requests/s per host across all jobs. Raise it, or set it to 0, for your own sites.
+* **Headless rendering** goes through `headless.pool_size` long-lived browsers instead of one process per page, so it is much faster.
+* **Logging:** SQL statements are no longer logged by default (`MOLE_SQL_DEBUG=1` restores it).
+* **Binary:** the binary is `mole` (`make build` → `bin/mole`). `go run .` still starts the server.

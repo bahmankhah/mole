@@ -105,6 +105,7 @@ func (h *Handler) GetPortScan(c *gin.Context) {
 	if c.GetHeader("Accept") == "text/html" || c.Query("format") == "html" {
 		payload, _ := json.Marshal(gin.H{"job": job, "ports": ports})
 		c.HTML(http.StatusOK, "ports.html", gin.H{
+			"nav":     "ports",
 			"job":     job,
 			"ports":   ports,
 			"initial": template.JS(payload),

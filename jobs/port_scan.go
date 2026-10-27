@@ -22,10 +22,10 @@ func (m *Manager) CreatePortScan(target string) (*models.PortScanJob, error) {
 	}
 
 	m.portScanMu.Lock()
-	busy := len(m.portScans) > 0 || m.closed
+	busy := len(m.portScans) > 0 || m.closed.Load()
 	m.portScanMu.Unlock()
 	if busy {
-		if m.closed {
+		if m.closed.Load() {
 			return nil, errors.New("server is shutting down")
 		}
 		return nil, ErrPortScanRunning
@@ -53,11 +53,11 @@ func (m *Manager) CreatePortScan(target string) (*models.PortScanJob, error) {
 
 	scanCtx, scanCancel := context.WithCancel(context.Background())
 	m.portScanMu.Lock()
-	if m.closed || len(m.portScans) > 0 {
+	if m.closed.Load() || len(m.portScans) > 0 {
 		m.portScanMu.Unlock()
 		scanCancel()
 		_ = m.db.Delete(job).Error
-		if m.closed {
+		if m.closed.Load() {
 			return nil, errors.New("server is shutting down")
 		}
 		return nil, ErrPortScanRunning

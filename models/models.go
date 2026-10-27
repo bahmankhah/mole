@@ -1,6 +1,7 @@
 package models
 
 import (
+	"bytes"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
@@ -24,6 +25,7 @@ type JobStatus string
 
 const (
 	JobStatusPending   JobStatus = "pending"
+	JobStatusQueued    JobStatus = "queued"
 	JobStatusRunning   JobStatus = "running"
 	JobStatusPaused    JobStatus = "paused"
 	JobStatusCompleted JobStatus = "completed"
@@ -34,6 +36,16 @@ const (
 // SettingsEditable reports whether crawler settings may be changed for this status.
 func (s JobStatus) SettingsEditable() bool {
 	return s == JobStatusPending || s == JobStatusPaused
+}
+
+// IsTerminal reports whether the job has finished for good.
+func (s JobStatus) IsTerminal() bool {
+	return s == JobStatusCompleted || s == JobStatusFailed || s == JobStatusCancelled
+}
+
+// IsActive reports whether the job is queued or running.
+func (s JobStatus) IsActive() bool {
+	return s == JobStatusQueued || s == JobStatusRunning
 }
 
 // MatchType represents where a phrase was found
@@ -83,6 +95,126 @@ type JobSettings struct {
 	RequestHeaders  []HTTPHeader      `json:"request_headers,omitempty"`   // extra headers (repeater)
 	RequestBody     *string           `json:"request_body,omitempty"`      // POST payload; may contain {{VAR}} placeholders
 	RequestBodyVars map[string]string `json:"request_body_vars,omitempty"` // var_name → value expression (e.g. "1,hamster,5-10")
+
+	// Network
+	ProxyPool      *string  `json:"proxy_pool,omitempty"`      // "" / "auto" = routing rules, "direct", or a pool name
+	Proxies        []string `json:"proxies,omitempty"`         // job-specific proxy URLs; win over pools
+	StickyProxy    *bool    `json:"sticky_proxy,omitempty"`    // keep one exit IP per host for the whole job
+	TLSFingerprint *string  `json:"tls_fingerprint,omitempty"` // chrome, firefox, safari, edge, ios, go
+	HostRateLimit  *float64 `json:"host_rate_limit,omitempty"` // max requests/sec per host for this job
+
+	// Browser
+	HeadlessFallback   *bool           `json:"headless_fallback,omitempty"`    // retry blocked/challenge/SPA-shell pages with the browser
+	HeadlessRenderWait *int            `json:"headless_render_wait,omitempty"` // extra seconds after network idle
+	BrowserActions     []BrowserAction `json:"browser_actions,omitempty"`      // run on every page rendered by the browser
+	Screenshot         *bool           `json:"screenshot,omitempty"`
+	FullPageScreenshot *bool           `json:"full_page_screenshot,omitempty"`
+	BlockResources     []string        `json:"block_resources,omitempty"` // image, font, media, stylesheet
+
+	// Content
+	Formats         []string       `json:"formats,omitempty"`           // markdown, html, text, links, metadata
+	OnlyMainContent *bool          `json:"only_main_content,omitempty"` // strip nav/footer/ads before converting
+	ExtractFields   []ExtractField `json:"extract_fields,omitempty"`    // structured extraction schema (CSS/XPath)
+	ExtractURLMatch *string        `json:"extract_url_match,omitempty"` // regex; extraction runs only on matching URLs
+	LLMPrompt       *string        `json:"llm_prompt,omitempty"`        // LLM extraction instructions
+	LLMSchema       *string        `json:"llm_schema,omitempty"`        // JSON schema the LLM must return
+	Phrases         []string       `json:"phrases,omitempty"`           // job-specific phrases (replace the global list)
+
+	// Monitoring
+	ChangeDetection  *bool   `json:"change_detection,omitempty"`    // diff each page against the previous run
+	CompareWithJobID *string `json:"compare_with_job_id,omitempty"` // baseline job (default: previous run of the schedule)
+}
+
+// BrowserAction is a step performed in the headless browser after the page renders.
+type BrowserAction struct {
+	Type     string `json:"type"`               // wait, wait_for_selector, click, scroll, type, press, evaluate
+	Selector string `json:"selector,omitempty"` // CSS selector
+	Value    string `json:"value,omitempty"`    // text to type, key to press, or scroll target ("bottom", "top", pixels)
+	Ms       int    `json:"ms,omitempty"`       // wait duration or per-action timeout
+	Count    int    `json:"count,omitempty"`    // repeat count for scroll
+	Script   string `json:"script,omitempty"`   // JS for evaluate
+}
+
+// ExtractField describes one field of a structured extraction schema.
+type ExtractField struct {
+	Name     string         `json:"name"`
+	Selector string         `json:"selector"`           // CSS selector, or "xpath:<expr>"
+	Type     string         `json:"type,omitempty"`     // text (default), html, attr, number, price, date, url, exists, list
+	Attr     string         `json:"attr,omitempty"`     // attribute for type attr/url
+	Multiple bool           `json:"multiple,omitempty"` // return all matches as an array
+	Regex    string         `json:"regex,omitempty"`    // optional: first capture group (or whole match) of the text
+	Fields   []ExtractField `json:"fields,omitempty"`   // for type list: fields relative to each matched element
+}
+
+// JobLimits caps what a job may consume. Zero means unlimited.
+type JobLimits struct {
+	MaxPages          int   `json:"max_pages,omitempty"`
+	MaxRequests       int   `json:"max_requests,omitempty"`
+	MaxBytes          int64 `json:"max_bytes,omitempty"`
+	MaxBrowserSeconds int   `json:"max_browser_seconds,omitempty"`
+	MaxLLMTokens      int   `json:"max_llm_tokens,omitempty"`
+	MaxDurationSec    int   `json:"max_duration_seconds,omitempty"`
+}
+
+// IsZero reports whether no limit is set.
+func (l JobLimits) IsZero() bool { return l == JobLimits{} }
+
+// Value implements driver.Valuer for GORM JSON storage.
+func (l JobLimits) Value() (driver.Value, error) { return jsonValue(l) }
+
+// Scan implements sql.Scanner for GORM JSON storage.
+func (l *JobLimits) Scan(value interface{}) error { return jsonScan(value, l) }
+
+// WebhookConfig tells the engine where to send job events.
+type WebhookConfig struct {
+	URL    string   `json:"url"`
+	Secret string   `json:"secret,omitempty"` // HMAC-SHA256 signing secret
+	Events []string `json:"events,omitempty"` // empty = all events except page.crawled
+}
+
+// Value implements driver.Valuer for GORM JSON storage.
+func (w WebhookConfig) Value() (driver.Value, error) { return jsonValue(w) }
+
+// Scan implements sql.Scanner for GORM JSON storage.
+func (w *WebhookConfig) Scan(value interface{}) error { return jsonScan(value, w) }
+
+// JobUsage is what a job consumed; control planes bill from it.
+type JobUsage struct {
+	Requests      int64 `gorm:"column:usage_requests;default:0" json:"requests"`
+	Pages         int64 `gorm:"column:usage_pages;default:0" json:"pages"`
+	Bytes         int64 `gorm:"column:usage_bytes;default:0" json:"bytes"`
+	BrowserMs     int64 `gorm:"column:usage_browser_ms;default:0" json:"browser_ms"`
+	LLMTokens     int64 `gorm:"column:usage_llm_tokens;default:0" json:"llm_tokens"`
+	Errors        int64 `gorm:"column:usage_errors;default:0" json:"errors"`
+	Screenshots   int64 `gorm:"column:usage_screenshots;default:0" json:"screenshots"`
+	ProxyRequests int64 `gorm:"column:usage_proxy_requests;default:0" json:"proxy_requests"`
+}
+
+func jsonValue(v interface{}) (driver.Value, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return string(b), nil
+}
+
+func jsonScan(value interface{}, dst interface{}) error {
+	if value == nil {
+		return nil
+	}
+	var b []byte
+	switch v := value.(type) {
+	case string:
+		b = []byte(v)
+	case []byte:
+		b = v
+	default:
+		return fmt.Errorf("cannot scan %T into %T", value, dst)
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	return json.Unmarshal(b, dst)
 }
 
 // IsEmpty reports whether no per-job overrides were set.
@@ -101,7 +233,15 @@ func (s JobSettings) IsEmpty() bool {
 		s.RequestMethod == nil && s.RequestBody == nil &&
 		len(s.RequestHeaders) == 0 && len(s.RequestBodyVars) == 0 &&
 		len(s.SkipExtensions) == 0 && len(s.URLIncludePatterns) == 0 &&
-		len(s.URLExcludePatterns) == 0 && len(s.ExtraTrackingParams) == 0
+		len(s.URLExcludePatterns) == 0 && len(s.ExtraTrackingParams) == 0 &&
+		s.ProxyPool == nil && len(s.Proxies) == 0 && s.StickyProxy == nil &&
+		s.TLSFingerprint == nil && s.HostRateLimit == nil &&
+		s.HeadlessFallback == nil && s.HeadlessRenderWait == nil &&
+		len(s.BrowserActions) == 0 && s.Screenshot == nil && s.FullPageScreenshot == nil &&
+		len(s.BlockResources) == 0 && len(s.Formats) == 0 && s.OnlyMainContent == nil &&
+		len(s.ExtractFields) == 0 && s.ExtractURLMatch == nil &&
+		s.LLMPrompt == nil && s.LLMSchema == nil && len(s.Phrases) == 0 &&
+		s.ChangeDetection == nil && s.CompareWithJobID == nil
 }
 
 // SanitizeRequest normalizes HTTP request fields (method, headers, body vars).
@@ -219,6 +359,23 @@ func (s *JobSettings) UnmarshalJSON(data []byte) error {
 			id = legacyEnabledPluginID
 		}
 		s.AfterJobPlugin = &id
+	}
+	return nil
+}
+
+// CheckSettingsJSON reports unknown fields in a JSON settings object, so API
+// clients learn about typos instead of having options silently ignored.
+func CheckSettingsJSON(raw []byte) error {
+	type Alias JobSettings
+	aux := struct {
+		*Alias
+		AfterCrawlScript *bool `json:"after_crawl_script"`
+		AfterJobScript   *bool `json:"after_job_script"`
+	}{Alias: &Alias{}}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&aux); err != nil {
+		return fmt.Errorf("settings: %w", err)
 	}
 	return nil
 }
@@ -361,6 +518,40 @@ type CrawlJob struct {
 	StartedAt      *time.Time   `json:"started_at"`
 	CompletedAt    *time.Time   `json:"completed_at"`
 	ErrorMessage   string       `gorm:"type:text" json:"error_message,omitempty"`
+
+	// Ownership and scheduling. OwnerRef is an opaque id set by the control
+	// plane (e.g. a Laravel team id); the engine never interprets it.
+	OwnerRef   string  `gorm:"type:varchar(191);index;default:''" json:"owner_ref,omitempty"`
+	ExternalID string  `gorm:"type:varchar(191);index;default:''" json:"external_id,omitempty"`
+	ScheduleID *string `gorm:"type:varchar(36);index" json:"schedule_id,omitempty"`
+	Priority   int     `gorm:"default:0;index" json:"priority"`
+	Region     string  `gorm:"type:varchar(32);default:''" json:"region,omitempty"`
+
+	Limits  *JobLimits     `gorm:"type:json" json:"limits,omitempty"`
+	Webhook *WebhookConfig `gorm:"type:json" json:"webhook,omitempty"`
+	Usage   JobUsage       `gorm:"embedded" json:"usage"`
+
+	// Queue / lease state.
+	QueuedAt       *time.Time `gorm:"index" json:"queued_at,omitempty"`
+	WorkerID       string     `gorm:"type:varchar(128);default:''" json:"worker_id,omitempty"`
+	LeaseExpiresAt *time.Time `gorm:"index" json:"lease_expires_at,omitempty"`
+	Control        string     `gorm:"type:varchar(16);default:''" json:"control,omitempty"` // pending control request: pause, cancel
+	StopReason     string     `gorm:"type:varchar(64);default:''" json:"stop_reason,omitempty"`
+
+	// Durable after-job plugin run.
+	AfterJobPlugin string     `gorm:"type:varchar(64);default:''" json:"after_job_plugin,omitempty"`
+	AfterJobDueAt  *time.Time `gorm:"index" json:"after_job_due_at,omitempty"`
+	AfterJobState  string     `gorm:"type:varchar(16);default:''" json:"after_job_state,omitempty"` // scheduled, running, done, failed
+	// AfterJobWorker is the worker that ran the crawl. Plugins keep per-page
+	// output on that machine, so it gets the after-job run first.
+	AfterJobWorker     string     `gorm:"type:varchar(128);default:''" json:"after_job_worker,omitempty"`
+	AfterJobOutput     string     `gorm:"type:text" json:"after_job_output,omitempty"` // tail of the last run's output
+	AfterJobFinishedAt *time.Time `json:"after_job_finished_at,omitempty"`
+
+	// After-crawl plugin statistics.
+	AfterCrawlRuns     int64  `gorm:"default:0" json:"after_crawl_runs"`
+	AfterCrawlFailures int64  `gorm:"default:0" json:"after_crawl_failures"`
+	AfterCrawlError    string `gorm:"type:text" json:"after_crawl_error,omitempty"` // last failure
 }
 
 // BeforeCreate generates UUID for new crawl jobs
@@ -404,6 +595,9 @@ type CrawledPage struct {
 	ResponseTime  int64     `json:"response_time_ms"`
 	ErrorMessage  string    `gorm:"type:text" json:"error_message,omitempty"`
 	TextContent   *string   `gorm:"type:longtext" json:"text_content,omitempty"`
+	BodyKey       string    `gorm:"type:varchar(255);default:''" json:"body_key,omitempty"`    // object-store key when bodies are offloaded
+	FetchedWith   string    `gorm:"type:varchar(16);default:''" json:"fetched_with,omitempty"` // http, browser
+	FinalURL      string    `gorm:"type:varchar(2048)" json:"final_url,omitempty"`
 	IsArchived    bool      `gorm:"default:false;index" json:"is_archived"`
 	CrawlJob      CrawlJob  `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
 }

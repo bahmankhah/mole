@@ -1,0 +1,50 @@
+{{define "nav"}}
+<nav class="bg-indigo-600 text-white shadow-lg">
+    <div class="max-w-7xl mx-auto px-4">
+        <div class="flex items-center justify-between gap-4 h-14">
+            <a href="/" class="text-xl font-bold hover:text-indigo-200 flex items-center gap-2 flex-shrink-0"><img src="/static/logo.png" alt="" class="h-7 w-auto"> Mole</a>
+            <div class="flex items-center gap-1 overflow-x-auto text-sm flex-1 min-w-0 no-scrollbar">
+                <a href="/" class="nav-link {{if eq .nav "dashboard"}}nav-active{{end}}">Dashboard</a>
+                <a href="/jobs" class="nav-link {{if eq .nav "jobs"}}nav-active{{end}}">Crawls</a>
+                <a href="/scrape" class="nav-link {{if eq .nav "scrape"}}nav-active{{end}}">Scrape &amp; Map</a>
+                <a href="/schedules" class="nav-link {{if eq .nav "schedules"}}nav-active{{end}}">Schedules</a>
+                <a href="/search" class="nav-link {{if eq .nav "search"}}nav-active{{end}}">Search</a>
+                <a href="/phrases" class="nav-link {{if eq .nav "phrases"}}nav-active{{end}}">Phrases</a>
+                <span class="w-px h-5 bg-indigo-400 mx-1 flex-shrink-0"></span>
+                <a href="/discovery" class="nav-link {{if eq .nav "discovery"}}nav-active{{end}}">Subdomains</a>
+                <a href="/ports" class="nav-link {{if eq .nav "ports"}}nav-active{{end}}">Ports</a>
+                <a href="/system" class="nav-link {{if eq .nav "system"}}nav-active{{end}}">System</a>
+            </div>
+            <a href="/system" id="nav-engine" class="flex-shrink-0 px-3 py-1 bg-indigo-700 hover:bg-indigo-800 rounded-full text-xs whitespace-nowrap" title="Engine status">
+                <span class="inline-block w-2 h-2 rounded-full bg-gray-300 align-middle mr-1" id="nav-engine-dot"></span><span id="nav-engine-text">…</span>
+            </a>
+        </div>
+    </div>
+</nav>
+<style>
+    .nav-link { padding: .375rem .625rem; border-radius: .375rem; color: #c7d2fe; white-space: nowrap; transition: background .15s, color .15s; }
+    .nav-link:hover { color: #fff; background: rgba(255,255,255,.08); }
+    .nav-active { color: #fff; background: rgba(255,255,255,.16); font-weight: 600; }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { scrollbar-width: none; }
+</style>
+<div id="mole-toast" class="hidden fixed bottom-4 right-4 z-[60] max-w-sm px-4 py-3 rounded-lg shadow-lg text-sm"></div>
+<script src="/static/js/mole.js"></script>
+{{end}}
+
+{{define "statusBadge"}}<span class="status-badge status-badge-{{.}}">{{.}}</span>{{end}}
+
+{{define "statusStyles"}}
+<style>
+    .status-badge { display: inline-flex; align-items: center; gap: .25rem; padding: .125rem .5rem; border-radius: 9999px; font-size: .75rem; font-weight: 600; text-transform: capitalize; }
+    .status-badge-pending   { background: #fef3c7; color: #92400e; }
+    .status-badge-queued    { background: #e0e7ff; color: #3730a3; }
+    .status-badge-running   { background: #dbeafe; color: #1d4ed8; }
+    .status-badge-running::before { content: ""; width: .5rem; height: .5rem; border-radius: 9999px; background: #3b82f6; animation: molepulse 1.4s infinite; }
+    .status-badge-paused    { background: #f3f4f6; color: #374151; }
+    .status-badge-completed { background: #d1fae5; color: #065f46; }
+    .status-badge-failed    { background: #fee2e2; color: #991b1b; }
+    .status-badge-cancelled { background: #f3f4f6; color: #6b7280; }
+    @keyframes molepulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+</style>
+{{end}}

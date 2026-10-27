@@ -1,27 +1,23 @@
-version: '3.8'
-
 services:
   mysql:
     image: mysql:8.0
-    container_name: crawler_mysql
     environment:
       MYSQL_ROOT_PASSWORD: crawler_password
       MYSQL_DATABASE: crawler_db
       MYSQL_USER: crawler
       MYSQL_PASSWORD: crawler_password
-    ports:
-      - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
 
-  crawler:
+  # Web UI, /v1 API and a crawl worker.
+  mole:
     build: .
-    container_name: resolver_crawler
+    command: ["serve"]
     environment:
       DB_HOST: mysql
       DB_PORT: "3306"
@@ -29,15 +25,42 @@ services:
       DB_PASSWORD: crawler_password
       DB_NAME: crawler_db
       SERVER_HOST: "0.0.0.0"
-      SERVER_PORT: "8080"
+      SERVER_PORT: "5050"
+      MOLE_WORKER_ID: mole-1
+      MOLE_API_TOKENS: ${MOLE_API_TOKENS:-change-me}
+      MOLE_UI_USERNAME: ${MOLE_UI_USERNAME:-admin}
+      MOLE_UI_PASSWORD: ${MOLE_UI_PASSWORD:-change-me}
     ports:
-      - "8080:8080"
+      - "127.0.0.1:5050:5050"
+    volumes:
+      - mole_data:/app/data
     depends_on:
       mysql:
         condition: service_healthy
-    volumes:
-      - ./templates:/app/templates
     restart: unless-stopped
+
+  # Extra crawl workers: docker compose up -d --scale worker=3
+  worker:
+    build: .
+    command: ["worker", "--health-addr", ":8081"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8081/healthz').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: crawler
+      DB_PASSWORD: crawler_password
+      DB_NAME: crawler_db
+    volumes:
+      - mole_data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: ["scale"]
 
 volumes:
   mysql_data:
+  mole_data:

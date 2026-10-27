@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="icon" href="/static/favicon-32.png" type="image/png">
+    <title>Schedules - Mole</title>
+    <script src="/static/js/tailwind.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    {{template "nav" .}}
+    {{template "statusStyles"}}
+
+    <div class="max-w-7xl mx-auto px-4 py-8">
+        <div class="flex flex-wrap items-end justify-between gap-4 mb-6">
+            <div>
+                <h1 class="text-2xl font-bold text-gray-800">Schedules</h1>
+                <p class="text-sm text-gray-500 mt-1">Recurring crawls for price monitoring, news tracking and site audits. Each run is compared with the previous one so you see what is new, changed or gone.</p>
+            </div>
+            <button onclick="openCreate()" class="bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700 transition text-sm font-medium">+ New schedule</button>
+        </div>
+
+        <div class="bg-white rounded-lg shadow overflow-x-auto">
+            <table class="w-full">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Schedule</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">When</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Next run</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last run</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Runs</th>
+                        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase"></th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200">
+                    {{range .schedules}}
+                    <tr class="hover:bg-gray-50 {{if not .Enabled}}opacity-60{{end}}">
+                        <td class="px-6 py-4 max-w-sm">
+                            <a href="/schedules/{{.ID}}" class="text-indigo-600 hover:text-indigo-800 font-medium block truncate">{{.Name}}</a>
+                            <span class="text-xs text-gray-400 block truncate">{{.Template.TargetURL}}{{if .OwnerRef}} · 👤 {{.OwnerRef}}{{end}}</span>
+                        </td>
+                        <td class="px-6 py-4 text-sm"><code class="bg-gray-100 px-1.5 py-0.5 rounded">{{.Cron}}</code> <span class="text-xs text-gray-400">{{.Timezone}}</span></td>
+                        <td class="px-6 py-4 text-sm text-gray-600">{{if .Enabled}}{{until .NextRunAt}}{{else}}<span class="text-gray-400">disabled</span>{{end}}</td>
+                        <td class="px-6 py-4 text-sm">{{if .LastJobID}}<a href="/jobs/{{.LastJobID}}" class="text-indigo-600 hover:underline">{{ago .LastRunAt}}</a>{{else}}<span class="text-gray-400">never</span>{{end}}</td>
+                        <td class="px-6 py-4 text-sm text-gray-600">{{.RunCount}}</td>
+                        <td class="px-6 py-4 text-right whitespace-nowrap">
+                            <button onclick="runNow('{{.ID}}')" class="px-2.5 py-1.5 text-xs font-medium rounded bg-green-100 text-green-700 hover:bg-green-200">▶ Run now</button>
+                            <button onclick="toggle('{{.ID}}', {{.Enabled}})" class="px-2.5 py-1.5 text-xs font-medium rounded bg-gray-100 text-gray-700 hover:bg-gray-200">{{if .Enabled}}Disable{{else}}Enable{{end}}</button>
+                        </td>
+                    </tr>
+                    {{else}}
+                    <tr><td colspan="6" class="px-6 py-16 text-center text-gray-500">
+                        <p class="text-lg">No schedules yet</p>
+                        <p class="text-sm mt-1">Create one to crawl a site every hour, day or week and get notified about changes.</p>
+                    </td></tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+        {{template "pagination" .}}
+    </div>
+
+    <div id="create-modal" class="hidden fixed inset-0 z-50 bg-black bg-opacity-40 flex items-start md:items-center justify-center p-4 overflow-y-auto">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-3xl">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+                <h3 class="text-lg font-semibold text-gray-800">New schedule</h3>
+                <button onclick="closeCreate()" class="text-gray-400 hover:text-gray-600 text-2xl leading-none">&times;</button>
+            </div>
+            <form onsubmit="submitCreate(event)" class="p-6">
+                <div id="schedule-form"></div>
+                <div class="flex justify-end gap-3 pt-6">
+                    <button type="button" onclick="closeCreate()" class="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50">Cancel</button>
+                    <button type="submit" id="create-btn" class="px-6 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm font-medium">Create schedule</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        var catalog = {{.catalogJSON}};
+        var editor = null;
+        function openCreate() {
+            editor = Mole.scheduleEditor(document.getElementById('schedule-form'), null, catalog);
+            document.getElementById('create-modal').classList.remove('hidden');
+        }
+        function closeCreate() { document.getElementById('create-modal').classList.add('hidden'); }
+        document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeCreate(); });
+        async function submitCreate(e) {
+            e.preventDefault();
+            var btn = document.getElementById('create-btn'); btn.disabled = true;
+            try {
+                var res = await Mole.api('POST', '/api/v1/schedules', editor.get());
+                location.href = '/schedules/' + res.data.id;
+            } catch (err) { Mole.toast(err.message, false); btn.disabled = false; }
+        }
+        async function runNow(id) {
+            try { var res = await Mole.api('POST', '/api/v1/schedules/' + id + '/run'); location.href = '/jobs/' + res.data.id; }
+            catch (err) { Mole.toast(err.message, false); }
+        }
+        async function toggle(id, enabled) {
+            try { await Mole.api('POST', '/api/v1/schedules/' + id + '/' + (enabled ? 'disable' : 'enable')); location.reload(); }
+            catch (err) { Mole.toast(err.message, false); }
+        }
+    </script>
+</body>
+</html>

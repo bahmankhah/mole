@@ -244,6 +244,11 @@ func (s *SemanticSearcher) RebuildIndexForCrawlJob(ctx context.Context, crawlJob
 }
 
 // indexPathForCrawlJob returns the FAISS index file path for a specific crawl job.
+// IndexPathForCrawlJob returns the FAISS index file of a crawl job.
+func (s *SemanticSearcher) IndexPathForCrawlJob(crawlJobID string) string {
+	return s.indexPathForCrawlJob(crawlJobID)
+}
+
 func (s *SemanticSearcher) indexPathForCrawlJob(crawlJobID string) string {
 	return filepath.Join(filepath.Dir(s.indexPath), fmt.Sprintf("pages_%s.index", crawlJobID))
 }

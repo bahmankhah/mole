@@ -22,27 +22,8 @@
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
-    <nav class="bg-indigo-600 text-white shadow-lg">
-        <div class="max-w-7xl mx-auto px-4 py-4">
-            <div class="flex items-center justify-between gap-4">
-                <div class="flex items-center space-x-3 min-w-0">
-                    <a href="/" class="text-2xl font-bold hover:text-indigo-200 flex items-center gap-2 flex-shrink-0"><img src="/static/logo.png" alt="" class="h-7 w-auto"> Mole</a>
-                    <span class="text-indigo-200">/</span>
-                    {{if .job}}
-                    <a href="/jobs/{{.job.ID}}#pages" class="text-indigo-100 hover:text-white truncate max-w-[12rem] sm:max-w-xs" title="{{.job.Domain}}">{{.job.Domain}}</a>
-                    {{else}}
-                    <a href="/jobs/{{.jobID}}#pages" class="text-indigo-100 hover:text-white">Job</a>
-                    {{end}}
-                    <span class="text-indigo-200">/</span>
-                    <span class="truncate">Page</span>
-                </div>
-                <div class="flex items-center space-x-4 flex-shrink-0">
-                    <a href="/phrases" class="text-indigo-200 hover:text-white transition text-sm">📋 Phrases</a>
-                    <a href="/search" class="text-indigo-200 hover:text-white transition text-sm">🔎 Search</a>
-                </div>
-            </div>
-        </div>
-    </nav>
+    {{template "nav" .}}
+    {{template "statusStyles"}}
 
     <div class="max-w-7xl mx-auto px-4 py-8">
         {{if .notFound}}
@@ -50,14 +31,14 @@
             <p class="text-lg text-gray-800 font-semibold">This crawled page was not found</p>
             <p class="text-sm text-gray-500 mt-2">It may have been archived or belong to a different job.</p>
             {{if .jobID}}
-            <a href="/jobs/{{.jobID}}#pages" class="inline-block mt-6 px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm">Back to crawled pages</a>
+            <a href="/jobs/{{.jobID}}#data" class="inline-block mt-6 px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm">Back to pages</a>
             {{else}}
             <a href="/" class="inline-block mt-6 px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm">Back to dashboard</a>
             {{end}}
         </div>
         {{else}}
         <div class="mb-4">
-            <a href="/jobs/{{.page.CrawlJobID}}#pages" class="text-sm text-indigo-600 hover:text-indigo-800">← Crawled pages</a>
+            <a href="/jobs/{{.page.CrawlJobID}}#data" class="text-sm text-indigo-600 hover:text-indigo-800">← Pages &amp; data</a>
         </div>
 
         <div class="bg-white rounded-lg shadow p-6 mb-6">
@@ -138,6 +119,58 @@
                 </div>
             </dl>
         </div>
+
+        {{if .content}}
+        <div class="bg-white rounded-lg shadow mb-6">
+            <div class="px-6 pt-5">
+                <h2 class="text-lg font-semibold text-gray-800">Processed content</h2>
+                {{if .content.ExtractError}}<p class="mt-2 text-sm text-red-600">{{.content.ExtractError}}</p>{{end}}
+            </div>
+            <div class="border-b border-gray-200 mt-3">
+                <nav class="flex gap-6 px-6 overflow-x-auto whitespace-nowrap text-sm" id="pc-tabs">
+                    {{if .mdText}}<button class="pc-tab py-3" data-pc="markdown">Markdown</button>{{end}}
+                    {{if .extractedPretty}}<button class="pc-tab py-3" data-pc="extracted">Extracted data</button>{{end}}
+                    {{if .llmPretty}}<button class="pc-tab py-3" data-pc="llm">LLM extraction</button>{{end}}
+                    {{if .metadataPretty}}<button class="pc-tab py-3" data-pc="metadata">Metadata</button>{{end}}
+                    {{if .content.Links}}<button class="pc-tab py-3" data-pc="links">Links ({{len .content.Links}})</button>{{end}}
+                    {{if .content.ScreenshotKey}}<button class="pc-tab py-3" data-pc="screenshot">Screenshot</button>{{end}}
+                    {{if .actionsPretty}}<button class="pc-tab py-3" data-pc="actions">Browser actions</button>{{end}}
+                    {{if .change}}<button class="pc-tab py-3" data-pc="change">Change ({{.change.ChangeType}})</button>{{end}}
+                </nav>
+            </div>
+            <div class="p-6">
+                {{if .mdText}}<div class="pc-panel hidden" data-pc="markdown">
+                    <div class="flex justify-end mb-2"><button type="button" onclick="Mole.copy(document.getElementById('pc-md').textContent)" class="px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-50">Copy Markdown</button></div>
+                    <pre id="pc-md" dir="auto" class="page-body font-sans leading-7 p-4 bg-gray-50 border border-gray-200 rounded-lg max-h-[36rem] overflow-auto text-sm text-gray-800">{{.mdText}}</pre>
+                </div>{{end}}
+                {{if .extractedPretty}}<div class="pc-panel hidden" data-pc="extracted"><pre dir="auto" class="page-body p-4 bg-gray-50 border border-gray-200 rounded-lg max-h-[36rem] overflow-auto text-sm">{{.extractedPretty}}</pre></div>{{end}}
+                {{if .llmPretty}}<div class="pc-panel hidden" data-pc="llm"><pre dir="auto" class="page-body p-4 bg-gray-50 border border-gray-200 rounded-lg max-h-[36rem] overflow-auto text-sm">{{.llmPretty}}</pre></div>{{end}}
+                {{if .metadataPretty}}<div class="pc-panel hidden" data-pc="metadata"><pre dir="auto" class="page-body p-4 bg-gray-50 border border-gray-200 rounded-lg max-h-[36rem] overflow-auto text-sm">{{.metadataPretty}}</pre></div>{{end}}
+                {{if .content.Links}}<div class="pc-panel hidden" data-pc="links"><ul class="text-sm space-y-1 max-h-[36rem] overflow-auto">{{range .content.Links}}<li><a href="{{.}}" target="_blank" rel="noopener" class="text-blue-600 hover:underline break-all">{{.}}</a></li>{{end}}</ul></div>{{end}}
+                {{if .content.ScreenshotKey}}<div class="pc-panel hidden" data-pc="screenshot"><a href="{{.screenshotURL}}" target="_blank"><img src="{{.screenshotURL}}" alt="Screenshot" loading="lazy" class="max-w-full border border-gray-200 rounded-lg shadow-sm"></a></div>{{end}}
+                {{if .actionsPretty}}<div class="pc-panel hidden" data-pc="actions"><pre class="page-body p-4 bg-gray-50 border border-gray-200 rounded-lg max-h-[36rem] overflow-auto text-sm">{{.actionsPretty}}</pre></div>{{end}}
+                {{if .change}}<div class="pc-panel hidden" data-pc="change">
+                    <p class="text-sm text-gray-600 mb-2">Compared with job <a class="text-indigo-600 hover:underline font-mono" href="/jobs/{{.change.BaseJobID}}">{{.change.BaseJobID}}</a>{{if eq .change.ChangeType "changed"}} · <span class="text-green-700">+{{.change.Added}}</span> <span class="text-red-700">−{{.change.Removed}}</span> lines{{end}}</p>
+                    {{if .change.Diff}}<div class="font-mono text-xs border border-gray-200 rounded-lg max-h-[36rem] overflow-auto py-2" id="pc-diff" data-diff="{{deref .change.Diff}}"></div>{{else}}<p class="text-sm text-gray-500">This page did not exist in the baseline job.</p>{{end}}
+                </div>{{end}}
+            </div>
+        </div>
+        <style>.pc-tab{color:#6b7280;border-bottom:2px solid transparent}.pc-tab:hover{color:#374151}.pc-tab-active{color:#4f46e5;border-bottom-color:#4f46e5;font-weight:500}</style>
+        <script>
+            (function(){
+                var tabs=document.querySelectorAll('.pc-tab');
+                function show(name){
+                    tabs.forEach(function(t){t.classList.toggle('pc-tab-active',t.getAttribute('data-pc')===name);});
+                    document.querySelectorAll('.pc-panel').forEach(function(p){p.classList.toggle('hidden',p.getAttribute('data-pc')!==name);});
+                }
+                tabs.forEach(function(t){t.addEventListener('click',function(){show(t.getAttribute('data-pc'));});});
+                var want=(location.hash||'').replace('#','');
+                if(want&&document.querySelector('.pc-tab[data-pc="'+want+'"]'))show(want);else if(tabs.length)show(tabs[0].getAttribute('data-pc'));
+                var d=document.getElementById('pc-diff');
+                if(d){d.innerHTML=d.getAttribute('data-diff').split('\n').map(function(l){var c=l[0]==='+'?'bg-green-50 text-green-800':l[0]==='-'?'bg-red-50 text-red-800':l.indexOf('@@')===0?'text-indigo-500':'text-gray-600';return '<div dir="auto" class="px-2 whitespace-pre-wrap break-all '+c+'">'+Mole.esc(l)+'</div>';}).join('');}
+            })();
+        </script>
+        {{end}}
 
         <div class="bg-white rounded-lg shadow p-6 mb-6">
             <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">

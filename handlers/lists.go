@@ -28,7 +28,7 @@ func (h *Handler) JobsPage(c *gin.Context) {
 		"total":      int(total),
 		"from":       from,
 		"to":         to,
-		"activeJob":  h.jobManager.GetActiveJob(),
+		"nav":        "jobs",
 	})
 }
 
@@ -46,6 +46,7 @@ func (h *Handler) DiscoveryJobsPage(c *gin.Context) {
 	}
 	from, to := showingRange(total, offset, len(jobs))
 	c.HTML(http.StatusOK, "discovery_jobs.html", gin.H{
+		"nav":        "discovery",
 		"jobs":       jobs,
 		"page":       page,
 		"totalPages": totalPages,
@@ -70,6 +71,7 @@ func (h *Handler) PortScansPage(c *gin.Context) {
 	}
 	from, to := showingRange(total, offset, len(jobs))
 	c.HTML(http.StatusOK, "port_scans.html", gin.H{
+		"nav":        "ports",
 		"jobs":       jobs,
 		"page":       page,
 		"totalPages": totalPages,
