@@ -29,26 +29,29 @@ type ScrapeRequest struct {
 
 // ScrapeResult is the response of a synchronous scrape.
 type ScrapeResult struct {
-	URL           string                 `json:"url"`
-	FinalURL      string                 `json:"final_url"`
-	StatusCode    int                    `json:"status_code"`
-	ContentType   string                 `json:"content_type"`
-	FetchedWith   string                 `json:"fetched_with"`
-	Title         string                 `json:"title,omitempty"`
-	Markdown      string                 `json:"markdown,omitempty"`
-	HTML          string                 `json:"html,omitempty"`
-	Text          string                 `json:"text,omitempty"`
-	Links         []string               `json:"links,omitempty"`
-	Metadata      map[string]interface{} `json:"metadata,omitempty"`
-	Extracted     map[string]interface{} `json:"extracted,omitempty"`
-	LLMExtracted  json.RawMessage        `json:"llm_extracted,omitempty"`
-	Screenshot    string                 `json:"screenshot,omitempty"` // base64 PNG
-	ActionResults json.RawMessage        `json:"action_results,omitempty"`
-	ContentHash   string                 `json:"content_hash,omitempty"`
-	Error         string                 `json:"error,omitempty"`
-	ExtractError  string                 `json:"extract_error,omitempty"`
-	Usage         models.JobUsage        `json:"usage"`
-	DurationMs    int64                  `json:"duration_ms"`
+	URL              string                 `json:"url"`
+	FinalURL         string                 `json:"final_url"`
+	StatusCode       int                    `json:"status_code"`
+	ContentType      string                 `json:"content_type"`
+	FetchedWith      string                 `json:"fetched_with"`
+	Title            string                 `json:"title,omitempty"`
+	Markdown         string                 `json:"markdown,omitempty"`
+	HTML             string                 `json:"html,omitempty"`
+	Text             string                 `json:"text,omitempty"`
+	Links            []string               `json:"links,omitempty"`
+	Metadata         map[string]interface{} `json:"metadata,omitempty"`
+	Extracted        map[string]interface{} `json:"extracted,omitempty"`
+	content.Detected                        // product, article, business, job_posting, event, faq (detector formats)
+	LLMExtracted     json.RawMessage        `json:"llm_extracted,omitempty"`
+	Screenshot       string                 `json:"screenshot,omitempty"` // base64 PNG
+	ActionResults    json.RawMessage        `json:"action_results,omitempty"`
+	ContentHash      string                 `json:"content_hash,omitempty"`
+	Error            string                 `json:"error,omitempty"`
+	ExtractError     string                 `json:"extract_error,omitempty"`
+	Usage            models.JobUsage        `json:"usage"`
+	DurationMs       int64                  `json:"duration_ms"`
+	Cached           bool                   `json:"cached,omitempty"`    // served from the scrape cache
+	CachedAt         *time.Time             `json:"cached_at,omitempty"` // when the cached copy was fetched
 }
 
 type oneShotMeter struct{ u models.JobUsage }
@@ -132,8 +135,11 @@ func (e *Engine) Scrape(ctx context.Context, req ScrapeRequest) (*ScrapeResult, 
 	}
 
 	ct := strings.ToLower(res.ContentType)
+	docKind := content.DocumentKind(res.ContentType, out.FinalURL, res.Body)
 	switch {
 	case len(res.Body) == 0:
+	case docKind != "":
+		e.scrapeDocument(ctx, out, rs, docKind, res, m)
 	case strings.Contains(ct, "html") || ct == "":
 		f := rs.Formats
 		analysis, aerr := content.Analyze(out.FinalURL, res.Body, content.Options{
@@ -158,6 +164,13 @@ func (e *Engine) Scrape(ctx context.Context, req ScrapeRequest) (*ScrapeResult, 
 			analysis.Metadata["status_code"] = res.StatusCode
 			analysis.Metadata["source_url"] = target
 			out.Metadata = analysis.Metadata
+		}
+		if len(rs.Detectors) > 0 {
+			if d, err := content.Detect(out.FinalURL, res.Body, rs.Detectors); err != nil {
+				out.ExtractError = appendErr(out.ExtractError, "detect: "+err.Error())
+			} else {
+				out.Detected = *d
+			}
 		}
 		if len(rs.ExtractFields) > 0 {
 			if ex, err := content.Extract(out.FinalURL, res.Body, rs.ExtractFields); err != nil {
@@ -186,6 +199,45 @@ func (e *Engine) Scrape(ctx context.Context, req ScrapeRequest) (*ScrapeResult, 
 	out.Usage = m.u
 	out.DurationMs = time.Since(start).Milliseconds()
 	return out, nil
+}
+
+// scrapeDocument fills a scrape result from a PDF or DOCX response.
+func (e *Engine) scrapeDocument(ctx context.Context, out *ScrapeResult, rs *RunSettings, kind string, res *modules.FetchResult, m *oneShotMeter) {
+	if !rs.convertsDocuments() {
+		return
+	}
+	doc, err := content.ConvertDocument(ctx, kind, res.Body, e.documentOptions())
+	if err != nil {
+		out.ExtractError = "document: " + err.Error()
+		if res.Truncated {
+			out.ExtractError += " (the file is larger than security.max_body_bytes and was cut off)"
+		}
+		return
+	}
+	m.u.DocumentPages += int64(doc.Pages)
+	f := rs.Formats
+	out.Title = doc.Title
+	out.ContentHash = doc.ContentHash
+	if f[models.FormatMarkdown] {
+		out.Markdown = doc.Markdown
+	}
+	if f[models.FormatText] {
+		out.Text = doc.Text
+	}
+	if f[models.FormatMetadata] {
+		doc.Metadata["status_code"] = res.StatusCode
+		doc.Metadata["source_url"] = out.URL
+		out.Metadata = doc.Metadata
+	}
+	if rs.LLMPrompt != "" && doc.Markdown != "" {
+		llmOut, tokens, err := e.llm.Extract(ctx, rs.LLMPrompt, rs.LLMSchema, out.FinalURL, doc.Markdown)
+		m.u.LLMTokens += int64(tokens)
+		if err != nil {
+			out.ExtractError = appendErr(out.ExtractError, "llm: "+err.Error())
+		} else {
+			out.LLMExtracted = llmOut
+		}
+	}
 }
 
 // MapRequest asks for a fast list of a site's URLs without crawling it.

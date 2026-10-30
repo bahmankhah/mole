@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/resolver/crawler/models"
+	"gorm.io/gorm/clause"
 )
 
 // ErrIdempotencyConflict means a key was reused with a different request body.
@@ -53,7 +54,63 @@ func (m *Manager) DeleteOwner(ownerRef string) (*OwnerDeletion, error) {
 	}
 	m.db.Where("owner_ref = ?", ownerRef).Delete(&models.WebhookDelivery{})
 	m.db.Where("owner_ref = ?", ownerRef).Delete(&models.IdempotencyKey{})
+	m.db.Where("owner_ref = ?", ownerRef).Delete(&models.OwnerLimit{})
+	m.db.Where("owner_ref = ?", ownerRef).Delete(&models.ScrapeCacheEntry{})
 	return res, nil
+}
+
+// OwnerLimits is the effective concurrency limit of an owner.
+type OwnerLimits struct {
+	OwnerRef   string     `json:"owner_ref"`
+	MaxRunning int        `json:"max_running"` // 0 = unlimited
+	Source     string     `json:"source"`      // "owner" (set for this owner) or "default" (worker.max_running_per_owner)
+	UpdatedAt  *time.Time `json:"updated_at,omitempty"`
+}
+
+// MaxOwnerRunning caps max_running so a typo cannot disable fairness.
+const MaxOwnerRunning = 1000
+
+// GetOwnerLimits returns an owner's limits: its override or the engine default.
+func (m *Manager) GetOwnerLimits(ownerRef string) (*OwnerLimits, error) {
+	if ownerRef == "" {
+		return nil, invalidInput("owner_ref is required")
+	}
+	var rows []models.OwnerLimit
+	if err := m.db.Where("owner_ref = ?", ownerRef).Limit(1).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return &OwnerLimits{OwnerRef: ownerRef, MaxRunning: m.config.Worker.MaxRunningPerOwner, Source: "default"}, nil
+	}
+	return &OwnerLimits{OwnerRef: ownerRef, MaxRunning: rows[0].MaxRunning, Source: "owner", UpdatedAt: &rows[0].UpdatedAt}, nil
+}
+
+// SetOwnerLimits stores an owner's concurrency limit (e.g. from its plan).
+func (m *Manager) SetOwnerLimits(ownerRef string, maxRunning int) (*OwnerLimits, error) {
+	if ownerRef == "" || len(ownerRef) > 191 {
+		return nil, invalidInput("owner_ref must be 1 to 191 characters")
+	}
+	if maxRunning < 0 || maxRunning > MaxOwnerRunning {
+		return nil, invalidInput("max_running must be between 0 (unlimited) and %d", MaxOwnerRunning)
+	}
+	row := models.OwnerLimit{OwnerRef: ownerRef, MaxRunning: maxRunning, UpdatedAt: time.Now()}
+	if err := m.db.Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error; err != nil {
+		return nil, err
+	}
+	m.nudge()
+	return m.GetOwnerLimits(ownerRef)
+}
+
+// DeleteOwnerLimits removes an owner's override; the engine default applies again.
+func (m *Manager) DeleteOwnerLimits(ownerRef string) error {
+	if ownerRef == "" {
+		return invalidInput("owner_ref is required")
+	}
+	if err := m.db.Where("owner_ref = ?", ownerRef).Delete(&models.OwnerLimit{}).Error; err != nil {
+		return err
+	}
+	m.nudge()
+	return nil
 }
 
 // OwnerUsage sums usage of an owner's jobs created in [from, to).
@@ -69,14 +126,15 @@ type OwnerUsage struct {
 func (m *Manager) GetOwnerUsage(ownerRef string, from, to time.Time) (*OwnerUsage, error) {
 	out := &OwnerUsage{OwnerRef: ownerRef, From: from, To: to}
 	row := struct {
-		Jobs                                                               int64
-		Requests, Pages, Bytes, BrowserMs, LLMTokens, Errors, Shots, Proxy int64
+		Jobs                                                                              int64
+		Requests, Pages, Bytes, BrowserMs, LLMTokens, Errors, Shots, Proxy, DocumentPages int64
 	}{}
 	err := m.db.Model(&models.CrawlJob{}).
 		Select(`COUNT(*) AS jobs, COALESCE(SUM(usage_requests),0) AS requests, COALESCE(SUM(usage_pages),0) AS pages,
 			COALESCE(SUM(usage_bytes),0) AS bytes, COALESCE(SUM(usage_browser_ms),0) AS browser_ms,
 			COALESCE(SUM(usage_llm_tokens),0) AS llm_tokens, COALESCE(SUM(usage_errors),0) AS errors,
-			COALESCE(SUM(usage_screenshots),0) AS shots, COALESCE(SUM(usage_proxy_requests),0) AS proxy`).
+			COALESCE(SUM(usage_screenshots),0) AS shots, COALESCE(SUM(usage_proxy_requests),0) AS proxy,
+			COALESCE(SUM(usage_document_pages),0) AS document_pages`).
 		Where("owner_ref = ? AND created_at >= ? AND created_at < ?", ownerRef, from, to).
 		Scan(&row).Error
 	if err != nil {
@@ -84,7 +142,8 @@ func (m *Manager) GetOwnerUsage(ownerRef string, from, to time.Time) (*OwnerUsag
 	}
 	out.Jobs = row.Jobs
 	out.Usage = models.JobUsage{Requests: row.Requests, Pages: row.Pages, Bytes: row.Bytes, BrowserMs: row.BrowserMs,
-		LLMTokens: row.LLMTokens, Errors: row.Errors, Screenshots: row.Shots, ProxyRequests: row.Proxy}
+		LLMTokens: row.LLMTokens, Errors: row.Errors, Screenshots: row.Shots, ProxyRequests: row.Proxy,
+		DocumentPages: row.DocumentPages}
 	return out, nil
 }
 

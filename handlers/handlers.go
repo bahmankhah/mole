@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/resolver/crawler/content"
 	"github.com/resolver/crawler/jobs"
 	"github.com/resolver/crawler/models"
 	"github.com/resolver/crawler/plugins"
@@ -175,25 +176,12 @@ func (h *Handler) GetJob(c *gin.Context) {
 
 	// Check if request accepts HTML
 	if c.GetHeader("Accept") == "text/html" || c.Query("format") == "html" {
-		defaultSettings := h.jobManager.GetDefaultJobSettings()
 		// If the job has no custom settings, provide nil to the template
 		var settingsJSON template.JS = "null"
 		if job.Settings != nil {
 			b, _ := json.Marshal(job.Settings)
 			settingsJSON = template.JS(b)
 		}
-		defaultSettingsB, _ := json.Marshal(defaultSettings)
-		pluginList, err := plugins.List()
-		if err != nil {
-			log.Printf("[Handler] Failed to list plugins: %v", err)
-			pluginList = nil
-		}
-		if pluginList == nil {
-			pluginList = []plugins.Plugin{}
-		}
-		pluginsB, _ := json.Marshal(pluginList)
-
-		catalog, _ := json.Marshal(h.catalog())
 		runStats, isLocalRun := h.jobManager.Engine().RunStatsFor(job.ID)
 		var schedule interface{}
 		if job.ScheduleID != nil {
@@ -222,7 +210,7 @@ func (h *Handler) GetJob(c *gin.Context) {
 			"nav":                 "jobs",
 			"optionsJSON":         template.JS(optionsJSON),
 			"showChanges":         showChanges,
-			"catalogJSON":         template.JS(catalog),
+			"catalogJSON":         h.catalogJS(),
 			"runStats":            runStats,
 			"isLocalRun":          isLocalRun,
 			"changeCounts":        changeCounts,
@@ -236,8 +224,8 @@ func (h *Handler) GetJob(c *gin.Context) {
 			"pageTotal":           pageTotal,
 			"stats":               stats,
 			"settingsJSON":        settingsJSON,
-			"defaultSettingsJSON": template.JS(defaultSettingsB),
-			"pluginsJSON":         template.JS(pluginsB),
+			"defaultSettingsJSON": h.defaultSettingsJS(),
+			"pluginsJSON":         h.pluginsJS(),
 			"settingsEditable":    job.Status.SettingsEditable(),
 		})
 		return
@@ -699,6 +687,7 @@ func (h *Handler) GetCrawledPage(c *gin.Context) {
 			extra["mdText"] = *pc.Text
 		}
 		extra["extractedPretty"] = prettyJSON(pc.Extracted)
+		extra["detected"] = detectedTabs(pc.DetectedData)
 		extra["llmPretty"] = prettyJSON(pc.LLMExtracted)
 		extra["actionsPretty"] = prettyJSON(pc.ActionResults)
 		if pc.Metadata != nil {
@@ -735,6 +724,7 @@ func (h *Handler) GetCrawledPage(c *gin.Context) {
 			"content":         pc,
 			"mdText":          extra["mdText"],
 			"extractedPretty": extra["extractedPretty"],
+			"detected":        extra["detected"],
 			"llmPretty":       extra["llmPretty"],
 			"actionsPretty":   extra["actionsPretty"],
 			"metadataPretty":  extra["metadataPretty"],
@@ -1103,4 +1093,24 @@ func (h *Handler) GetJobExtractedPhrases(c *gin.Context) {
 			"offset":  offset,
 		},
 	})
+}
+
+// detectedTab is one detector's result on the page detail view.
+type detectedTab struct {
+	Format, Label, Pretty string
+}
+
+// detectedTabs lists the detectors that found something, in catalog order.
+func detectedTabs(d models.DetectedData) []detectedTab {
+	values := map[string]models.JSONRaw{}
+	for _, f := range d.Fields() {
+		values[f.Format] = f.Value
+	}
+	var tabs []detectedTab
+	for _, info := range content.Detectors {
+		if pretty := prettyJSON(values[info.Format]); pretty != "" {
+			tabs = append(tabs, detectedTab{Format: info.Format, Label: info.Label, Pretty: pretty})
+		}
+	}
+	return tabs
 }

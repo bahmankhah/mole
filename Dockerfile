@@ -13,7 +13,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
 
 # ── Runtime: Go binary + Python/Playwright for the headless browser ─────
 FROM python:3.12-slim-bookworm
-ENV PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 TZ=Asia/Tehran
+# Chromium goes to a shared path: it is installed as root but runs as user mole.
+ENV PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 TZ=Asia/Tehran PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 WORKDIR /app
 
 # Headless browser support. Set INSTALL_ALL_PLUGINS=true to also install the
@@ -23,7 +24,7 @@ COPY plugins/requirements.txt /tmp/requirements.txt
 RUN pip install playwright requests \
  && python -m playwright install --with-deps chromium \
  && if [ "$INSTALL_ALL_PLUGINS" = "true" ]; then pip install -r /tmp/requirements.txt; fi \
- && apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata && rm -rf /var/lib/apt/lists/*
+ && apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata poppler-utils && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /out/mole /usr/local/bin/mole
 COPY templates ./templates

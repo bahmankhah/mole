@@ -11,8 +11,9 @@ all: build
 deps:
 	go mod download
 
+# Static binary: the control node hands it to joining nodes, which may have an older libc.
 build:
-	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) .
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) .
 
 # Web UI + API + crawl worker
 run serve: build

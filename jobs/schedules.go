@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/resolver/crawler/models"
+	"github.com/resolver/crawler/modules"
 	"github.com/robfig/cron/v3"
 )
 
@@ -42,6 +43,9 @@ type ScheduleInput struct {
 	ChangeDetection *bool              `json:"change_detection,omitempty"`
 	SkipIfRunning   *bool              `json:"skip_if_running,omitempty"`
 	Template        models.JobTemplate `json:"template"`
+	// SourceJobID names the crawl a new schedule was made from: a webhook
+	// secret sent masked ("********") is then copied from that crawl.
+	SourceJobID string `json:"source_job_id,omitempty"`
 }
 
 func (m *Manager) validateSchedule(in *ScheduleInput, allowPlugins bool) (time.Time, error) {
@@ -55,7 +59,18 @@ func (m *Manager) validateSchedule(in *ScheduleInput, allowPlugins bool) (time.T
 	if err != nil {
 		return time.Time{}, invalidInput("%v", err)
 	}
-	if _, _, err := ParseTarget(in.Template.TargetURL); err != nil {
+	kind, err := normalizeKind(in.Template.Kind)
+	if err != nil {
+		return time.Time{}, err
+	}
+	in.Template.Kind = kind
+	target := in.Template.TargetURL
+	if kind == models.JobKindBatch {
+		if target, err = batchURL(target); err != nil {
+			return time.Time{}, err
+		}
+	}
+	if _, _, err := ParseTarget(target); err != nil {
 		return time.Time{}, err
 	}
 	if _, err := ExpandTemplateURL(in.Template.TargetURL, in.Template.TemplateVars); err != nil {
@@ -75,6 +90,14 @@ func (m *Manager) validateSchedule(in *ScheduleInput, allowPlugins bool) (time.T
 
 // CreateSchedule validates and stores a schedule.
 func (m *Manager) CreateSchedule(in ScheduleInput, allowPlugins bool) (*models.Schedule, error) {
+	if w := in.Template.Webhook; w != nil && w.Secret == SecretMask {
+		w.Secret = ""
+		if in.SourceJobID != "" {
+			if src, err := m.GetJob(in.SourceJobID); err == nil && src.Webhook != nil {
+				w.Secret = src.Webhook.Secret
+			}
+		}
+	}
 	next, err := m.validateSchedule(&in, allowPlugins)
 	if err != nil {
 		return nil, err
@@ -216,6 +239,82 @@ func (m *Manager) RunSchedule(s *models.Schedule) (*models.CrawlJob, error) {
 		"last_job_id": job.ID, "run_count": s.RunCount + 1,
 	})
 	return job, nil
+}
+
+// ScheduleInputFromJob returns a schedule that repeats job: the same URLs,
+// kind, settings, limits, priority, region and webhook (secret masked; send
+// SourceJobID to keep it). The link depth the job ran with becomes an
+// explicit setting, and job-only settings (a fixed baseline job, change
+// detection) are left to the schedule, which compares each run with the
+// previous one.
+func ScheduleInputFromJob(job *models.CrawlJob) (ScheduleInput, error) {
+	var settings *models.JobSettings
+	if job.Settings != nil {
+		settings = &models.JobSettings{}
+		if err := deepCopy(job.Settings, settings); err != nil {
+			return ScheduleInput{}, err
+		}
+	}
+	if job.Kind != models.JobKindBatch && (settings == nil || settings.MaxDepth == nil) {
+		if settings == nil {
+			settings = &models.JobSettings{}
+		}
+		depth := job.MaxDepth
+		settings.MaxDepth = &depth
+	}
+	changes := true
+	if settings != nil {
+		if settings.ChangeDetection != nil {
+			changes = *settings.ChangeDetection
+		}
+		settings.ChangeDetection, settings.CompareWithJobID = nil, nil
+	}
+	// A {{VAR}} target was expanded into the seeds when the job was created.
+	target, seeds := job.TargetURL, []string(job.SeedURLs)
+	if modules.HasTemplateVars(target) && len(seeds) > 0 {
+		target, seeds = seeds[0], seeds[1:]
+	}
+	if job.Kind == models.JobKindBatch {
+		seeds = removeString(seeds, target)
+	}
+	t := models.JobTemplate{
+		Kind:      job.Kind,
+		TargetURL: target,
+		SeedURLs:  seeds,
+		Priority:  job.Priority,
+		Region:    job.Region,
+		Settings:  settings,
+		Limits:    job.Limits,
+	}
+	if job.Webhook != nil {
+		w := *job.Webhook
+		if w.Secret != "" {
+			w.Secret = SecretMask
+		}
+		t.Webhook = &w
+	}
+	enabled, skip := true, true
+	return ScheduleInput{
+		Name:            job.Domain,
+		OwnerRef:        job.OwnerRef,
+		Cron:            "0 3 * * *",
+		Timezone:        "Asia/Tehran",
+		Enabled:         &enabled,
+		ChangeDetection: &changes,
+		SkipIfRunning:   &skip,
+		Template:        t,
+		SourceJobID:     job.ID,
+	}, nil
+}
+
+func removeString(list []string, s string) []string {
+	out := make([]string, 0, len(list))
+	for _, v := range list {
+		if v != s {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // MaskSchedule returns a copy of s with its webhook secret masked.

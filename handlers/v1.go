@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -154,8 +155,10 @@ func (h *Handler) RegisterV1(g *gin.RouterGroup) {
 	g.GET("/crawls/:id/webhooks", h.V1Deliveries)
 	g.POST("/webhooks/:deliveryId/redeliver", h.V1Redeliver)
 
+	g.POST("/batch/scrape", h.V1CreateBatch)
 	g.POST("/scrape", h.V1Scrape)
 	g.POST("/map", h.V1Map)
+	g.POST("/search", h.V1Search)
 
 	g.POST("/schedules", h.V1CreateSchedule)
 	g.GET("/schedules", h.V1ListSchedules)
@@ -163,10 +166,14 @@ func (h *Handler) RegisterV1(g *gin.RouterGroup) {
 	g.PUT("/schedules/:id", h.V1UpdateSchedule)
 	g.DELETE("/schedules/:id", h.V1DeleteSchedule)
 	g.POST("/schedules/:id/run", h.V1RunSchedule)
+	g.GET("/cron/preview", h.V1CronPreview)
 	g.POST("/schedules/:id/enable", h.v1ScheduleEnabled(true))
 	g.POST("/schedules/:id/disable", h.v1ScheduleEnabled(false))
 
 	g.GET("/owners/:ref/usage", h.V1OwnerUsage)
+	g.GET("/owners/:ref/limits", h.V1GetOwnerLimits)
+	g.PUT("/owners/:ref/limits", h.V1SetOwnerLimits)
+	g.DELETE("/owners/:ref/limits", h.V1DeleteOwnerLimits)
 	g.DELETE("/owners/:ref", h.V1DeleteOwner)
 }
 
@@ -275,13 +282,54 @@ func (h *Handler) V1CreateCrawl(c *gin.Context) {
 	if !okb {
 		return
 	}
+	h.createJob(c, spec, "crawl", body)
+}
+
+// batchRequest is the body of POST /v1/batch/scrape.
+type batchRequest struct {
+	URLs       []string              `json:"urls"`
+	OwnerRef   string                `json:"owner_ref,omitempty"`
+	ExternalID string                `json:"external_id,omitempty"`
+	Priority   int                   `json:"priority,omitempty"`
+	Region     string                `json:"region,omitempty"`
+	Settings   *models.JobSettings   `json:"settings,omitempty"`
+	Limits     *models.JobLimits     `json:"limits,omitempty"`
+	Webhook    *models.WebhookConfig `json:"webhook,omitempty"`
+	Start      *bool                 `json:"start,omitempty"`
+}
+
+// maxBatchRequestURLs caps the URLs of one batch request.
+const maxBatchRequestURLs = 10000
+
+// V1CreateBatch creates a batch job that fetches exactly the listed URLs
+// (no link following). Results are read like a crawl's: /v1/crawls/{id}/pages.
+func (h *Handler) V1CreateBatch(c *gin.Context) {
+	var req batchRequest
+	body, okb := bindJSON(c, &req)
+	if !okb {
+		return
+	}
+	if len(req.URLs) == 0 || len(req.URLs) > maxBatchRequestURLs {
+		abortV1(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf("urls must list 1 to %d URLs", maxBatchRequestURLs))
+		return
+	}
+	h.createJob(c, jobs.JobSpec{
+		Kind: models.JobKindBatch, URL: req.URLs[0], SeedURLs: req.URLs[1:],
+		OwnerRef: req.OwnerRef, ExternalID: req.ExternalID, Priority: req.Priority, Region: req.Region,
+		Settings: req.Settings, Limits: req.Limits, Webhook: req.Webhook, Start: req.Start,
+	}, "batch", body)
+}
+
+// createJob creates a job, replaying the job created earlier for the same
+// Idempotency-Key and request body.
+func (h *Handler) createJob(c *gin.Context, spec jobs.JobSpec, scope string, body []byte) {
 	key := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
 	if len(key) > 191 {
 		abortV1(c, http.StatusBadRequest, "invalid_request", "Idempotency-Key is too long")
 		return
 	}
 	if key != "" {
-		existing, err := h.jobManager.ReserveIdempotency(spec.OwnerRef, key, "crawl", jobs.HashRequest(body))
+		existing, err := h.jobManager.ReserveIdempotency(spec.OwnerRef, key, scope, jobs.HashRequest(body))
 		if err != nil {
 			v1Error(c, err)
 			return
@@ -595,9 +643,10 @@ func requestTimeout(c *gin.Context, def, max time.Duration) time.Duration {
 	return def
 }
 
-// V1Scrape fetches one URL synchronously.
+// V1Scrape fetches one URL synchronously. With max_age it may answer from
+// the scrape cache; X-Owner-Ref scopes cache entries of private requests.
 func (h *Handler) V1Scrape(c *gin.Context) {
-	var req crawler.ScrapeRequest
+	var req jobs.ScrapeRequest
 	if _, okb := bindJSON(c, &req); !okb {
 		return
 	}
@@ -607,9 +656,36 @@ func (h *Handler) V1Scrape(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), requestTimeout(c, 2*time.Minute, 5*time.Minute))
 	defer cancel()
-	res, err := h.jobManager.Engine().Scrape(ctx, req)
+	res, err := h.jobManager.Scrape(ctx, req, c.GetHeader("X-Owner-Ref"))
 	if err != nil {
-		v1Error(c, fmt.Errorf("%w: %v", jobs.ErrInvalidInput, err))
+		if !errors.Is(err, jobs.ErrInvalidInput) {
+			err = fmt.Errorf("%w: %v", jobs.ErrInvalidInput, err)
+		}
+		v1Error(c, err)
+		return
+	}
+	ok(c, http.StatusOK, res)
+}
+
+// V1Search runs a web search and optionally scrapes the results.
+func (h *Handler) V1Search(c *gin.Context) {
+	var req jobs.SearchRequest
+	if _, okb := bindJSON(c, &req); !okb {
+		return
+	}
+	if err := h.jobManager.ValidateSettings(req.Settings, nil, false); err != nil {
+		v1Error(c, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), requestTimeout(c, 2*time.Minute, 5*time.Minute))
+	defer cancel()
+	res, err := h.jobManager.Search(ctx, req, c.GetHeader("X-Owner-Ref"))
+	if err != nil {
+		if errors.Is(err, jobs.ErrInvalidInput) {
+			v1Error(c, err)
+			return
+		}
+		abortV1(c, http.StatusBadGateway, "search_failed", err.Error())
 		return
 	}
 	ok(c, http.StatusOK, res)
@@ -788,6 +864,45 @@ func (h *Handler) V1OwnerUsage(c *gin.Context) {
 	ok(c, http.StatusOK, u)
 }
 
+// V1GetOwnerLimits returns an owner's concurrency limit.
+func (h *Handler) V1GetOwnerLimits(c *gin.Context) {
+	l, err := h.jobManager.GetOwnerLimits(c.Param("ref"))
+	if err != nil {
+		v1Error(c, err)
+		return
+	}
+	ok(c, http.StatusOK, l)
+}
+
+// V1SetOwnerLimits sets an owner's concurrency limit: {"max_running": n}.
+func (h *Handler) V1SetOwnerLimits(c *gin.Context) {
+	var req struct {
+		MaxRunning *int `json:"max_running"`
+	}
+	if _, okb := bindJSON(c, &req); !okb {
+		return
+	}
+	if req.MaxRunning == nil {
+		abortV1(c, http.StatusBadRequest, "invalid_request", "max_running is required (0 = unlimited)")
+		return
+	}
+	l, err := h.jobManager.SetOwnerLimits(c.Param("ref"), *req.MaxRunning)
+	if err != nil {
+		v1Error(c, err)
+		return
+	}
+	ok(c, http.StatusOK, l)
+}
+
+// V1DeleteOwnerLimits removes an owner's limit; the engine default applies again.
+func (h *Handler) V1DeleteOwnerLimits(c *gin.Context) {
+	if err := h.jobManager.DeleteOwnerLimits(c.Param("ref")); err != nil {
+		v1Error(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 // V1DeleteOwner deletes all data of an owner.
 func (h *Handler) V1DeleteOwner(c *gin.Context) {
 	res, err := h.jobManager.DeleteOwner(c.Param("ref"))
@@ -800,4 +915,27 @@ func (h *Handler) V1DeleteOwner(c *gin.Context) {
 		return
 	}
 	ok(c, http.StatusOK, res)
+}
+
+// V1CronPreview checks a cron expression and lists when it fires next:
+// GET /v1/cron/preview?cron=0 3 * * *&timezone=Asia/Tehran&count=5.
+func (h *Handler) V1CronPreview(c *gin.Context) {
+	expr, tz := strings.TrimSpace(c.Query("cron")), strings.TrimSpace(c.Query("timezone"))
+	if expr == "" {
+		abortV1(c, http.StatusBadRequest, "invalid_request", "cron is required")
+		return
+	}
+	if tz == "" {
+		tz = "Asia/Tehran"
+	}
+	n, _ := strconv.Atoi(c.Query("count"))
+	if n < 1 || n > 20 {
+		n = 5
+	}
+	next, err := jobs.NextRuns(expr, tz, time.Now(), n)
+	if err != nil {
+		abortV1(c, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	ok(c, http.StatusOK, gin.H{"cron": expr, "timezone": tz, "description": jobs.DescribeCron(expr), "next": next})
 }

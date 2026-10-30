@@ -30,6 +30,13 @@
         </div>
         {{end}}
 
+        {{if and .needBrowser (eq .browserWorkers 0)}}
+        <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-900">
+            <p class="font-semibold mb-1">{{.needBrowser}} queued job(s) need the headless browser, but no active worker has one</p>
+            <p>They wait until a worker with a browser is available. Install it on a node (the node install command does unless you pass <code>--no-browser</code>; on this machine run <code>plugins/setup_python.sh</code>), or turn off the headless browser and browser fallback in those jobs.</p>
+        </div>
+        {{end}}
+
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div class="bg-white rounded-lg shadow p-5"><div class="text-gray-500 text-sm">Running (all workers)</div><div class="text-3xl font-bold text-blue-600">{{.stats.running}}</div></div>
             <div class="bg-white rounded-lg shadow p-5"><div class="text-gray-500 text-sm">Queued</div><div class="text-3xl font-bold text-indigo-600">{{.stats.queued}}</div></div>
@@ -40,33 +47,99 @@
         <div class="bg-white rounded-lg shadow">
             <div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
                 <h2 class="font-semibold text-gray-800">Workers</h2>
-                <span class="text-xs text-gray-400">Run more with <code>mole worker --region ir</code> against the same database</span>
+                <a href="#add-node" class="text-xs text-indigo-600 hover:text-indigo-800">+ Add a node</a>
             </div>
             <div class="overflow-x-auto">
                 <table class="w-full text-sm">
                     <thead class="bg-gray-50"><tr>
                         <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Worker</th>
+                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Host</th>
                         <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Region</th>
+                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>
+                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Browser</th>
                         <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Jobs</th>
                         <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Version</th>
                         <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Up since</th>
                         <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Last seen</th>
+                        <th class="px-4 py-2"></th>
                     </tr></thead>
                     <tbody class="divide-y divide-gray-100">
                         {{range .workers}}
                         <tr>
                             <td class="px-4 py-2 font-mono">{{.ID}} {{if eq .ID $.catalog.WorkerID}}<span class="text-xs text-indigo-600">(this)</span>{{end}}</td>
+                            <td class="px-4 py-2 text-gray-500">{{.Hostname}}</td>
                             <td class="px-4 py-2">{{if .Region}}{{.Region}}{{else}}<span class="text-gray-400">any</span>{{end}}</td>
+                            <td class="px-4 py-2">
+                                {{if eq .State "cordoned"}}<span class="px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-800" title="Finishes its running jobs but takes no new ones">cordoned</span>
+                                {{else if eq .State "draining"}}<span class="px-2 py-0.5 rounded-full text-xs bg-red-100 text-red-800" title="Hands its running jobs to other workers and takes no new ones">{{if .RunningJobs}}draining{{else}}drained{{end}}</span>
+                                {{else}}<span class="px-2 py-0.5 rounded-full text-xs bg-green-100 text-green-800">active</span>{{end}}
+                            </td>
+                            <td class="px-4 py-2">{{if .Browser}}✓{{else}}<span class="text-gray-400" title="No headless browser: jobs that need one go to other workers">—</span>{{end}}</td>
                             <td class="px-4 py-2">{{.RunningJobs}} / {{.MaxJobs}}</td>
-                            <td class="px-4 py-2 text-gray-500">{{.Version}}</td>
+                            <td class="px-4 py-2">{{if .VersionMismatch}}<span class="text-red-600 font-medium" title="This server runs {{$.catalog.Version}}. Run the install command on that node again to upgrade it.">{{.Version}} ⚠</span>{{else}}<span class="text-gray-500">{{.Version}}</span>{{end}}</td>
                             <td class="px-4 py-2 text-gray-500">{{.StartedAt.Format "Jan 02 15:04"}}</td>
                             <td class="px-4 py-2 text-gray-500">{{.LastSeenAt.Format "15:04:05"}}</td>
+                            <td class="px-4 py-2 text-right whitespace-nowrap">
+                                {{if eq .State "active"}}
+                                <button data-worker="{{.ID}}" data-state="cordoned" data-running="{{.RunningJobs}}" class="worker-state text-xs text-amber-700 hover:text-amber-900 mr-3">Cordon</button>
+                                <button data-worker="{{.ID}}" data-state="draining" data-running="{{.RunningJobs}}" class="worker-state text-xs text-red-600 hover:text-red-800">Drain</button>
+                                {{else}}
+                                <button data-worker="{{.ID}}" data-state="active" data-running="{{.RunningJobs}}" class="worker-state text-xs text-green-700 hover:text-green-900">Uncordon</button>
+                                {{end}}
+                            </td>
                         </tr>
                         {{else}}
-                        <tr><td colspan="6" class="px-4 py-6 text-center text-gray-400">No worker has reported yet (heartbeats every 15s).</td></tr>
+                        <tr><td colspan="10" class="px-4 py-6 text-center text-gray-400">No worker has reported yet (heartbeats every 15s).</td></tr>
                         {{end}}
                     </tbody>
                 </table>
+            </div>
+        </div>
+
+        <div id="add-node" class="bg-white rounded-lg shadow">
+            <div class="px-6 py-4 border-b border-gray-200">
+                <h2 class="font-semibold text-gray-800">Add a node</h2>
+                <p class="text-xs text-gray-500 mt-1">A join token lets a machine fetch this server's configuration (database, storage, proxies…) and run as a worker. Anyone holding it gets those secrets, so give it a short validity and revoke it when you are done.</p>
+            </div>
+            <div class="p-6 space-y-5">
+                <form id="token-form" class="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+                    <label class="text-sm text-gray-600">Name
+                        <input name="name" maxlength="255" placeholder="e.g. tehran-2" class="mt-1 w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+                    </label>
+                    <label class="text-sm text-gray-600">Region
+                        <input name="region" maxlength="32" list="region-list" placeholder="any" class="mt-1 w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+                    </label>
+                    <label class="text-sm text-gray-600">Valid for
+                        <select name="ttl" class="mt-1 w-full border border-gray-300 rounded-md px-3 py-2 text-sm bg-white">
+                            <option value="1">1 hour</option>
+                            <option value="24" selected>24 hours</option>
+                            <option value="168">7 days</option>
+                            <option value="0">until revoked</option>
+                        </select>
+                    </label>
+                    <button type="submit" class="bg-indigo-600 hover:bg-indigo-700 text-white rounded-md px-4 py-2 text-sm font-medium">Create join token</button>
+                </form>
+                <datalist id="region-list">{{range .catalog.Regions}}<option value="{{.}}">{{end}}</datalist>
+                <div id="token-result" class="hidden"></div>
+                <div>
+                    <h3 class="text-sm font-medium text-gray-700 mb-2">Join tokens</h3>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead class="bg-gray-50"><tr>
+                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Token</th>
+                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Region</th>
+                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Uses</th>
+                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Last used</th>
+                                <th class="px-4 py-2"></th>
+                            </tr></thead>
+                            <tbody id="token-rows" class="divide-y divide-gray-100">
+                                <tr><td colspan="7" class="px-4 py-4 text-center text-gray-400">Loading…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -121,6 +194,94 @@
         </div>
     </div>
     <script>
+        (function () {
+            function fmtDate(s) { return s ? new Date(s).toLocaleString() : '—'; }
+
+            document.querySelectorAll('.worker-state').forEach(function (btn) {
+                btn.addEventListener('click', async function () {
+                    var id = btn.dataset.worker, state = btn.dataset.state, running = +btn.dataset.running;
+                    if (state === 'draining' && running > 0 &&
+                        !confirm('Hand the ' + running + ' running job(s) of ' + id + ' back to the queue, so other workers continue them?')) return;
+                    try {
+                        await Mole.api('POST', '/api/cluster/workers/' + encodeURIComponent(id) + '/state', { state: state });
+                        location.reload();
+                    } catch (e) { Mole.toast(e.message, false); }
+                });
+            });
+
+            function commandBlock(label, cmd) {
+                return '<div><div class="text-xs text-gray-500 mb-1">' + Mole.esc(label) + '</div>' +
+                    '<div class="flex gap-2 items-start"><pre class="flex-1 text-xs bg-gray-900 text-gray-100 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap break-all">' + Mole.esc(cmd) + '</pre>' +
+                    '<button type="button" data-copy="' + Mole.esc(cmd) + '" class="copy-cmd text-xs text-indigo-600 hover:text-indigo-800 mt-2">Copy</button></div></div>';
+            }
+
+            var result = document.getElementById('token-result');
+            result.addEventListener('click', function (e) {
+                var b = e.target.closest('.copy-cmd');
+                if (b) Mole.copy(b.getAttribute('data-copy'));
+            });
+
+            document.getElementById('token-form').addEventListener('submit', async function (e) {
+                e.preventDefault();
+                var f = e.target;
+                try {
+                    var res = await Mole.api('POST', '/api/cluster/tokens', {
+                        name: f.elements['name'].value.trim(), region: f.elements['region'].value.trim(), ttl_hours: +f.elements['ttl'].value
+                    });
+                    var d = res.data;
+                    var html = '<div class="border border-indigo-200 bg-indigo-50 rounded-lg p-4 space-y-3">' +
+                        '<p class="text-sm text-indigo-900"><b>Join token created.</b> It is shown only now; copy a command and run it on the new machine.</p>';
+                    (d.warnings || []).forEach(function (w) {
+                        html += '<p class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">⚠ ' + Mole.esc(w) + '</p>';
+                    });
+                    html += commandBlock('Linux server — installs mole, the headless browser and a systemd service (needs root):', d.install_command) +
+                        commandBlock('Machine that already has mole:', d.join_command + ' && mole worker') +
+                        commandBlock('Docker (image built from this repository):', d.docker_command) +
+                        '<p class="text-xs text-gray-500">Nodes reach this server at <code>' + Mole.esc(d.control_url) + '</code>. If that is not the right address, set <code>cluster.advertise_url</code>.</p></div>';
+                    result.innerHTML = html;
+                    result.classList.remove('hidden');
+                    f.reset();
+                    loadTokens();
+                } catch (err) { Mole.toast(err.message, false); }
+            });
+
+            var rows = document.getElementById('token-rows');
+            async function loadTokens() {
+                try {
+                    var list = (await Mole.api('GET', '/api/cluster/tokens')).data || [];
+                    if (!list.length) {
+                        rows.innerHTML = '<tr><td colspan="7" class="px-4 py-4 text-center text-gray-400">No join tokens yet.</td></tr>';
+                        return;
+                    }
+                    var now = Date.now();
+                    rows.innerHTML = list.map(function (t) {
+                        var status, usable = false;
+                        if (t.revoked_at) status = '<span class="text-gray-400">revoked</span>';
+                        else if (t.expires_at && new Date(t.expires_at).getTime() <= now) status = '<span class="text-gray-400">expired</span>';
+                        else { usable = true; status = '<span class="text-green-700">active</span>' + (t.expires_at ? ' <span class="text-gray-400 text-xs">until ' + Mole.esc(fmtDate(t.expires_at)) + '</span>' : ''); }
+                        return '<tr><td class="px-4 py-2 font-mono">' + Mole.esc(t.prefix) + '…</td>' +
+                            '<td class="px-4 py-2">' + (t.name ? Mole.esc(t.name) : '<span class="text-gray-400">—</span>') + '</td>' +
+                            '<td class="px-4 py-2">' + (t.region ? Mole.esc(t.region) : '<span class="text-gray-400">any</span>') + '</td>' +
+                            '<td class="px-4 py-2">' + status + '</td>' +
+                            '<td class="px-4 py-2">' + t.use_count + '</td>' +
+                            '<td class="px-4 py-2 text-gray-500">' + Mole.esc(fmtDate(t.last_used_at)) + '</td>' +
+                            '<td class="px-4 py-2 text-right">' + (usable ? '<button data-id="' + Mole.esc(t.id) + '" class="revoke-token text-xs text-red-600 hover:text-red-800">Revoke</button>' : '') + '</td></tr>';
+                    }).join('');
+                } catch (e) {
+                    rows.innerHTML = '<tr><td colspan="7" class="px-4 py-4 text-center text-red-600">' + Mole.esc(e.message) + '</td></tr>';
+                }
+            }
+            rows.addEventListener('click', async function (e) {
+                var b = e.target.closest('.revoke-token');
+                if (!b || !confirm('Revoke this join token? Nodes that joined with it keep running but cannot start again until they join with another token.')) return;
+                try {
+                    await Mole.api('DELETE', '/api/cluster/tokens/' + encodeURIComponent(b.dataset.id));
+                    loadTokens();
+                } catch (err) { Mole.toast(err.message, false); }
+            });
+            loadTokens();
+        })();
+
         var origin = location.origin;
         document.getElementById('api-example').textContent =
             '# Start a crawl (Idempotency-Key makes retries safe)\n' +

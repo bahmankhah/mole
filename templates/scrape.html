@@ -123,7 +123,7 @@
                 <div class="bg-white rounded-lg shadow min-h-[24rem]">
                     <div id="result-empty" class="flex flex-col items-center justify-center text-center py-24 px-6 text-gray-400">
                         <div class="text-4xl mb-3">🕸️</div>
-                        <p>Enter a URL and press <b>Scrape</b> to see Markdown, metadata, links, a screenshot and extracted data.</p>
+                        <p>Enter a URL and press <b>Scrape</b> to see Markdown, metadata, links, a screenshot, detected products, articles, businesses and extracted data.</p>
                     </div>
                     <div id="result-loading" class="hidden flex-col items-center justify-center py-24 text-gray-500">
                         <svg class="animate-spin h-8 w-8 text-indigo-600 mb-3" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" class="opacity-25"></circle><path fill="currentColor" class="opacity-75" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path></svg>
@@ -247,6 +247,10 @@
                 (d.extract_error ? chip(Mole.esc(d.extract_error), 'bg-amber-100 text-amber-800') : '');
             var tabs = [];
             if (d.markdown) tabs.push({ title: 'Markdown', html: '<div class="flex justify-end mb-2"><button type="button" onclick="Mole.copy(document.getElementById(\'md-out\').textContent)" class="px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-50">Copy</button></div>' + pre(d.markdown, true, true).replace('<pre ', '<pre id="md-out" ') });
+            (catalog.detectors || []).forEach(function (det) {
+                var v = d[det.format];
+                if (v) tabs.push({ title: det.label, html: pre(JSON.stringify(v, null, 2), true) });
+            });
             if (d.extracted) tabs.push({ title: 'Extracted', html: pre(JSON.stringify(d.extracted, null, 2), true) });
             if (d.llm_extracted) tabs.push({ title: 'LLM', html: pre(JSON.stringify(d.llm_extracted, null, 2), true) });
             if (d.screenshot) tabs.push({ title: 'Screenshot', html: '<img class="max-w-full border border-gray-200 rounded-lg" src="data:image/png;base64,' + d.screenshot + '" alt="Screenshot">' });
@@ -283,8 +287,7 @@
         }
 
         document.addEventListener('DOMContentLoaded', function () {
-            formats = Mole.checkboxGroup(document.getElementById('formats'), catalog.formats, ['markdown', 'metadata'],
-                { labels: { markdown: 'Markdown', html: 'Clean HTML', text: 'Text', links: 'Links', metadata: 'Metadata' } });
+            formats = Mole.formatPicker(document.getElementById('formats'), catalog, ['markdown', 'metadata'], { columns: 2 });
             fields = Mole.fieldEditor(document.getElementById('fields'), [], { types: catalog.field_types });
             actions = Mole.actionsEditor(document.getElementById('actions'), [], { types: catalog.browser_actions });
             document.getElementById('proxy-pool').innerHTML = '<option value="">Default</option><option value="auto">Automatic routing</option><option value="direct">Direct</option>' +

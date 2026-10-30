@@ -16,10 +16,66 @@ const (
 	FormatText     = "text"
 	FormatLinks    = "links"
 	FormatMetadata = "metadata"
+
+	// Detectors: structured data found without selectors (see content.Detect).
+	FormatProduct    = "product"
+	FormatArticle    = "article"
+	FormatBusiness   = "business"
+	FormatJobPosting = "job_posting"
+	FormatEvent      = "event"
+	FormatFAQ        = "faq"
 )
 
 // AllFormats lists every supported page output format.
-var AllFormats = []string{FormatMarkdown, FormatHTML, FormatText, FormatLinks, FormatMetadata}
+var AllFormats = []string{FormatMarkdown, FormatHTML, FormatText, FormatLinks, FormatMetadata,
+	FormatProduct, FormatArticle, FormatBusiness, FormatJobPosting, FormatEvent, FormatFAQ}
+
+// DetectedData holds the detectors' results for a page as JSON, one column
+// per detector format (the column is named like the format).
+type DetectedData struct {
+	Product    JSONRaw `gorm:"column:product;type:json" json:"product,omitempty"`
+	Article    JSONRaw `gorm:"column:article;type:json" json:"article,omitempty"`
+	Business   JSONRaw `gorm:"column:business;type:json" json:"business,omitempty"`
+	JobPosting JSONRaw `gorm:"column:job_posting;type:json" json:"job_posting,omitempty"`
+	Event      JSONRaw `gorm:"column:event;type:json" json:"event,omitempty"`
+	FAQ        JSONRaw `gorm:"column:faq;type:json" json:"faq,omitempty"`
+}
+
+// DetectedField is one detector's result.
+type DetectedField struct {
+	Format string
+	Value  JSONRaw
+}
+
+// DetectedColumns are the database columns of DetectedData.
+var DetectedColumns = []string{FormatProduct, FormatArticle, FormatBusiness, FormatJobPosting, FormatEvent, FormatFAQ}
+
+// Fields lists every detector's result in DetectedColumns order (empty when
+// nothing was detected).
+func (d DetectedData) Fields() []DetectedField {
+	return []DetectedField{
+		{FormatProduct, d.Product}, {FormatArticle, d.Article}, {FormatBusiness, d.Business},
+		{FormatJobPosting, d.JobPosting}, {FormatEvent, d.Event}, {FormatFAQ, d.FAQ},
+	}
+}
+
+// Set stores the result of the detector format.
+func (d *DetectedData) Set(format string, v JSONRaw) {
+	switch format {
+	case FormatProduct:
+		d.Product = v
+	case FormatArticle:
+		d.Article = v
+	case FormatBusiness:
+		d.Business = v
+	case FormatJobPosting:
+		d.JobPosting = v
+	case FormatEvent:
+		d.Event = v
+	case FormatFAQ:
+		d.FAQ = v
+	}
+}
 
 // Stop reasons recorded when a job ends because of a limit.
 const (
@@ -95,24 +151,25 @@ func (r *JSONRaw) UnmarshalJSON(b []byte) error {
 // structured extraction results and screenshots. It is kept apart from
 // crawled_pages so page listings stay light.
 type PageContent struct {
-	ID            uint        `gorm:"primaryKey" json:"id"`
-	PageID        uint        `gorm:"uniqueIndex;not null" json:"page_id"`
-	CrawlJobID    string      `gorm:"type:varchar(36);index;not null" json:"crawl_job_id"`
-	URLHash       string      `gorm:"type:varchar(64);index" json:"url_hash"`
-	Markdown      *string     `gorm:"type:longtext" json:"markdown,omitempty"`
-	HTML          *string     `gorm:"type:longtext" json:"html,omitempty"`
-	Text          *string     `gorm:"type:longtext" json:"text,omitempty"`
-	Links         StringSlice `gorm:"type:json" json:"links,omitempty"`
-	Metadata      JSONMap     `gorm:"type:json" json:"metadata,omitempty"`
-	Extracted     JSONRaw     `gorm:"type:json" json:"extracted,omitempty"`
-	LLMExtracted  JSONRaw     `gorm:"type:json" json:"llm_extracted,omitempty"`
-	ExtractError  string      `gorm:"type:text" json:"extract_error,omitempty"`
-	ActionResults JSONRaw     `gorm:"type:json" json:"action_results,omitempty"`
-	ScreenshotKey string      `gorm:"type:varchar(255);default:''" json:"screenshot_key,omitempty"`
-	ContentHash   string      `gorm:"type:varchar(64)" json:"content_hash,omitempty"` // hash of the main text, for change detection
-	CreatedAt     time.Time   `json:"created_at"`
-	Page          CrawledPage `gorm:"foreignKey:PageID;constraint:OnDelete:CASCADE" json:"-"`
-	CrawlJob      CrawlJob    `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
+	ID            uint              `gorm:"primaryKey" json:"id"`
+	PageID        uint              `gorm:"uniqueIndex;not null" json:"page_id"`
+	CrawlJobID    string            `gorm:"type:varchar(36);index;not null" json:"crawl_job_id"`
+	URLHash       string            `gorm:"type:varchar(64);index" json:"url_hash"`
+	Markdown      *string           `gorm:"type:longtext" json:"markdown,omitempty"`
+	HTML          *string           `gorm:"type:longtext" json:"html,omitempty"`
+	Text          *string           `gorm:"type:longtext" json:"text,omitempty"`
+	Links         StringSlice       `gorm:"type:json" json:"links,omitempty"`
+	Metadata      JSONMap           `gorm:"type:json" json:"metadata,omitempty"`
+	Extracted     JSONRaw           `gorm:"type:json" json:"extracted,omitempty"`
+	DetectedData  `gorm:"embedded"` // product, article, business, job_posting, event, faq
+	LLMExtracted  JSONRaw           `gorm:"type:json" json:"llm_extracted,omitempty"`
+	ExtractError  string            `gorm:"type:text" json:"extract_error,omitempty"`
+	ActionResults JSONRaw           `gorm:"type:json" json:"action_results,omitempty"`
+	ScreenshotKey string            `gorm:"type:varchar(255);default:''" json:"screenshot_key,omitempty"`
+	ContentHash   string            `gorm:"type:varchar(64)" json:"content_hash,omitempty"` // hash of the main text, for change detection
+	CreatedAt     time.Time         `json:"created_at"`
+	Page          CrawledPage       `gorm:"foreignKey:PageID;constraint:OnDelete:CASCADE" json:"-"`
+	CrawlJob      CrawlJob          `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
 // Change types recorded by change detection.
@@ -134,12 +191,30 @@ type PageChange struct {
 	Added      int       `json:"added"`
 	Removed    int       `json:"removed"`
 	Diff       *string   `gorm:"type:mediumtext" json:"diff,omitempty"`
+	Fields     JSONRaw   `gorm:"type:json" json:"fields,omitempty"` // []FieldChange: extracted and detected fields whose value changed
 	DetectedAt time.Time `json:"detected_at"`
 	CrawlJob   CrawlJob  `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
+// FieldChange is an extracted field whose value differs from the baseline.
+type FieldChange struct {
+	Name string          `json:"name"`
+	Old  json.RawMessage `json:"old"`
+	New  json.RawMessage `json:"new"`
+}
+
+// FieldChanges decodes Fields (for templates).
+func (c PageChange) FieldChanges() []FieldChange {
+	var out []FieldChange
+	if len(c.Fields) > 0 {
+		_ = json.Unmarshal(c.Fields, &out)
+	}
+	return out
+}
+
 // JobTemplate is the part of a crawl request a schedule replays on every run.
 type JobTemplate struct {
+	Kind         string            `json:"kind,omitempty"` // crawl (default) or batch
 	TargetURL    string            `json:"target_url"`
 	SeedURLs     []string          `json:"seed_urls,omitempty"`
 	TemplateVars map[string]string `json:"template_vars,omitempty"`
@@ -232,6 +307,64 @@ type WorkerHeartbeat struct {
 	Version     string    `gorm:"type:varchar(64)" json:"version"`
 	MaxJobs     int       `json:"max_jobs"`
 	RunningJobs int       `json:"running_jobs"`
+	Browser     bool      `json:"browser"` // a headless browser is available on this worker
 	StartedAt   time.Time `json:"started_at"`
 	LastSeenAt  time.Time `gorm:"index" json:"last_seen_at"`
+
+	// Filled when listing workers, not stored.
+	State           string `gorm:"-" json:"state"`            // active, cordoned or draining
+	VersionMismatch bool   `gorm:"-" json:"version_mismatch"` // runs a different version than this process
+}
+
+// Worker states set by an operator.
+const (
+	WorkerActive   = "active"   // claims queued jobs
+	WorkerCordoned = "cordoned" // finishes its running jobs but claims no new ones
+	WorkerDraining = "draining" // hands its running jobs back to the queue and claims no new ones
+)
+
+// WorkerControl holds the operator-set state of a worker id. A missing row
+// means active. It is kept apart from WorkerHeartbeat, which every worker
+// overwrites on each heartbeat.
+type WorkerControl struct {
+	WorkerID  string    `gorm:"type:varchar(128);primaryKey" json:"worker_id"`
+	State     string    `gorm:"type:varchar(16);not null" json:"state"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// JoinToken lets a new machine join the cluster as a worker ("mole join").
+// Only the SHA-256 of the token is stored.
+type JoinToken struct {
+	ID         string     `gorm:"type:varchar(36);primaryKey" json:"id"`
+	Name       string     `gorm:"type:varchar(255)" json:"name"`
+	TokenHash  string     `gorm:"type:varchar(64);uniqueIndex;not null" json:"-"`
+	Prefix     string     `gorm:"type:varchar(16)" json:"prefix"` // first characters, to recognise a token
+	Region     string     `gorm:"type:varchar(32);default:''" json:"region,omitempty"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	UseCount   int        `gorm:"default:0" json:"use_count"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+// OwnerLimit overrides worker.max_running_per_owner for one owner.
+type OwnerLimit struct {
+	OwnerRef   string    `gorm:"type:varchar(191);primaryKey" json:"owner_ref"`
+	MaxRunning int       `gorm:"not null" json:"max_running"` // 0 = unlimited
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// ScrapeCacheEntry is a stored /v1/scrape result, reused by requests with max_age.
+type ScrapeCacheEntry struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	CacheKey  string    `gorm:"type:varchar(64);uniqueIndex;not null" json:"cache_key"`
+	OwnerRef  string    `gorm:"type:varchar(191);index;default:''" json:"owner_ref,omitempty"` // empty for shared entries
+	URL       string    `gorm:"type:varchar(2048);not null" json:"url"`
+	Result    []byte    `gorm:"type:longblob;not null" json:"-"` // gzipped JSON of the scrape result
+	CreatedAt time.Time `gorm:"index" json:"created_at"`
+}
+
+// Usable reports whether the token is neither revoked nor expired at now.
+func (t *JoinToken) Usable(now time.Time) bool {
+	return t.RevokedAt == nil && (t.ExpiresAt == nil || now.Before(*t.ExpiresAt))
 }

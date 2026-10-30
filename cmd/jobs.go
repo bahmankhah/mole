@@ -109,7 +109,7 @@ With --detach the job is only queued and a running "mole serve" or
 	fl.IntVarP(&depth, "depth", "d", 10, "maximum link depth")
 	fl.IntVar(&maxPages, "max-pages", 0, "stop after this many pages (0 = unlimited)")
 	fl.IntVar(&maxDuration, "max-duration", 0, "stop after this many seconds (0 = unlimited)")
-	fl.StringSliceVarP(&formats, "formats", "f", nil, "per-page outputs: markdown, html, text, links, metadata")
+	fl.StringSliceVarP(&formats, "formats", "f", nil, "per-page outputs: markdown, html, text, links, metadata, product")
 	fl.BoolVar(&mainOnly, "main-only", false, "convert only the main content")
 	fl.StringArrayVar(&include, "include", nil, "only crawl URLs matching this regex; repeatable")
 	fl.StringArrayVar(&exclude, "exclude", nil, "skip URLs matching this regex; repeatable")

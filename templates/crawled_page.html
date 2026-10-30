@@ -129,6 +129,7 @@
             <div class="border-b border-gray-200 mt-3">
                 <nav class="flex gap-6 px-6 overflow-x-auto whitespace-nowrap text-sm" id="pc-tabs">
                     {{if .mdText}}<button class="pc-tab py-3" data-pc="markdown">Markdown</button>{{end}}
+                    {{range .detected}}<button class="pc-tab py-3" data-pc="det-{{.Format}}">{{.Label}}</button>{{end}}
                     {{if .extractedPretty}}<button class="pc-tab py-3" data-pc="extracted">Extracted data</button>{{end}}
                     {{if .llmPretty}}<button class="pc-tab py-3" data-pc="llm">LLM extraction</button>{{end}}
                     {{if .metadataPretty}}<button class="pc-tab py-3" data-pc="metadata">Metadata</button>{{end}}
@@ -143,6 +144,7 @@
                     <div class="flex justify-end mb-2"><button type="button" onclick="Mole.copy(document.getElementById('pc-md').textContent)" class="px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-50">Copy Markdown</button></div>
                     <pre id="pc-md" dir="auto" class="page-body font-sans leading-7 p-4 bg-gray-50 border border-gray-200 rounded-lg max-h-[36rem] overflow-auto text-sm text-gray-800">{{.mdText}}</pre>
                 </div>{{end}}
+                {{range .detected}}<div class="pc-panel hidden" data-pc="det-{{.Format}}"><pre dir="auto" class="page-body p-4 bg-gray-50 border border-gray-200 rounded-lg max-h-[36rem] overflow-auto text-sm">{{.Pretty}}</pre></div>{{end}}
                 {{if .extractedPretty}}<div class="pc-panel hidden" data-pc="extracted"><pre dir="auto" class="page-body p-4 bg-gray-50 border border-gray-200 rounded-lg max-h-[36rem] overflow-auto text-sm">{{.extractedPretty}}</pre></div>{{end}}
                 {{if .llmPretty}}<div class="pc-panel hidden" data-pc="llm"><pre dir="auto" class="page-body p-4 bg-gray-50 border border-gray-200 rounded-lg max-h-[36rem] overflow-auto text-sm">{{.llmPretty}}</pre></div>{{end}}
                 {{if .metadataPretty}}<div class="pc-panel hidden" data-pc="metadata"><pre dir="auto" class="page-body p-4 bg-gray-50 border border-gray-200 rounded-lg max-h-[36rem] overflow-auto text-sm">{{.metadataPretty}}</pre></div>{{end}}
@@ -151,7 +153,8 @@
                 {{if .actionsPretty}}<div class="pc-panel hidden" data-pc="actions"><pre class="page-body p-4 bg-gray-50 border border-gray-200 rounded-lg max-h-[36rem] overflow-auto text-sm">{{.actionsPretty}}</pre></div>{{end}}
                 {{if .change}}<div class="pc-panel hidden" data-pc="change">
                     <p class="text-sm text-gray-600 mb-2">Compared with job <a class="text-indigo-600 hover:underline font-mono" href="/jobs/{{.change.BaseJobID}}">{{.change.BaseJobID}}</a>{{if eq .change.ChangeType "changed"}} · <span class="text-green-700">+{{.change.Added}}</span> <span class="text-red-700">−{{.change.Removed}}</span> lines{{end}}</p>
-                    {{if .change.Diff}}<div class="font-mono text-xs border border-gray-200 rounded-lg max-h-[36rem] overflow-auto py-2" id="pc-diff" data-diff="{{deref .change.Diff}}"></div>{{else}}<p class="text-sm text-gray-500">This page did not exist in the baseline job.</p>{{end}}
+                    {{with .change.FieldChanges}}<table class="text-sm mb-4 border border-gray-200 rounded-lg"><thead class="bg-gray-50 text-gray-600"><tr><th class="px-3 py-2 text-left">Field</th><th class="px-3 py-2 text-left">Before</th><th class="px-3 py-2 text-left">Now</th></tr></thead><tbody>{{range .}}<tr class="border-t border-gray-100"><td class="px-3 py-2 font-medium">{{.Name}}</td><td dir="auto" class="px-3 py-2 font-mono text-xs text-red-700 break-all">{{printf "%s" .Old}}</td><td dir="auto" class="px-3 py-2 font-mono text-xs text-green-700 break-all">{{printf "%s" .New}}</td></tr>{{end}}</tbody></table>{{end}}
+                    {{if .change.Diff}}<div class="font-mono text-xs border border-gray-200 rounded-lg max-h-[36rem] overflow-auto py-2" id="pc-diff" data-diff="{{deref .change.Diff}}"></div>{{else if eq .change.ChangeType "new"}}<p class="text-sm text-gray-500">This page did not exist in the baseline job.</p>{{else if not .change.Fields}}<p class="text-sm text-gray-500">The text did not change.</p>{{end}}
                 </div>{{end}}
             </div>
         </div>

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/resolver/crawler/crawler"
 	"github.com/resolver/crawler/models"
 )
 
@@ -127,5 +128,45 @@ func TestWriteCSVFlattensExtraction(t *testing.T) {
 	}
 	if rows[0][len(rows[0])-1] != "markdown" {
 		t.Error("markdown should be the last column")
+	}
+}
+
+func TestNormalizeKindAndBatchURL(t *testing.T) {
+	for in, want := range map[string]string{"": models.JobKindCrawl, "crawl": models.JobKindCrawl, "batch": models.JobKindBatch} {
+		if got, err := normalizeKind(in); err != nil || got != want {
+			t.Errorf("normalizeKind(%q) = %q, %v", in, got, err)
+		}
+	}
+	if _, err := normalizeKind("map"); !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("unknown kind: %v", err)
+	}
+	if u, err := batchURL(" shop.ir/p/1?x=2 "); err != nil || u != "https://shop.ir/p/1?x=2" {
+		t.Errorf("batchURL = %q, %v", u, err)
+	}
+	for _, bad := range []string{"", "ftp://x.ir/a", "https://"} {
+		if _, err := batchURL(bad); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("batchURL(%q) error = %v", bad, err)
+		}
+	}
+}
+
+func TestScrapeCacheKey(t *testing.T) {
+	md := []string{"markdown"}
+	public := crawler.ScrapeRequest{URL: "https://x.ir/a", Settings: &models.JobSettings{Formats: md}}
+	k1, scope1, _ := scrapeCacheKey(public, "team-1")
+	k2, scope2, _ := scrapeCacheKey(public, "team-2")
+	if k1 != k2 || scope1 != "" || scope2 != "" {
+		t.Errorf("public requests must share entries: %s/%q %s/%q", k1, scope1, k2, scope2)
+	}
+	other, _, _ := scrapeCacheKey(crawler.ScrapeRequest{URL: "https://x.ir/a", Settings: &models.JobSettings{Formats: []string{"html"}}}, "team-1")
+	if other == k1 {
+		t.Error("different settings share a key")
+	}
+	private := crawler.ScrapeRequest{URL: "https://x.ir/a", Settings: &models.JobSettings{
+		Formats: md, RequestHeaders: []models.HTTPHeader{{Name: "Cookie", Value: "s=1"}}}}
+	p1, ps1, _ := scrapeCacheKey(private, "team-1")
+	p2, ps2, _ := scrapeCacheKey(private, "team-2")
+	if p1 == p2 || ps1 != "team-1" || ps2 != "team-2" {
+		t.Errorf("requests with headers must be scoped to the owner: %q %q", ps1, ps2)
 	}
 }

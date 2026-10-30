@@ -112,13 +112,14 @@ type JobSettings struct {
 	BlockResources     []string        `json:"block_resources,omitempty"` // image, font, media, stylesheet
 
 	// Content
-	Formats         []string       `json:"formats,omitempty"`           // markdown, html, text, links, metadata
-	OnlyMainContent *bool          `json:"only_main_content,omitempty"` // strip nav/footer/ads before converting
-	ExtractFields   []ExtractField `json:"extract_fields,omitempty"`    // structured extraction schema (CSS/XPath)
-	ExtractURLMatch *string        `json:"extract_url_match,omitempty"` // regex; extraction runs only on matching URLs
-	LLMPrompt       *string        `json:"llm_prompt,omitempty"`        // LLM extraction instructions
-	LLMSchema       *string        `json:"llm_schema,omitempty"`        // JSON schema the LLM must return
-	Phrases         []string       `json:"phrases,omitempty"`           // job-specific phrases (replace the global list)
+	Formats          []string       `json:"formats,omitempty"`           // markdown, html, text, links, metadata; detectors: product, article, business, job_posting, event, faq
+	OnlyMainContent  *bool          `json:"only_main_content,omitempty"` // strip nav/footer/ads before converting
+	ExtractFields    []ExtractField `json:"extract_fields,omitempty"`    // structured extraction schema (CSS, XPath or JSON-LD)
+	ExtractURLMatch  *string        `json:"extract_url_match,omitempty"` // regex; extraction runs only on matching URLs
+	IncludeDocuments *bool          `json:"include_documents,omitempty"` // follow links to PDF/DOCX files (parsed into Markdown)
+	LLMPrompt        *string        `json:"llm_prompt,omitempty"`        // LLM extraction instructions
+	LLMSchema        *string        `json:"llm_schema,omitempty"`        // JSON schema the LLM must return
+	Phrases          []string       `json:"phrases,omitempty"`           // job-specific phrases (replace the global list)
 
 	// Monitoring
 	ChangeDetection  *bool   `json:"change_detection,omitempty"`    // diff each page against the previous run
@@ -144,6 +145,9 @@ type ExtractField struct {
 	Multiple bool           `json:"multiple,omitempty"` // return all matches as an array
 	Regex    string         `json:"regex,omitempty"`    // optional: first capture group (or whole match) of the text
 	Fields   []ExtractField `json:"fields,omitempty"`   // for type list: fields relative to each matched element
+	// FallbackSelectors are tried in order while the field is still empty,
+	// e.g. a CSS selector after "jsonld:Product.offers.price".
+	FallbackSelectors []string `json:"fallback_selectors,omitempty"`
 }
 
 // JobLimits caps what a job may consume. Zero means unlimited.
@@ -188,6 +192,7 @@ type JobUsage struct {
 	Errors        int64 `gorm:"column:usage_errors;default:0" json:"errors"`
 	Screenshots   int64 `gorm:"column:usage_screenshots;default:0" json:"screenshots"`
 	ProxyRequests int64 `gorm:"column:usage_proxy_requests;default:0" json:"proxy_requests"`
+	DocumentPages int64 `gorm:"column:usage_document_pages;default:0" json:"document_pages"` // PDF/DOCX pages converted
 }
 
 func jsonValue(v interface{}) (driver.Value, error) {
@@ -239,7 +244,7 @@ func (s JobSettings) IsEmpty() bool {
 		s.HeadlessFallback == nil && s.HeadlessRenderWait == nil &&
 		len(s.BrowserActions) == 0 && s.Screenshot == nil && s.FullPageScreenshot == nil &&
 		len(s.BlockResources) == 0 && len(s.Formats) == 0 && s.OnlyMainContent == nil &&
-		len(s.ExtractFields) == 0 && s.ExtractURLMatch == nil &&
+		len(s.ExtractFields) == 0 && s.ExtractURLMatch == nil && s.IncludeDocuments == nil &&
 		s.LLMPrompt == nil && s.LLMSchema == nil && len(s.Phrases) == 0 &&
 		s.ChangeDetection == nil && s.CompareWithJobID == nil
 }
@@ -500,9 +505,16 @@ type DiscoveredPort struct {
 	PortScanJob   PortScanJob `gorm:"foreignKey:PortScanJobID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
+// Job kinds.
+const (
+	JobKindCrawl = "crawl" // follow links from the start URL(s)
+	JobKindBatch = "batch" // fetch exactly the listed URLs (batch scrape)
+)
+
 // CrawlJob represents a crawling job for a specific target (domain or subdomain)
 type CrawlJob struct {
 	ID             string       `gorm:"type:varchar(36);primaryKey" json:"id"`
+	Kind           string       `gorm:"type:varchar(16);default:'crawl'" json:"kind"`
 	DiscoveryJobID string       `gorm:"type:varchar(36);index" json:"discovery_job_id,omitempty"`
 	TargetURL      string       `gorm:"type:varchar(512);not null" json:"target_url"`
 	Domain         string       `gorm:"type:varchar(255);index;not null" json:"domain"`

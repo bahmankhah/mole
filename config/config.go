@@ -28,6 +28,34 @@ type Config struct {
 	LLM       LLMConfig       `yaml:"llm"`
 	Webhooks  WebhooksConfig  `yaml:"webhooks"`
 	Plugins   PluginsConfig   `yaml:"plugins"`
+	Cluster   ClusterConfig   `yaml:"cluster"`
+	Documents DocumentsConfig `yaml:"documents"`
+	Cache     CacheConfig     `yaml:"cache"`
+	Search    SearchConfig    `yaml:"search"`
+}
+
+// DocumentsConfig controls how PDF and DOCX responses are converted to text.
+type DocumentsConfig struct {
+	MaxPages int           `yaml:"max_pages"` // PDF pages converted per document; later pages are ignored
+	Timeout  time.Duration `yaml:"timeout"`   // per document conversion
+}
+
+// CacheConfig controls the scrape result cache used by /v1/scrape max_age.
+type CacheConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	TTL           time.Duration `yaml:"ttl"`             // entries older than this are deleted
+	MaxEntryBytes int           `yaml:"max_entry_bytes"` // larger results (compressed) are not cached
+}
+
+// SearchConfig selects the web search provider behind /v1/search.
+type SearchConfig struct {
+	Provider       string        `yaml:"provider"` // "", searxng, brave or serper
+	BaseURL        string        `yaml:"base_url"` // searxng instance URL
+	APIKey         string        `yaml:"api_key"`  // brave / serper key
+	Proxy          string        `yaml:"proxy"`    // optional proxy URL for provider requests
+	Timeout        time.Duration `yaml:"timeout"`
+	DefaultLang    string        `yaml:"default_lang"`    // used when a request names no language
+	DefaultCountry string        `yaml:"default_country"` // used when a request names no country
 }
 
 // APIConfig secures the versioned /v1 API used by external control planes.
@@ -50,6 +78,59 @@ type WorkerConfig struct {
 	MaxRunningPerOwner int           `yaml:"max_running_per_owner"` // fairness cap across all workers (0 = unlimited)
 	LeaseTTL           time.Duration `yaml:"lease_ttl"`             // a running job whose lease expires is requeued
 	PollInterval       time.Duration `yaml:"poll_interval"`
+	Browser            *bool         `yaml:"browser,omitempty"` // headless browser on this worker; empty = detect at start
+}
+
+// ClusterConfig controls how other machines join this engine as workers
+// ("mole join") and, on a joined node, where it syncs its configuration from.
+type ClusterConfig struct {
+	// On the control node.
+	AdvertiseURL      string `yaml:"advertise_url"`       // URL nodes use to reach this server (shown in join commands)
+	NodeDatabaseHost  string `yaml:"node_database_host"`  // MySQL host as seen from nodes (default database.host)
+	NodeDatabasePort  string `yaml:"node_database_port"`  // MySQL port as seen from nodes (default database.port)
+	NodeS3Endpoint    string `yaml:"node_s3_endpoint"`    // S3 endpoint as seen from nodes (default storage.s3.endpoint)
+	AllowLocalStorage bool   `yaml:"allow_local_storage"` // let nodes join although storage.driver is local
+
+	// On a joined node (written by "mole join").
+	ControlURL string       `yaml:"control_url,omitempty"` // control node this worker syncs its configuration from
+	JoinToken  string       `yaml:"join_token,omitempty"`
+	Node       NodeSettings `yaml:"node,omitempty"`
+}
+
+// NodeSettings are a joined node's own values. They survive every config sync;
+// everything else comes from the control node.
+type NodeSettings struct {
+	ID              string `yaml:"id,omitempty"`
+	Region          string `yaml:"region,omitempty"`
+	MaxRunningJobs  int    `yaml:"max_running_jobs,omitempty"`
+	BrowserPoolSize int    `yaml:"browser_pool_size,omitempty"`
+	Browser         *bool  `yaml:"browser,omitempty"`
+}
+
+// Joined reports whether this is a node that syncs its config from a control node.
+func (c ClusterConfig) Joined() bool {
+	return c.ControlURL != "" && c.JoinToken != ""
+}
+
+// ApplyNode copies the node's own values over the configuration.
+func (c *Config) ApplyNode() {
+	n := c.Cluster.Node
+	if n.ID != "" {
+		c.Worker.ID = n.ID
+	}
+	if n.Region != "" {
+		c.Worker.Region = n.Region
+	}
+	if n.MaxRunningJobs > 0 {
+		c.Worker.MaxRunningJobs = n.MaxRunningJobs
+	}
+	if n.BrowserPoolSize > 0 {
+		c.Headless.PoolSize = n.BrowserPoolSize
+	}
+	if n.Browser != nil {
+		b := *n.Browser
+		c.Worker.Browser = &b
+	}
 }
 
 // SecurityConfig protects the engine and the networks around it.
@@ -197,6 +278,7 @@ func LoadConfig(configPath string) *Config {
 		} else {
 			log.Printf("[Config] Error reading config file %s: %v, using defaults", configPath, err)
 		}
+		cfg.applyEnvOverrides()
 		return cfg
 	}
 
@@ -206,7 +288,8 @@ func LoadConfig(configPath string) *Config {
 		return DefaultConfig()
 	}
 
-	// Apply environment variable overrides
+	// A joined node's own values, then environment variable overrides
+	cfg.ApplyNode()
 	cfg.applyEnvOverrides()
 
 	// Ensure common subdomains are populated if not in config
@@ -309,6 +392,19 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("MOLE_S3_SECRET_KEY"); v != "" {
 		c.Storage.S3.SecretKey = v
 	}
+	if v := os.Getenv("MOLE_WORKER_BROWSER"); v != "" {
+		b := v == "1" || strings.EqualFold(v, "true")
+		c.Worker.Browser = &b
+	}
+	if v := os.Getenv("MOLE_CONTROL_URL"); v != "" {
+		c.Cluster.ControlURL = v
+	}
+	if v := os.Getenv("MOLE_JOIN_TOKEN"); v != "" {
+		c.Cluster.JoinToken = v
+	}
+	if v := os.Getenv("MOLE_SEARCH_API_KEY"); v != "" {
+		c.Search.APIKey = v
+	}
 }
 
 func splitList(v string) []string {
@@ -339,6 +435,19 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.Driver == "s3" && (c.Storage.S3.Endpoint == "" || c.Storage.S3.Bucket == "") {
 		return fmt.Errorf("storage.s3.endpoint and storage.s3.bucket are required for the s3 driver")
+	}
+	switch c.Search.Provider {
+	case "":
+	case "searxng":
+		if c.Search.BaseURL == "" {
+			return fmt.Errorf("search.base_url is required for the searxng provider")
+		}
+	case "brave", "serper":
+		if c.Search.APIKey == "" {
+			return fmt.Errorf("search.api_key is required for the %s provider", c.Search.Provider)
+		}
+	default:
+		return fmt.Errorf("search.provider must be empty, \"searxng\", \"brave\" or \"serper\"")
 	}
 	return nil
 }
@@ -429,6 +538,18 @@ func DefaultConfig() *Config {
 		Plugins: PluginsConfig{
 			AfterJobDelay: 2 * time.Minute,
 			Timeout:       60 * time.Second,
+		},
+		Documents: DocumentsConfig{
+			MaxPages: 500,
+			Timeout:  60 * time.Second,
+		},
+		Cache: CacheConfig{
+			Enabled:       true,
+			TTL:           7 * 24 * time.Hour,
+			MaxEntryBytes: 8 << 20,
+		},
+		Search: SearchConfig{
+			Timeout: 15 * time.Second,
 		},
 	}
 }

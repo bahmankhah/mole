@@ -17,6 +17,7 @@ import (
 	"github.com/resolver/crawler/crawler"
 	"github.com/resolver/crawler/models"
 	"github.com/resolver/crawler/modules"
+	"github.com/resolver/crawler/search"
 	"gorm.io/gorm"
 )
 
@@ -33,6 +34,7 @@ type Manager struct {
 	portScanner      *modules.PortScanner
 	workerID         string
 	webhookClient    *http.Client
+	searcher         search.Provider // nil when search.provider is empty
 
 	wake        chan struct{}
 	deliverWake chan struct{}
@@ -41,6 +43,8 @@ type Manager struct {
 	workerOn    atomic.Bool
 	closed      atomic.Bool
 	startedAt   time.Time
+	browser     atomic.Bool // a headless browser is available (set by StartWorker)
+	state       string      // last operator-set worker state seen by the scheduler loop
 
 	subdomainCtx    context.Context
 	subdomainCancel context.CancelFunc
@@ -70,6 +74,11 @@ func NewManager(db *gorm.DB, cfg *config.Config, engine *crawler.Engine) *Manage
 		deliverWake:      make(chan struct{}, 1),
 		startedAt:        time.Now(),
 	}
+	if p, err := search.New(cfg.Search); err != nil {
+		log.Printf("[JobManager] Web search disabled: %v", err)
+	} else {
+		m.searcher = p
+	}
 	engine.SetHooks(crawler.Hooks{RunEnded: m.onRunEnded, Event: m.onEngineEvent})
 	return m
 }
@@ -87,11 +96,19 @@ func (m *Manager) DB() *gorm.DB { return m.db }
 func (m *Manager) WorkerID() string { return m.workerID }
 
 // StartWorker starts the background loops that run jobs, schedules, after-job
-// plugins and webhook deliveries.
-func (m *Manager) StartWorker() {
-	if m.workerOn.Swap(true) {
-		return
+// plugins and webhook deliveries. It fails when another machine is already
+// running with this worker id.
+func (m *Manager) StartWorker() error {
+	if m.workerOn.Load() {
+		return nil
 	}
+	if err := m.checkWorkerID(); err != nil {
+		return err
+	}
+	if m.workerOn.Swap(true) {
+		return nil
+	}
+	m.browser.Store(m.detectBrowser())
 	m.recoverOwnJobs()
 	m.abandonStaleRecon()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -99,7 +116,8 @@ func (m *Manager) StartWorker() {
 	m.loops.Add(2)
 	go m.schedulerLoop(ctx)
 	go m.deliveryLoop(ctx)
-	log.Printf("[JobManager] Worker %s started (region=%q, max_running_jobs=%d)", m.workerID, m.config.Worker.Region, m.config.Worker.MaxRunningJobs)
+	log.Printf("[JobManager] Worker %s started (region=%q, max_running_jobs=%d, browser=%v)", m.workerID, m.config.Worker.Region, m.config.Worker.MaxRunningJobs, m.browser.Load())
+	return nil
 }
 
 // recoverOwnJobs requeues jobs this worker id was running when it last stopped
@@ -1182,7 +1200,11 @@ func (m *Manager) Shutdown() {
 	defer cancel()
 	m.engine.Shutdown(ctx)
 	m.loops.Wait()
-	m.db.Delete(&models.WorkerHeartbeat{}, "id = ?", m.workerID)
+	if m.workerOn.Load() {
+		// Only a started worker owns its heartbeat row; one that refused to
+		// start must not delete the row of the machine using its id.
+		m.db.Delete(&models.WorkerHeartbeat{}, "id = ?", m.workerID)
+	}
 	m.subdomainScanner.Shutdown()
 }
 

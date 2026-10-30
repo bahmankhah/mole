@@ -75,6 +75,7 @@ func wantsEvent(w *models.WebhookConfig, event string) bool {
 // JobSummary is the job representation embedded in webhook payloads and API responses.
 type JobSummary struct {
 	ID           string           `json:"id"`
+	Kind         string           `json:"kind"`
 	ExternalID   string           `json:"external_id,omitempty"`
 	OwnerRef     string           `json:"owner_ref,omitempty"`
 	ScheduleID   *string          `json:"schedule_id,omitempty"`
@@ -94,7 +95,7 @@ type JobSummary struct {
 // Summarize builds the summary of a job.
 func Summarize(j *models.CrawlJob) JobSummary {
 	return JobSummary{
-		ID: j.ID, ExternalID: j.ExternalID, OwnerRef: j.OwnerRef, ScheduleID: j.ScheduleID,
+		ID: j.ID, Kind: j.Kind, ExternalID: j.ExternalID, OwnerRef: j.OwnerRef, ScheduleID: j.ScheduleID,
 		Status: j.Status, StopReason: j.StopReason, TargetURL: j.TargetURL,
 		CrawledURLs: j.CrawledURLs, TotalURLs: j.TotalURLs, FoundMatches: j.FoundMatches,
 		Usage: j.Usage, Error: j.ErrorMessage, CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, CompletedAt: j.CompletedAt,

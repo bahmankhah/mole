@@ -73,6 +73,8 @@ Running "mole" without a command starts the server (same as "mole serve").`,
 		newDoctorCmd(),
 		newConfigCmd(),
 		newPluginsCmd(),
+		newJoinCmd(),
+		newClusterCmd(),
 		newVersionCmd(),
 	)
 	return root

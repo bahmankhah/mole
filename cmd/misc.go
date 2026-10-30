@@ -16,6 +16,7 @@ import (
 	"github.com/resolver/crawler/modules"
 	"github.com/resolver/crawler/netx"
 	"github.com/resolver/crawler/plugins"
+	"github.com/resolver/crawler/search"
 	"github.com/resolver/crawler/storage"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -64,6 +65,7 @@ func newOwnersCmd() *cobra.Command {
 			t.row("llm tokens", u.Usage.LLMTokens)
 			t.row("screenshots", u.Usage.Screenshots)
 			t.row("proxy requests", u.Usage.ProxyRequests)
+			t.row("document pages", u.Usage.DocumentPages)
 			t.flush()
 			return nil
 		},
@@ -232,6 +234,11 @@ func newConfigCmd() *cobra.Command {
 			redacted.UI.Password = redact(cfg.UI.Password)
 			redacted.LLM.APIKey = redact(cfg.LLM.APIKey)
 			redacted.Storage.S3.SecretKey = redact(cfg.Storage.S3.SecretKey)
+			redacted.Cluster.JoinToken = redact(cfg.Cluster.JoinToken)
+			redacted.Search.APIKey = redact(cfg.Search.APIKey)
+			if cfg.Search.Proxy != "" {
+				redacted.Search.Proxy = netx.RedactProxy(cfg.Search.Proxy)
+			}
 			redacted.API.Tokens = make([]string, len(cfg.API.Tokens))
 			for i := range cfg.API.Tokens {
 				redacted.API.Tokens[i] = "********"
@@ -386,6 +393,32 @@ func newDoctorCmd() *cobra.Command {
 					return "", fmt.Errorf("%s", strings.Join(problems, "; "))
 				}
 				return fmt.Sprintf("%d plugin(s), required environment set", len(list)), nil
+			})
+			check("documents", func() (string, error) {
+				path := content.PDFSupport()
+				if path == "" {
+					return "", fmt.Errorf("pdftotext not found: install poppler-utils to convert PDFs (DOCX works without it)")
+				}
+				return "PDF (" + path + ") and DOCX", nil
+			})
+			check("search", func() (string, error) {
+				p, err := search.New(cfg.Search)
+				if err != nil {
+					return "", err
+				}
+				if p == nil {
+					return "not configured (/v1/search disabled)", nil
+				}
+				if p.Name() != "searxng" {
+					return p.Name() + " configured (not queried: provider queries are billed)", nil
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				res, err := p.Search(ctx, search.Query{Query: "mole", Limit: 1})
+				if err != nil {
+					return "", err
+				}
+				return fmt.Sprintf("searxng answered (%d result(s))", len(res)), nil
 			})
 			check("llm", func() (string, error) {
 				c := content.NewLLMClient(cfg.LLM)

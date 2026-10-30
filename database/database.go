@@ -1,9 +1,11 @@
 package database
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/resolver/crawler/config"
 	"github.com/resolver/crawler/models"
@@ -19,7 +21,7 @@ type Database struct {
 
 // New creates a new database connection
 func New(cfg config.DatabaseConfig) (*Database, error) {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local&timeout=10s",
 		cfg.User,
 		cfg.Password,
 		cfg.Host,
@@ -50,8 +52,47 @@ func New(cfg config.DatabaseConfig) (*Database, error) {
 	return &Database{DB: db}, nil
 }
 
-// AutoMigrate runs automatic migrations for all models
+// WithLock runs fn while holding the MySQL named lock name, waiting up to wait
+// for it. It reports whether the lock was acquired; fn does not run otherwise.
+// Named locks are server-wide and released automatically if the connection
+// drops, so they coordinate every process sharing the database.
+func WithLock(db *gorm.DB, name string, wait time.Duration, fn func() error) (bool, error) {
+	acquired := false
+	err := db.Connection(func(conn *gorm.DB) error {
+		// Waiting for the lock is expected; keep it out of the slow-query log.
+		quiet := conn.Session(&gorm.Session{Logger: conn.Logger.LogMode(logger.Silent)})
+		var got sql.NullInt64
+		if err := quiet.Raw("SELECT GET_LOCK(?, ?)", name, int(wait/time.Second)).Scan(&got).Error; err != nil {
+			return fmt.Errorf("lock %s: %w", name, err)
+		}
+		if !got.Valid || got.Int64 != 1 {
+			return nil
+		}
+		acquired = true
+		defer func() {
+			var released sql.NullInt64
+			conn.Raw("SELECT RELEASE_LOCK(?)", name).Scan(&released)
+		}()
+		return fn()
+	})
+	return acquired, err
+}
+
+// AutoMigrate runs the schema migrations. A named lock makes processes that
+// start together migrate one after the other instead of racing.
 func (d *Database) AutoMigrate() error {
+	const wait = 5 * time.Minute
+	acquired, err := WithLock(d.DB, "mole:migrate", wait, d.migrate)
+	if err != nil {
+		return err
+	}
+	if !acquired {
+		return fmt.Errorf("another process held the migration lock for %s; try again", wait)
+	}
+	return nil
+}
+
+func (d *Database) migrate() error {
 	log.Println("Running database migrations...")
 
 	err := d.DB.AutoMigrate(
@@ -71,6 +112,10 @@ func (d *Database) AutoMigrate() error {
 		&models.WebhookDelivery{},
 		&models.IdempotencyKey{},
 		&models.WorkerHeartbeat{},
+		&models.WorkerControl{},
+		&models.JoinToken{},
+		&models.OwnerLimit{},
+		&models.ScrapeCacheEntry{},
 	)
 	if err != nil {
 		return err

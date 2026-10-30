@@ -104,7 +104,7 @@ func newSchedulesCmd() *cobra.Command {
 	fl.StringVar(&in.OwnerRef, "owner", "", "owner reference")
 	fl.IntVarP(&depth, "depth", "d", 10, "maximum link depth")
 	fl.IntVar(&maxPages, "max-pages", 0, "page limit per run")
-	fl.StringSliceVarP(&formats, "formats", "f", nil, "per-page outputs: markdown, html, text, links, metadata")
+	fl.StringSliceVarP(&formats, "formats", "f", nil, "per-page outputs: markdown, html, text, links, metadata, product")
 	fl.BoolVar(&mainOnly, "main-only", false, "convert only the main content")
 	fl.StringVar(&extractFile, "extract", "", "JSON file with extraction fields")
 	fl.StringVar(&webhook, "webhook", "", "webhook URL for run events")

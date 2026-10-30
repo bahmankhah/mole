@@ -25,15 +25,21 @@ type App struct {
 	Manager *jobs.Manager // nil when DB is nil
 }
 
-// LoadConfig reads the configuration file (path, then $CONFIG_PATH, then
-// config.yaml) and validates it.
-func LoadConfig(path string) (*config.Config, error) {
+// ConfigPath resolves the configuration file: path, then $CONFIG_PATH, then
+// config.yaml.
+func ConfigPath(path string) string {
 	if path == "" {
 		path = os.Getenv("CONFIG_PATH")
 	}
 	if path == "" {
 		path = "config.yaml"
 	}
+	return path
+}
+
+// LoadConfig reads the configuration file (see ConfigPath) and validates it.
+func LoadConfig(path string) (*config.Config, error) {
+	path = ConfigPath(path)
 	cfg := config.LoadConfig(path)
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)

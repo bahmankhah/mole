@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/resolver/crawler/content"
 	"github.com/resolver/crawler/modules"
 )
 
@@ -39,10 +40,15 @@ func (e *Engine) fetchWith(ctx context.Context, rs *RunSettings, httpF *modules.
 	isPost := strings.EqualFold(method, "POST") || body != ""
 
 	var res *modules.FetchResult
-	if rs.UseHeadlessBrowser && !isPost {
-		// The browser only navigates with GET; POST requests always use HTTP.
+	// The browser only navigates with GET, and it downloads documents instead
+	// of rendering them: POST requests and PDF/DOCX URLs always use HTTP.
+	if rs.UseHeadlessBrowser && !isPost && !content.IsDocumentURL(rawURL) {
 		res = e.browsers.Fetch(ctx, rawURL, opts)
 		meter(res)
+		if res.Error != nil && isDownloadError(res.Error) && ctx.Err() == nil {
+			res = httpF.Fetch(ctx, rawURL, opts)
+			meter(res)
+		}
 	} else {
 		res = httpF.Fetch(ctx, rawURL, opts)
 		meter(res)
@@ -59,4 +65,10 @@ func (e *Engine) fetchWith(ctx context.Context, rs *RunSettings, httpF *modules.
 		e.hostLimiter.Penalize(host, retryAfter(res))
 	}
 	return res
+}
+
+// isDownloadError reports whether the browser refused a URL because it is a
+// file download (e.g. a PDF served from a URL without an extension).
+func isDownloadError(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "download is starting")
 }

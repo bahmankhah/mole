@@ -195,3 +195,105 @@ func TestLLMExtract(t *testing.T) {
 		t.Fatal("nil client must return ErrLLMDisabled")
 	}
 }
+
+const jsonLDPage = `<html><head>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[
+ {"@type":"WebPage","name":"page"},
+ {"@type":["Product","Thing"],"name":"Galaxy &amp; Co","sku":12345,
+  "image":["https://cdn.x.ir/1.jpg","https://cdn.x.ir/2.jpg"],
+  "offers":[{"@type":"Offer","price":"12500000","priceCurrency":"IRT","availability":"https://schema.org/InStock"},
+            {"@type":"Offer","price":13000000,"priceCurrency":"IRR"}]}]}</script>
+<script type="application/ld+json">{ not json }</script>
+<script type="APPLICATION/LD+JSON; charset=utf-8">{"@type":"http://schema.org/BreadcrumbList","itemListElement":[{"name":"خانه"},{"name":"موبایل"}]}</script>
+</head><body><h1>x</h1></body></html>`
+
+func TestExtractJSONLD(t *testing.T) {
+	fields := []models.ExtractField{
+		{Name: "name", Selector: "jsonld:Product.name"},
+		{Name: "sku", Selector: "jsonld:product.sku", Type: "number"},
+		{Name: "price", Selector: "jsonld:Product.offers.price", Type: "price"},
+		{Name: "prices", Selector: "jsonld:Product.offers.price", Type: "price", Multiple: true},
+		{Name: "image", Selector: "jsonld:Product.image", Type: "url"},
+		{Name: "in_stock", Selector: "jsonld:Offer.availability", Regex: `(InStock)`},
+		{Name: "crumbs", Selector: "jsonld:BreadcrumbList.itemListElement.name", Multiple: true},
+		{Name: "has_product", Selector: "jsonld:Product.name", Type: "exists"},
+		{Name: "missing", Selector: "jsonld:Recipe.name"},
+	}
+	if err := ValidateFields(fields); err != nil {
+		t.Fatal(err)
+	}
+	out, err := Extract("https://shop.example.ir/p/1", []byte(jsonLDPage), fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["name"] != "Galaxy & Co" || out["sku"] != 12345.0 || out["image"] != "https://cdn.x.ir/1.jpg" {
+		t.Errorf("name/sku/image: %v %v %v", out["name"], out["sku"], out["image"])
+	}
+	if p, ok := out["price"].(modules.Price); !ok || p.Amount != 12500000 || p.Currency != "IRT" {
+		t.Errorf("price %#v", out["price"])
+	}
+	prices, _ := out["prices"].([]interface{})
+	if len(prices) != 2 || prices[1].(modules.Price).Currency != "IRR" || prices[1].(modules.Price).Amount != 13000000 {
+		t.Errorf("prices %#v", out["prices"])
+	}
+	if out["in_stock"] != "InStock" || out["has_product"] != true || out["missing"] != nil {
+		t.Errorf("in_stock/has/missing: %v %v %v", out["in_stock"], out["has_product"], out["missing"])
+	}
+	if c, _ := out["crumbs"].([]interface{}); len(c) != 2 || c[1] != "موبایل" {
+		t.Errorf("crumbs %v", out["crumbs"])
+	}
+	for _, bad := range [][]models.ExtractField{
+		{{Name: "a", Selector: "jsonld:Product"}},
+		{{Name: "a", Selector: "jsonld:Product..name"}},
+		{{Name: "a", Selector: "jsonld:Product.name", Type: "html"}},
+	} {
+		if err := ValidateFields(bad); err == nil {
+			t.Errorf("accepted %+v", bad)
+		}
+	}
+}
+
+func TestDiffExtracted(t *testing.T) {
+	prev := models.JSONRaw(`{"price":{"amount":100,"currency":"IRT","raw":"۱۰۰ تومان"},"title":"A","stock":null}`)
+	same := models.JSONRaw(`{"price":{"amount":100,"currency":"IRT","raw":"100 IRT"},"title":"A","stock":null}`)
+	if d := DiffExtracted(prev, same); d != nil {
+		t.Errorf("cosmetic price change reported: %+v", d)
+	}
+	cur := models.JSONRaw(`{"price":{"amount":120,"currency":"IRT","raw":"120"},"title":"A","stock":true,"new":1}`)
+	d := DiffExtracted(prev, cur)
+	if len(d) != 3 || d[0].Name != "new" || d[1].Name != "price" || d[2].Name != "stock" || string(d[2].Old) != "null" || string(d[2].New) != "true" {
+		t.Fatalf("diff = %+v", d)
+	}
+	if DiffExtracted(nil, cur) != nil || DiffExtracted(prev, models.JSONRaw("null")) != nil {
+		t.Error("missing side should not report changes")
+	}
+}
+
+func TestFallbackSelectors(t *testing.T) {
+	page := `<html><body><span class="p">۱۲۰ هزار تومان</span><div class="tags"></div></body></html>`
+	fields := []models.ExtractField{
+		{Name: "price", Selector: "jsonld:Product.offers.price", Type: "price", FallbackSelectors: []string{".missing", ".p"}},
+		{Name: "tags", Selector: ".tags a", Multiple: true, FallbackSelectors: []string{"xpath://div[@class='tags']/@class"}},
+		{Name: "has", Selector: ".none", Type: "exists", FallbackSelectors: []string{"span.p"}},
+	}
+	if err := ValidateFields(fields); err != nil {
+		t.Fatal(err)
+	}
+	out, err := Extract("https://x.ir/", []byte(page), fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := out["price"].(modules.Price); !ok || p.Amount != 120000 || p.Currency != "IRT" {
+		t.Errorf("price %#v", out["price"])
+	}
+	if tags, _ := out["tags"].([]interface{}); len(tags) != 1 || tags[0] != "tags" {
+		t.Errorf("tags %#v", out["tags"])
+	}
+	if out["has"] != true {
+		t.Errorf("has %v", out["has"])
+	}
+	bad := []models.ExtractField{{Name: "a", Selector: "h1", FallbackSelectors: []string{"xpath://a["}}}
+	if ValidateFields(bad) == nil {
+		t.Error("invalid fallback accepted")
+	}
+}

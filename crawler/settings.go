@@ -30,9 +30,11 @@ type RunSettings struct {
 	FullPage         bool
 	BlockResources   []string
 	Formats          map[string]bool
+	Detectors        map[string]bool // the formats that are detectors (product, article, …)
 	OnlyMainContent  bool
 	ExtractFields    []models.ExtractField
 	ExtractURLMatch  *regexp.Regexp
+	IncludeDocuments bool
 	LLMPrompt        string
 	LLMSchema        string
 	Phrases          []string
@@ -77,6 +79,9 @@ func BuildRunSettings(cfg *config.Config, s *models.JobSettings, limits *models.
 	}
 	if rs.RequestTimeout <= 0 {
 		rs.RequestTimeout = 30 * time.Second
+	}
+	if rs.IncludeDocuments {
+		rs.SkipExtensions = withoutExtensions(rs.SkipExtensions, content.DocumentExtensions)
 	}
 	if !netx.ValidFingerprint(rs.Fingerprint) {
 		rs.Fingerprint = netx.FingerprintChrome
@@ -237,6 +242,7 @@ func mergeSettings(rs *RunSettings, s *models.JobSettings, proxies *netx.ProxyMa
 		}
 		rs.Formats[f] = true
 	}
+	rs.Detectors = content.DetectFormats(rs.Formats)
 	if s.OnlyMainContent != nil {
 		rs.OnlyMainContent = *s.OnlyMainContent
 	}
@@ -252,6 +258,9 @@ func mergeSettings(rs *RunSettings, s *models.JobSettings, proxies *netx.ProxyMa
 			return fmt.Errorf("invalid extract_url_match: %v", err)
 		}
 		rs.ExtractURLMatch = re
+	}
+	if s.IncludeDocuments != nil {
+		rs.IncludeDocuments = *s.IncludeDocuments
 	}
 	if s.LLMPrompt != nil {
 		rs.LLMPrompt = strings.TrimSpace(*s.LLMPrompt)
@@ -271,6 +280,34 @@ func mergeSettings(rs *RunSettings, s *models.JobSettings, proxies *netx.ProxyMa
 		rs.CompareWithJobID = strings.TrimSpace(*s.CompareWithJobID)
 	}
 	return nil
+}
+
+// withoutExtensions returns list without the given extensions, as a new slice
+// (list may be shared with the global configuration).
+func withoutExtensions(list, remove []string) []string {
+	drop := make(map[string]bool, len(remove))
+	for _, e := range remove {
+		drop[strings.ToLower(e)] = true
+	}
+	out := make([]string, 0, len(list))
+	for _, e := range list {
+		norm := strings.ToLower(strings.TrimSpace(e))
+		if !strings.HasPrefix(norm, ".") {
+			norm = "." + norm
+		}
+		if !drop[norm] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// convertsDocuments reports whether PDF/DOCX pages are worth converting: an
+// output format, LLM extraction or change detection uses their text. (CSS,
+// XPath and JSON-LD extraction do not apply to documents.)
+func (rs *RunSettings) convertsDocuments() bool {
+	f := rs.Formats
+	return f[models.FormatMarkdown] || f[models.FormatText] || f[models.FormatMetadata] || rs.LLMPrompt != "" || rs.ChangeDetection
 }
 
 // NeedsContent reports whether pages must be analyzed into PageContent rows.

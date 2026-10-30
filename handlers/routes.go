@@ -10,10 +10,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/resolver/crawler/config"
+	"github.com/resolver/crawler/jobs"
 )
 
 // TemplateFuncs are the helpers available in HTML templates.
 var TemplateFuncs = template.FuncMap{
+	"describeCron": jobs.DescribeCron,
 	"divf": func(a, b float64) float64 {
 		if b == 0 {
 			return 0
@@ -109,6 +111,8 @@ func Register(router *gin.Engine, h *Handler, cfg *config.Config) {
 	router.GET("/healthz", h.V1Health)
 	router.GET("/v1/health", h.V1Health)
 
+	h.RegisterCluster(router)
+
 	v1 := router.Group("/v1", TokenAuth(cfg.API.Tokens), AllowPlugins(cfg.Plugins.AllowInAPI))
 	h.RegisterV1(v1)
 	if len(cfg.API.Tokens) == 0 {
@@ -126,7 +130,13 @@ func Register(router *gin.Engine, h *Handler, cfg *config.Config) {
 		log.Printf("[Security] Web UI has no password (ui.username/ui.password). Do not expose it to the internet.")
 	}
 
-	ui.Static("/static", "./static")
+	// Browsers must revalidate scripts on every load (a cheap 304 when
+	// unchanged); a stale mole.js next to a newer page template breaks the UI.
+	static := ui.Group("/static", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache")
+		c.Next()
+	})
+	static.Static("/", "./static")
 	ui.StaticFile("/favicon.ico", "./static/favicon.ico")
 
 	asHTML := func(fn gin.HandlerFunc) gin.HandlerFunc {
@@ -199,6 +209,11 @@ func Register(router *gin.Engine, h *Handler, cfg *config.Config) {
 		api.GET("/settings/defaults", h.GetDefaultSettings)
 		api.GET("/plugins", h.ListPlugins)
 		api.GET("/stats", h.GetStats)
+
+		api.GET("/cluster/tokens", h.ListJoinTokens)
+		api.POST("/cluster/tokens", h.CreateJoinToken)
+		api.DELETE("/cluster/tokens/:id", h.RevokeJoinToken)
+		api.POST("/cluster/workers/:id/state", h.SetWorkerState)
 
 		// The UI uses the same versioned API as external clients, under its own auth.
 		h.RegisterV1(api.Group("/v1", AllowPlugins(true)))

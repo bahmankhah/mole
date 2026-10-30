@@ -230,85 +230,91 @@
     };
   };
 
-  /* ── Schedule editor (create and edit) ────────────────────────────── */
-  // scheduleEditor renders the schedule form and returns {get: () -> ScheduleInput}.
-  Mole.scheduleEditor = function (container, sch, catalog) {
-    sch = sch || {};
-    var t = sch.template || {};
-    var st = t.settings || {};
-    var lim = t.limits || {};
-    var wh = t.webhook || {};
-    var fetchMode = st.use_headless_browser ? 'browser' : (st.headless_fallback ? 'fallback' : 'http');
-    var presets = [['0 * * * *', 'Every hour'], ['0 */6 * * *', 'Every 6 hours'], ['0 3 * * *', 'Daily at 03:00'],
-      ['0 9 * * 6', 'Weekly (Saturday 09:00)'], ['0 4 1 * *', 'Monthly (1st, 04:00)']];
-    var cls = 'w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none';
-    container.innerHTML =
-      '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">' +
-      '<label class="block text-sm font-medium text-gray-700">Name<input data-s="name" class="mt-1 ' + cls + '" value="' + Mole.esc(sch.name) + '" placeholder="Phone prices on shop.ir"></label>' +
-      '<label class="block text-sm font-medium text-gray-700">Start URL<input data-s="url" required class="mt-1 ' + cls + '" value="' + Mole.esc(t.target_url) + '" placeholder="https://shop.ir/category/phones"></label>' +
-      '<div><label class="block text-sm font-medium text-gray-700">When</label><div class="mt-1 flex gap-2">' +
-      '<select data-s="preset" class="' + cls + ' bg-white w-1/2"><option value="">Custom…</option>' + presets.map(function (p) { return '<option value="' + p[0] + '"' + (p[0] === (sch.cron || '0 3 * * *') ? ' selected' : '') + '>' + p[1] + '</option>'; }).join('') + '</select>' +
-      '<input data-s="cron" required class="' + cls + ' font-mono w-1/2" value="' + Mole.esc(sch.cron || '0 3 * * *') + '" placeholder="0 3 * * *"></div>' +
-      '<p class="text-xs text-gray-400 mt-1">Cron: minute hour day month weekday, or @hourly / @daily / "@every 6h".</p></div>' +
-      '<label class="block text-sm font-medium text-gray-700">Time zone<input data-s="tz" class="mt-1 ' + cls + '" value="' + Mole.esc(sch.timezone || 'Asia/Tehran') + '"></label>' +
-      '<div class="grid grid-cols-2 gap-3"><label class="block text-sm font-medium text-gray-700">Max depth<input data-s="depth" type="number" min="0" class="mt-1 ' + cls + '" value="' + (t.max_depth || 5) + '"></label>' +
-      '<label class="block text-sm font-medium text-gray-700">Max pages / run<input data-s="maxpages" type="number" min="0" class="mt-1 ' + cls + '" value="' + (lim.max_pages || '') + '" placeholder="unlimited"></label></div>' +
-      '<label class="block text-sm font-medium text-gray-700">Fetching<select data-s="fetch" class="mt-1 bg-white ' + cls + '">' +
-      Mole.options(['http', 'fallback', 'browser'], fetchMode, { http: 'Fast HTTP', fallback: 'HTTP, browser if blocked', browser: 'Headless browser' }) + '</select></label>' +
-      '<label class="block text-sm font-medium text-gray-700">Proxy pool<select data-s="pool" class="mt-1 bg-white ' + cls + '"><option value="">Default</option><option value="auto">Automatic routing</option><option value="direct">Direct</option>' +
-      (catalog.proxy_pools || []).map(function (n) { return '<option value="' + Mole.esc(n) + '"' + (st.proxy_pool === n ? ' selected' : '') + '>' + Mole.esc(n) + '</option>'; }).join('') + '</select></label>' +
-      '<label class="block text-sm font-medium text-gray-700">Region<input data-s="region" class="mt-1 ' + cls + '" value="' + Mole.esc(t.region) + '" placeholder="any worker (or auto, ir, intl…)"></label>' +
-      '</div>' +
-      '<div class="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-sm text-gray-700">' +
-      '<label class="flex items-center gap-2"><input data-s="enabled" type="checkbox"' + (sch.enabled === false ? '' : ' checked') + ' class="h-4 w-4 text-indigo-600 rounded"> Enabled</label>' +
-      '<label class="flex items-center gap-2"><input data-s="changes" type="checkbox"' + (sch.change_detection === false ? '' : ' checked') + ' class="h-4 w-4 text-indigo-600 rounded"> Detect changes between runs</label>' +
-      '<label class="flex items-center gap-2"><input data-s="skip" type="checkbox"' + (sch.skip_if_running === false ? '' : ' checked') + ' class="h-4 w-4 text-indigo-600 rounded"> Skip a run while the previous one is active</label>' +
-      '<label class="flex items-center gap-2"><input data-s="main" type="checkbox"' + (st.only_main_content ? ' checked' : '') + ' class="h-4 w-4 text-indigo-600 rounded"> Main content only</label>' +
-      '</div>' +
-      '<div class="mt-4"><label class="block text-sm font-medium text-gray-700 mb-1">Outputs</label><div data-s="formats"></div></div>' +
-      '<details class="mt-4"' + ((st.extract_fields || []).length ? ' open' : '') + '><summary class="text-sm font-medium text-gray-700 cursor-pointer">Structured extraction</summary>' +
-      '<label class="block text-xs text-gray-500 mt-2">Only on URLs matching (regex)<input data-s="match" class="mt-1 font-mono ' + cls + '" value="' + Mole.esc(st.extract_url_match) + '" placeholder="/product/"></label>' +
-      '<div data-s="fields" class="mt-2"></div></details>' +
-      '<details class="mt-4"' + (wh.url ? ' open' : '') + '><summary class="text-sm font-medium text-gray-700 cursor-pointer">Webhook</summary>' +
-      '<div class="grid grid-cols-1 md:grid-cols-3 gap-3 mt-2"><input data-s="whurl" type="url" class="md:col-span-2 ' + cls + '" value="' + Mole.esc(wh.url) + '" placeholder="https://app.example.com/hooks/mole">' +
-      '<input data-s="whsecret" class="font-mono ' + cls + '" value="' + Mole.esc(wh.secret) + '" placeholder="signing secret"></div><div data-s="events" class="mt-2"></div></details>';
+  /* ── Output format picker ─────────────────────────────────────────── */
+  var contentFormats = {
+    markdown: ['Markdown', 'Clean text for LLMs and RAG'],
+    html: ['Clean HTML', 'Markup without scripts and styles'],
+    text: ['Plain text', 'Text only'],
+    links: ['Links', 'Every link on the page'],
+    metadata: ['Metadata', 'Title, description, OpenGraph, JSON-LD, dates']
+  };
+  var detectorIcons = { product: '🛒', article: '📰', business: '🏢', job_posting: '💼', event: '🎫', faq: '❓' };
 
-    var q = function (k) { return container.querySelector('[data-s="' + k + '"]'); };
-    q('preset').addEventListener('change', function () { if (this.value) q('cron').value = this.value; });
-    q('cron').addEventListener('input', function () { q('preset').value = ''; });
-    var formats = Mole.checkboxGroup(q('formats'), catalog.formats, st.formats || ['markdown'],
-      { labels: { markdown: 'Markdown', html: 'Clean HTML', text: 'Text', links: 'Links', metadata: 'Metadata' } });
-    var fields = Mole.fieldEditor(q('fields'), st.extract_fields || [], { types: catalog.field_types });
-    var events = Mole.checkboxGroup(q('events'), catalog.webhook_events, wh.events || []);
+  // formatPicker renders the per-page outputs: content formats as toggle
+  // pills and the detectors (catalog.detectors) as cards that say what each
+  // returns. opts: {editable: bool, columns: 1|2|3}. Returns {get: () -> formats}.
+  Mole.formatPicker = function (container, catalog, selected, opts) {
+    opts = opts || {};
+    var editable = opts.editable !== false;
+    var detectors = catalog.detectors || [];
+    var isDetector = {};
+    detectors.forEach(function (d) { isDetector[d.format] = true; });
+    var sel = {};
+    (selected || []).forEach(function (f) { sel[f] = true; });
+    var dis = editable ? '' : ' disabled';
+    var grid = { 1: 'grid-cols-1', 2: 'grid-cols-1 sm:grid-cols-2', 3: 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-3' }[opts.columns || 3];
+
+    var pills = (catalog.formats || []).filter(function (f) { return !isDetector[f]; }).map(function (f) {
+      var info = contentFormats[f] || [f, ''];
+      return '<label class="fp-pill inline-flex items-center gap-2 px-3 py-1.5 mr-2 mb-2 rounded-full border text-sm select-none ' +
+        (editable ? 'cursor-pointer' : 'opacity-70') + '" title="' + Mole.esc(info[1]) + '">' +
+        '<input type="checkbox" class="h-3.5 w-3.5 text-indigo-600 rounded" value="' + Mole.esc(f) + '"' + (sel[f] ? ' checked' : '') + dis + '>' +
+        Mole.esc(info[0]) + '</label>';
+    }).join('');
+
+    var cards = detectors.map(function (d) {
+      var shown = d.fields.slice(0, 6), more = d.fields.length - shown.length;
+      return '<label class="fp-card relative block rounded-lg border p-3 transition ' + (editable ? 'cursor-pointer hover:border-indigo-300' : 'opacity-70') + '">' +
+        '<input type="checkbox" class="absolute top-3 right-3 h-4 w-4 text-indigo-600 rounded" value="' + Mole.esc(d.format) + '"' + (sel[d.format] ? ' checked' : '') + dis + '>' +
+        '<div class="flex items-center gap-2 pr-6"><span class="text-lg leading-none">' + (detectorIcons[d.format] || '🔎') + '</span>' +
+        '<span class="text-sm font-semibold text-gray-800">' + Mole.esc(d.label) + '</span></div>' +
+        '<p class="mt-1 text-xs text-gray-500">' + Mole.esc(d.description) + '</p>' +
+        '<div class="mt-2 flex flex-wrap gap-1" title="' + Mole.esc(d.fields.join(', ')) + '">' +
+        shown.map(function (f) { return '<span class="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 font-mono text-[11px]">' + Mole.esc(f) + '</span>'; }).join('') +
+        (more > 0 ? '<span class="px-1.5 py-0.5 text-[11px] text-gray-400">+' + more + ' more</span>' : '') +
+        '</div></label>';
+    }).join('');
+
+    container.innerHTML =
+      '<div class="text-xs font-medium uppercase tracking-wide text-gray-500 mb-2">Page content</div>' +
+      '<div>' + pills + '</div>' +
+      (detectors.length ?
+        '<div class="flex flex-wrap items-baseline justify-between gap-2 mt-3 mb-2">' +
+        '<div class="text-xs font-medium uppercase tracking-wide text-gray-500">Detect structured data <span class="normal-case font-normal text-gray-400">· no selectors needed</span></div>' +
+        (editable ? '<div class="text-xs"><button type="button" data-fp="all" class="text-indigo-600 hover:underline">Select all</button>' +
+          '<span class="text-gray-300 mx-1">·</span><button type="button" data-fp="none" class="text-indigo-600 hover:underline">Clear</button></div>' : '') +
+        '</div>' +
+        '<div class="grid gap-3 ' + grid + '">' + cards + '</div>' +
+        '<p class="mt-2 text-xs text-gray-400">Read from the JSON-LD, microdata and OpenGraph data sites publish for search engines. Results appear on each page, in exports (<code>product.price</code> … columns) and in change detection. Pages without such data return nothing.</p>'
+        : '');
+
+    function paint() {
+      container.querySelectorAll('.fp-pill').forEach(function (el) {
+        var on = el.querySelector('input').checked;
+        el.classList.toggle('bg-indigo-50', on); el.classList.toggle('border-indigo-400', on); el.classList.toggle('text-indigo-800', on);
+        el.classList.toggle('bg-white', !on); el.classList.toggle('border-gray-300', !on); el.classList.toggle('text-gray-700', !on);
+      });
+      container.querySelectorAll('.fp-card').forEach(function (el) {
+        var on = el.querySelector('input').checked;
+        el.classList.toggle('bg-indigo-50', on); el.classList.toggle('border-indigo-400', on); el.classList.toggle('ring-1', on); el.classList.toggle('ring-indigo-400', on);
+        el.classList.toggle('bg-white', !on); el.classList.toggle('border-gray-200', !on);
+      });
+    }
+    container.addEventListener('change', paint);
+    container.querySelectorAll('[data-fp]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var on = b.getAttribute('data-fp') === 'all';
+        container.querySelectorAll('.fp-card input').forEach(function (i) { i.checked = on; });
+        paint();
+      });
+    });
+    paint();
 
     return {
       get: function () {
-        var settings = Object.assign({}, st);
-        delete settings.use_headless_browser; delete settings.headless_fallback;
-        var fm = q('fetch').value;
-        if (fm === 'browser') settings.use_headless_browser = true;
-        if (fm === 'fallback') settings.headless_fallback = true;
-        settings.proxy_pool = q('pool').value || undefined;
-        settings.only_main_content = q('main').checked || undefined;
-        settings.formats = formats.get();
-        settings.extract_fields = fields.get();
-        settings.extract_url_match = q('match').value.trim() || undefined;
-        if (!settings.extract_fields.length) delete settings.extract_fields;
-        if (!settings.formats.length) delete settings.formats;
-        var limits = Object.assign({}, lim);
-        var mp = parseInt(q('maxpages').value, 10);
-        if (mp > 0) limits.max_pages = mp; else delete limits.max_pages;
-        var template = Object.assign({}, t, {
-          target_url: q('url').value.trim(), max_depth: parseInt(q('depth').value, 10) || 0,
-          region: q('region').value.trim() || undefined, settings: settings, limits: limits
-        });
-        var whURL = q('whurl').value.trim();
-        template.webhook = whURL ? { url: whURL, secret: q('whsecret').value, events: events.get() } : undefined;
-        return {
-          name: q('name').value.trim(), cron: q('cron').value.trim(), timezone: q('tz').value.trim(),
-          enabled: q('enabled').checked, change_detection: q('changes').checked, skip_if_running: q('skip').checked,
-          template: template
-        };
+        var checked = {};
+        container.querySelectorAll('input:checked').forEach(function (i) { checked[i.value] = true; });
+        return (catalog.formats || []).filter(function (f) { return checked[f]; });
       }
     };
   };

@@ -57,7 +57,8 @@ func (r *Run) crawl(workerID int, fu *models.FrontierURL) {
 	}
 
 	contentType := result.ContentType
-	if !isProcessableContentType(contentType) {
+	isDocument := content.DocumentKind(contentType, result.URL, result.Body) != ""
+	if !isDocument && !isProcessableContentType(contentType) {
 		_, created := r.saveCrawledPage(fu, result, 0, "", startTime, nil)
 		r.countPage(created)
 		r.frontier.MarkCompleted(fu.ID)
@@ -69,7 +70,10 @@ func (r *Run) crawl(workerID int, fu *models.FrontierURL) {
 	r.countPage(created)
 	r.frontier.MarkCompleted(fu.ID)
 
-	r.processContent(workerID, pageURL, body, contentType, result.StatusCode, depth, page, fu.AnchorText)
+	// Documents have no links or phrases to process; they are only converted.
+	if !isDocument {
+		r.processContent(workerID, pageURL, body, contentType, result.StatusCode, depth, page, fu.AnchorText)
+	}
 	// Analyze only when the row holds this fetch (not a content-duplicate of another URL
 	// and not an older, better copy that was kept).
 	if page != nil && page.ID > 0 && page.URLHash == fu.URLHash && page.DocHash == docHashOf(body) && r.rs.NeedsContent() {
@@ -86,7 +90,7 @@ func (r *Run) crawl(workerID int, fu *models.FrontierURL) {
 		})
 	}
 
-	if r.rs.AfterCrawlPlugin != "" {
+	if r.rs.AfterCrawlPlugin != "" && !isDocument {
 		pluginID := r.rs.AfterCrawlPlugin
 		// Bound concurrent plugin processes; when all slots are busy the
 		// worker waits, which slows the crawl instead of piling up processes.
@@ -151,10 +155,16 @@ func (r *Run) processContent(workerID int, pageURL string, body []byte, contentT
 		}
 	}
 
+	// Links found here would sit at depth+1, beyond the crawl's maximum depth:
+	// queueing them would only fill the frontier with URLs the run discards.
+	followLinks := depth < r.rs.MaxDepth
+
 	// Link extraction still runs for non-2xx pages: navigation links on error pages are useful.
 	switch {
 	case strings.Contains(contentType, "text/html"):
-		r.processHTML(pageURL, body, depth)
+		if followLinks {
+			r.processHTML(pageURL, body, depth)
+		}
 		if isSuccessful && r.rs.EnableSemanticSearch && page != nil && page.ID > 0 {
 			r.sideWG.Add(1)
 			go func(p *models.CrawledPage, text string) {
@@ -165,9 +175,11 @@ func (r *Run) processContent(workerID int, pageURL string, body []byte, contentT
 			}(page, textContent)
 		}
 	case strings.Contains(pageURL, "sitemap") && strings.Contains(contentType, "xml"):
-		r.processSitemap(pageURL, body, depth)
+		if followLinks {
+			r.processSitemap(pageURL, body, depth)
+		}
 	case strings.Contains(pageURL, "robots.txt"):
-		r.processRobots(pageURL, body, depth)
+		r.processRobots(pageURL, body, depth, followLinks)
 	}
 }
 
@@ -205,12 +217,17 @@ func (r *Run) processSitemap(pageURL string, body []byte, depth int) {
 	}
 }
 
-func (r *Run) processRobots(pageURL string, body []byte, depth int) {
+// processRobots stores the robots.txt rules and, when followLinks is set,
+// queues the sitemaps it lists.
+func (r *Run) processRobots(pageURL string, body []byte, depth int, followLinks bool) {
 	result := r.robotsParser.ParseRobots(pageURL, body)
 	if domain := r.urlCleaner.ExtractDomain(pageURL); domain != "" {
 		r.robotRulesMu.Lock()
 		r.robotRules[domain] = result
 		r.robotRulesMu.Unlock()
+	}
+	if !followLinks {
+		return
 	}
 	for _, sitemap := range result.Sitemaps {
 		r.frontier.AddURL(sitemap, depth+1, pageURL)
@@ -454,9 +471,14 @@ func (r *Run) analyzePage(page *models.CrawledPage, res *modules.FetchResult) {
 	pc := models.PageContent{PageID: page.ID, CrawlJobID: r.job.ID, URLHash: page.URLHash, CreatedAt: time.Now()}
 	isHTML := strings.Contains(strings.ToLower(res.ContentType), "html")
 	ok2xx := res.StatusCode >= 200 && res.StatusCode < 300
+	docKind := content.DocumentKind(res.ContentType, res.URL, res.Body)
 	var markdown string
 
-	if isHTML && ok2xx {
+	if docKind != "" && ok2xx {
+		if r.rs.convertsDocuments() {
+			markdown = r.analyzeDocument(&pc, page, docKind, res)
+		}
+	} else if isHTML && ok2xx {
 		f := r.rs.Formats
 		wantMarkdown := f[models.FormatMarkdown] || r.rs.ChangeDetection || r.rs.LLMPrompt != ""
 		analysis, err := content.Analyze(page.URL, res.Body, content.Options{
@@ -492,6 +514,13 @@ func (r *Run) analyzePage(page *models.CrawledPage, res *modules.FetchResult) {
 		}
 
 		if r.rs.ExtractsURL(page.URL) {
+			if len(r.rs.Detectors) > 0 {
+				if d, err := content.Detect(page.URL, res.Body, r.rs.Detectors); err != nil {
+					pc.ExtractError = appendErr(pc.ExtractError, "detect: "+err.Error())
+				} else if err := d.Store(&pc.DetectedData); err != nil {
+					pc.ExtractError = appendErr(pc.ExtractError, "detect: "+err.Error())
+				}
+			}
 			if len(r.rs.ExtractFields) > 0 {
 				if out, err := content.Extract(page.URL, res.Body, r.rs.ExtractFields); err != nil {
 					pc.ExtractError = appendErr(pc.ExtractError, "extract: "+err.Error())
@@ -529,6 +558,44 @@ func (r *Run) analyzePage(page *models.CrawledPage, res *modules.FetchResult) {
 	}
 }
 
+// analyzeDocument converts a PDF or DOCX page into PageContent and returns
+// its Markdown (for change detection).
+func (r *Run) analyzeDocument(pc *models.PageContent, page *models.CrawledPage, kind string, res *modules.FetchResult) string {
+	doc, err := content.ConvertDocument(r.sideCtx, kind, res.Body, r.e.documentOptions())
+	if err != nil {
+		pc.ExtractError = "document: " + err.Error()
+		if res.Truncated {
+			pc.ExtractError += " (the file is larger than security.max_body_bytes and was cut off)"
+		}
+		return ""
+	}
+	atomic.AddInt64(&r.uDocPages, int64(doc.Pages))
+	pc.ContentHash = doc.ContentHash
+	f := r.rs.Formats
+	if f[models.FormatMarkdown] || r.rs.ChangeDetection {
+		pc.Markdown = &doc.Markdown
+	}
+	if f[models.FormatText] {
+		pc.Text = &doc.Text
+	}
+	if f[models.FormatMetadata] {
+		doc.Metadata["status_code"] = res.StatusCode
+		doc.Metadata["source_url"] = page.URL
+		pc.Metadata = doc.Metadata
+	}
+	if doc.Title != "" {
+		title := doc.Title
+		if len([]rune(title)) > 500 {
+			title = string([]rune(title)[:500])
+		}
+		r.e.db.Model(&models.CrawledPage{}).Where("id = ?", page.ID).Update("title", title)
+	}
+	if r.rs.ExtractsURL(page.URL) && r.rs.LLMPrompt != "" && doc.Markdown != "" {
+		r.llmExtract(pc, page.URL, doc.Markdown)
+	}
+	return doc.Markdown
+}
+
 func (r *Run) llmExtract(pc *models.PageContent, pageURL, markdown string) {
 	if l := r.rs.Limits.MaxLLMTokens; l > 0 && atomic.LoadInt64(&r.uLLMTokens) >= int64(l) {
 		pc.ExtractError = appendErr(pc.ExtractError, "llm: token limit reached")
@@ -552,10 +619,12 @@ func appendErr(existing, msg string) string {
 	return existing + "; " + msg
 }
 
-// detectChange compares a page with the same URL in the baseline job.
+// detectChange compares a page with the same URL in the baseline job: its
+// main text and, when both runs have them, the extracted fields and what the
+// detectors found (product, article, …).
 func (r *Run) detectChange(page *models.CrawledPage, pc *models.PageContent, markdown string) {
 	var prev models.PageContent
-	err := r.e.db.Select("content_hash", "markdown").
+	err := r.e.db.Select(append([]string{"content_hash", "markdown", "extracted"}, models.DetectedColumns...)).
 		Where("crawl_job_id = ? AND url_hash = ?", r.baseJobID, pc.URLHash).First(&prev).Error
 	change := models.PageChange{
 		CrawlJobID: r.job.ID,
@@ -565,31 +634,50 @@ func (r *Run) detectChange(page *models.CrawledPage, pc *models.PageContent, mar
 		URLHash:    pc.URLHash,
 		DetectedAt: time.Now(),
 	}
+	var fields []models.FieldChange
 	switch {
 	case err != nil:
 		change.ChangeType = models.ChangeNew
 		atomic.AddInt64(&r.changesNew, 1)
-	case prev.ContentHash == pc.ContentHash:
-		return
 	default:
-		change.ChangeType = models.ChangeChanged
-		old := ""
-		if prev.Markdown != nil {
-			old = *prev.Markdown
+		fields = content.DiffExtracted(prev.Extracted, pc.Extracted)
+		cur := pc.DetectedData.Fields()
+		for i, old := range prev.DetectedData.Fields() {
+			fields = append(fields, content.DiffDetected(old.Format, old.Value, cur[i].Value)...)
 		}
-		d := modules.LineDiff(old, markdown, 2, 400)
-		change.Added, change.Removed = d.Added, d.Removed
-		change.Diff = &d.Unified
+		textChanged := prev.ContentHash != pc.ContentHash
+		if !textChanged && len(fields) == 0 {
+			return
+		}
+		change.ChangeType = models.ChangeChanged
+		if textChanged {
+			old := ""
+			if prev.Markdown != nil {
+				old = *prev.Markdown
+			}
+			d := modules.LineDiff(old, markdown, 2, 400)
+			change.Added, change.Removed = d.Added, d.Removed
+			change.Diff = &d.Unified
+		}
+		if len(fields) > 0 {
+			if b, err := json.Marshal(fields); err == nil {
+				change.Fields = models.JSONRaw(b)
+			}
+		}
 		atomic.AddInt64(&r.changesChanged, 1)
 	}
 	if err := r.e.db.Create(&change).Error; err != nil {
 		log.Printf("[Run %s] Failed to save change for %s: %v", short(r.job.ID), page.URL, err)
 		return
 	}
-	r.e.emit(r.snapshotJob(), "page.changed", map[string]interface{}{
+	data := map[string]interface{}{
 		"page_id": page.ID, "url": page.URL, "change_type": change.ChangeType,
 		"added": change.Added, "removed": change.Removed, "base_job_id": r.baseJobID,
-	})
+	}
+	if len(fields) > 0 {
+		data["fields"] = fields
+	}
+	r.e.emit(r.snapshotJob(), "page.changed", data)
 }
 
 // detectRemovedPages records baseline pages that this complete crawl no longer found.

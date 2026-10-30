@@ -3,6 +3,8 @@ package jobs
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/resolver/crawler/crawler"
+	"github.com/resolver/crawler/database"
 	"github.com/resolver/crawler/models"
 	"github.com/resolver/crawler/modules"
 	"github.com/resolver/crawler/plugins"
@@ -33,7 +36,9 @@ func (m *Manager) schedulerLoop(ctx context.Context) {
 	var lastHeartbeat, lastCleanup time.Time
 	for {
 		m.reclaimExpiredLeases()
-		m.claimJobs()
+		if m.applyWorkerState() {
+			m.claimJobs()
+		}
 		m.fireSchedules()
 		m.runDueAfterJobPlugins(ctx)
 		if time.Since(lastHeartbeat) >= 15*time.Second {
@@ -76,54 +81,127 @@ func (m *Manager) reclaimExpiredLeases() {
 	}
 }
 
-// claimJobs starts queued jobs while this worker has free slots.
+// claimJobs starts queued jobs while this worker has free slots. Jobs pinned
+// to another region, and jobs that need a browser when this worker has none,
+// are left to other workers.
 func (m *Manager) claimJobs() {
 	free := m.config.Worker.MaxRunningJobs - m.engine.RunningCount()
 	if free <= 0 {
 		return
 	}
-	q := m.db.Select("id", "owner_ref").Where("status = ?", models.JobStatusQueued)
+	q := m.db.Select("id", "owner_ref", "settings").Where("status = ?", models.JobStatusQueued)
 	if region := m.config.Worker.Region; region != "" {
 		q = q.Where("region IN ?", []string{"", region})
 	} else {
 		q = q.Where("region = ''")
 	}
+	// Look past the first few jobs, which may all belong to owners at their
+	// limit or need a browser this worker lacks.
 	var candidates []models.CrawlJob
-	if err := q.Order("priority DESC").Order("queued_at ASC").Limit(free * 4).Find(&candidates).Error; err != nil {
+	if err := q.Order("priority DESC").Order("queued_at ASC").Limit(max(free*4, 50)).Find(&candidates).Error; err != nil {
 		log.Printf("[Scheduler] Failed to list queued jobs: %v", err)
 		return
 	}
-	ownerRunning := map[string]int64{}
+	hasBrowser := m.browser.Load()
+	limits := m.ownerLimitsFor(candidates)
+	ownerFull := map[string]bool{}
 	for _, c := range candidates {
 		if free <= 0 {
 			return
 		}
-		if limit := m.config.Worker.MaxRunningPerOwner; c.OwnerRef != "" && limit > 0 {
-			n, ok := ownerRunning[c.OwnerRef]
-			if !ok {
-				m.db.Model(&models.CrawlJob{}).Where("owner_ref = ? AND status = ?", c.OwnerRef, models.JobStatusRunning).Count(&n)
-			}
-			if n >= int64(limit) {
-				ownerRunning[c.OwnerRef] = n
-				continue
-			}
-			ownerRunning[c.OwnerRef] = n + 1
+		if !hasBrowser && m.engine.NeedsBrowser(c.Settings) {
+			continue
 		}
-		if m.claimAndStart(c.ID) {
+		limit := m.config.Worker.MaxRunningPerOwner
+		if l, ok := limits[c.OwnerRef]; ok {
+			limit = l
+		}
+		if c.OwnerRef == "" || limit <= 0 {
+			if m.claimAndStart(c.ID) {
+				free--
+			}
+			continue
+		}
+		if ownerFull[c.OwnerRef] {
+			continue
+		}
+		claimed, full := m.claimForOwner(c.ID, c.OwnerRef, limit)
+		if full {
+			ownerFull[c.OwnerRef] = true
+		}
+		if claimed && m.startClaimed(c.ID) {
 			free--
 		}
 	}
 }
 
+// ownerLimitsFor loads the per-owner overrides of worker.max_running_per_owner
+// for the owners of jobs.
+func (m *Manager) ownerLimitsFor(jobs []models.CrawlJob) map[string]int {
+	owners := make([]string, 0, len(jobs))
+	seen := map[string]bool{}
+	for _, j := range jobs {
+		if j.OwnerRef != "" && !seen[j.OwnerRef] {
+			seen[j.OwnerRef] = true
+			owners = append(owners, j.OwnerRef)
+		}
+	}
+	out := map[string]int{}
+	if len(owners) == 0 {
+		return out
+	}
+	var rows []models.OwnerLimit
+	if err := m.db.Where("owner_ref IN ?", owners).Find(&rows).Error; err != nil {
+		log.Printf("[Scheduler] Failed to load owner limits: %v", err)
+		return out
+	}
+	for _, r := range rows {
+		out[r.OwnerRef] = r.MaxRunning
+	}
+	return out
+}
+
+// claimForOwner claims jobID unless its owner already runs limit jobs on all
+// workers together. Counting and claiming happen under a per-owner database
+// lock, so two workers cannot both take the owner's last slot.
+func (m *Manager) claimForOwner(jobID, owner string, limit int) (claimed, full bool) {
+	sum := sha256.Sum256([]byte(owner))
+	lock := "mole:owner:" + hex.EncodeToString(sum[:16])
+	_, err := database.WithLock(m.db, lock, 5*time.Second, func() error {
+		var n int64
+		if err := m.db.Model(&models.CrawlJob{}).Where("owner_ref = ? AND status = ?", owner, models.JobStatusRunning).Count(&n).Error; err != nil {
+			return err
+		}
+		if n >= int64(limit) {
+			full = true
+			return nil
+		}
+		claimed = m.claim(jobID)
+		return nil
+	})
+	if err != nil {
+		log.Printf("[Scheduler] Failed to claim job %s for owner %s: %v", jobID, owner, err)
+	}
+	return claimed, full
+}
+
 func (m *Manager) claimAndStart(jobID string) bool {
+	return m.claim(jobID) && m.startClaimed(jobID)
+}
+
+// claim marks a queued job as running on this worker. It reports false when
+// another worker won it.
+func (m *Manager) claim(jobID string) bool {
 	lease := time.Now().Add(m.config.Worker.LeaseTTL)
 	res := m.db.Model(&models.CrawlJob{}).
 		Where("id = ? AND status = ?", jobID, models.JobStatusQueued).
 		Updates(map[string]interface{}{"status": models.JobStatusRunning, "worker_id": m.workerID,
 			"lease_expires_at": lease, "control": "", "stop_reason": ""})
-	if res.Error != nil || res.RowsAffected == 0 {
-		return false // another worker won
-	}
+	return res.Error == nil && res.RowsAffected > 0
+}
+
+// startClaimed starts a job this worker has claimed; a job that cannot start fails.
+func (m *Manager) startClaimed(jobID string) bool {
 	job, err := m.GetJob(jobID)
 	if err != nil {
 		return false
@@ -392,6 +470,7 @@ func (m *Manager) heartbeat() {
 		Version:     Version,
 		MaxJobs:     m.config.Worker.MaxRunningJobs,
 		RunningJobs: m.engine.RunningCount(),
+		Browser:     m.browser.Load(),
 		StartedAt:   m.startedAt,
 		LastSeenAt:  time.Now(),
 	}
@@ -404,12 +483,30 @@ func (m *Manager) cleanup() {
 	m.db.Where("created_at < ?", time.Now().Add(-24*time.Hour)).Delete(&models.IdempotencyKey{})
 	m.db.Where("last_seen_at < ?", time.Now().Add(-24*time.Hour)).Delete(&models.WorkerHeartbeat{})
 	m.db.Where("status = ? AND delivered_at < ?", models.DeliveryDelivered, time.Now().Add(-30*24*time.Hour)).Delete(&models.WebhookDelivery{})
+	m.cleanupScrapeCache()
 }
 
-// Workers lists workers seen in the last two minutes.
+// Workers lists workers seen in the last two minutes with their operator-set
+// state and whether they run a different version than this process.
 func (m *Manager) Workers() []models.WorkerHeartbeat {
 	var out []models.WorkerHeartbeat
 	m.db.Where("last_seen_at > ?", time.Now().Add(-2*time.Minute)).Order("id").Find(&out)
+	if len(out) == 0 {
+		return out
+	}
+	var controls []models.WorkerControl
+	m.db.Find(&controls)
+	states := make(map[string]string, len(controls))
+	for _, c := range controls {
+		states[c.WorkerID] = c.State
+	}
+	for i := range out {
+		out[i].State = models.WorkerActive
+		if s := states[out[i].ID]; s != "" {
+			out[i].State = s
+		}
+		out[i].VersionMismatch = out[i].Version != Version
+	}
 	return out
 }
 

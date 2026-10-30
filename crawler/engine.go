@@ -144,6 +144,11 @@ func (e *Engine) Store() storage.Store { return e.store }
 // LLM returns the LLM client (nil when not configured).
 func (e *Engine) LLM() *content.LLMClient { return e.llm }
 
+// documentOptions bounds PDF/DOCX conversion.
+func (e *Engine) documentOptions() content.DocumentOptions {
+	return content.DocumentOptions{MaxPages: e.cfg.Documents.MaxPages, Timeout: e.cfg.Documents.Timeout}
+}
+
 // BrowserPoolSize returns the number of headless browser slots.
 func (e *Engine) BrowserPoolSize() int { return e.browsers.Size() }
 
@@ -269,6 +274,32 @@ func (e *Engine) RunStatsFor(jobID string) (RunStats, bool) {
 		return RunStats{}, false
 	}
 	return r.stats(), true
+}
+
+// RequeueAll stops every run and hands its job back to the queue without
+// waiting for the runs to finish. It returns how many runs it stopped.
+func (e *Engine) RequeueAll(reason string) int {
+	e.mu.RLock()
+	runs := make([]*Run, 0, len(e.runs))
+	for _, r := range e.runs {
+		runs = append(runs, r)
+	}
+	e.mu.RUnlock()
+	for _, r := range runs {
+		r.stop(Outcome{Status: models.JobStatusQueued, StopReason: reason})
+	}
+	return len(runs)
+}
+
+// NeedsBrowser reports whether a job's effective settings use the headless
+// browser (always or as a fallback). Invalid settings report false; starting
+// the job reports them.
+func (e *Engine) NeedsBrowser(settings *models.JobSettings) bool {
+	rs, err := BuildRunSettings(e.cfg, settings, nil, e.proxies)
+	if err != nil {
+		return false
+	}
+	return rs.UseHeadlessBrowser || rs.HeadlessFallback
 }
 
 // Shutdown stops every run and hands its job back to the queue so another

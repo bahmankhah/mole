@@ -25,7 +25,13 @@ var fieldTypes = map[string]bool{
 // FieldTypes lists the supported extraction field types (for UIs and docs).
 var FieldTypes = []string{"text", "html", "attr", "url", "number", "price", "date", "exists", "list"}
 
-const xpathPrefix = "xpath:"
+const (
+	xpathPrefix  = "xpath:"
+	jsonLDPrefix = "jsonld:"
+)
+
+// SelectorPrefixes lists the selector syntaxes besides CSS (for UIs and docs).
+var SelectorPrefixes = []string{xpathPrefix, jsonLDPrefix}
 
 // ValidateFields checks an extraction schema before it is saved.
 func ValidateFields(fields []models.ExtractField) error {
@@ -59,13 +65,20 @@ func validateFields(fields []models.ExtractField, path string, depth int) error 
 		if f.Type == "attr" && f.Attr == "" {
 			return fmt.Errorf("extraction field %q: attr is required for type attr", where)
 		}
-		if strings.HasPrefix(f.Selector, xpathPrefix) {
-			if _, err := xpath.Compile(strings.TrimPrefix(f.Selector, xpathPrefix)); err != nil {
-				return fmt.Errorf("extraction field %q: invalid XPath: %v", where, err)
+		if f.Selector != "" {
+			if err := validateSelector(f, f.Selector); err != nil {
+				return fmt.Errorf("extraction field %q: %v", where, err)
 			}
-		} else if f.Selector != "" {
-			if err := compileCSS(f.Selector); err != nil {
-				return fmt.Errorf("extraction field %q: invalid CSS selector: %v", where, err)
+		}
+		if len(f.FallbackSelectors) > 5 {
+			return fmt.Errorf("extraction field %q: at most 5 fallback selectors are allowed", where)
+		}
+		for _, sel := range f.FallbackSelectors {
+			if strings.TrimSpace(sel) == "" {
+				return fmt.Errorf("extraction field %q: fallback selectors must not be empty", where)
+			}
+			if err := validateSelector(f, sel); err != nil {
+				return fmt.Errorf("extraction field %q: fallback %q: %v", where, sel, err)
 			}
 		}
 		if f.Regex != "" {
@@ -80,6 +93,28 @@ func validateFields(fields []models.ExtractField, path string, depth int) error 
 			if err := validateFields(f.Fields, where+".", depth+1); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+// validateSelector checks one CSS, "xpath:" or "jsonld:" selector of field f.
+func validateSelector(f models.ExtractField, sel string) error {
+	switch {
+	case strings.HasPrefix(sel, xpathPrefix):
+		if _, err := xpath.Compile(strings.TrimPrefix(sel, xpathPrefix)); err != nil {
+			return fmt.Errorf("invalid XPath: %v", err)
+		}
+	case strings.HasPrefix(sel, jsonLDPrefix):
+		if err := validateJSONLDPath(strings.TrimPrefix(sel, jsonLDPrefix)); err != nil {
+			return err
+		}
+		if f.Type == "html" || f.Type == "attr" || f.Type == "list" {
+			return fmt.Errorf("type %s cannot be used with a jsonld: selector", f.Type)
+		}
+	default:
+		if err := compileCSS(sel); err != nil {
+			return fmt.Errorf("invalid CSS selector: %v", err)
 		}
 	}
 	return nil
@@ -110,8 +145,38 @@ func extractFields(ctx *html.Node, base *url.URL, fields []models.ExtractField) 
 	return out
 }
 
+// extractField tries the field's selector, then its fallback selectors in
+// order, and returns the first value that is not empty.
 func extractField(ctx *html.Node, base *url.URL, f models.ExtractField) interface{} {
-	nodes := selectNodes(ctx, f.Selector)
+	v := extractWith(ctx, base, f, f.Selector)
+	for _, sel := range f.FallbackSelectors {
+		if !emptyValue(v) {
+			break
+		}
+		v = extractWith(ctx, base, f, sel)
+	}
+	return v
+}
+
+// emptyValue reports whether a field produced nothing: null, an empty list
+// or, for type exists, false.
+func emptyValue(v interface{}) bool {
+	switch t := v.(type) {
+	case nil:
+		return true
+	case bool:
+		return !t
+	case []interface{}:
+		return len(t) == 0
+	}
+	return false
+}
+
+func extractWith(ctx *html.Node, base *url.URL, f models.ExtractField, selector string) interface{} {
+	if sel := strings.TrimSpace(selector); strings.HasPrefix(sel, jsonLDPrefix) {
+		return extractJSONLDField(ctx, base, f, strings.TrimPrefix(sel, jsonLDPrefix))
+	}
+	nodes := selectNodes(ctx, selector)
 	if f.Type == "exists" {
 		return len(nodes) > 0
 	}
@@ -166,7 +231,11 @@ func nodeValue(n *html.Node, base *url.URL, f models.ExtractField) interface{} {
 	if !ok {
 		return nil
 	}
+	return convertValue(raw, base, f)
+}
 
+// convertValue applies a field's regex and type to the raw string of a match.
+func convertValue(raw string, base *url.URL, f models.ExtractField) interface{} {
 	if f.Regex != "" {
 		re, err := regexp.Compile(f.Regex)
 		if err != nil {

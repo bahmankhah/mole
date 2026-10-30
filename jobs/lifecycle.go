@@ -56,13 +56,46 @@ type JobSpec struct {
 	Webhook      *models.WebhookConfig `json:"webhook,omitempty"`
 	Start        *bool                 `json:"start,omitempty"` // queue immediately (default true)
 
+	Kind       string `json:"-"` // crawl (default) or batch; set by the batch endpoint and schedule templates
 	ScheduleID string `json:"-"`
+}
+
+// MaxBatchURLs caps the URLs of one batch job.
+const MaxBatchURLs = 50000
+
+// normalizeKind validates a job kind; "" means crawl.
+func normalizeKind(kind string) (string, error) {
+	switch strings.TrimSpace(kind) {
+	case "", models.JobKindCrawl:
+		return models.JobKindCrawl, nil
+	case models.JobKindBatch:
+		return models.JobKindBatch, nil
+	}
+	return "", invalidInput("kind must be %q or %q", models.JobKindCrawl, models.JobKindBatch)
+}
+
+// batchURL turns one URL of a batch into an absolute http(s) URL. Unlike
+// ParseTarget it keeps the path of scheme-less input ("shop.ir/p/1").
+func batchURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", invalidInput("batch URLs must not be empty")
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", invalidInput("invalid URL %q", raw)
+	}
+	return u.String(), nil
 }
 
 // SpecFromTemplate turns a schedule template into a spec.
 func SpecFromTemplate(t models.JobTemplate) JobSpec {
 	depth := t.MaxDepth
 	spec := JobSpec{
+		Kind:         t.Kind,
 		URL:          t.TargetURL,
 		SeedURLs:     t.SeedURLs,
 		TemplateVars: t.TemplateVars,
@@ -182,6 +215,15 @@ func validateWebhook(w *models.WebhookConfig) error {
 
 // CreateFromSpec validates a spec and creates the job (queued unless Start is false).
 func (m *Manager) CreateFromSpec(spec JobSpec, allowPlugins bool) (*models.CrawlJob, error) {
+	kind, err := normalizeKind(spec.Kind)
+	if err != nil {
+		return nil, err
+	}
+	if kind == models.JobKindBatch {
+		if spec.URL, err = batchURL(spec.URL); err != nil {
+			return nil, err
+		}
+	}
 	fullURL, domain, err := ParseTarget(spec.URL)
 	if err != nil {
 		return nil, err
@@ -190,12 +232,26 @@ func (m *Manager) CreateFromSpec(spec JobSpec, allowPlugins bool) (*models.Crawl
 	if err != nil {
 		return nil, err
 	}
+	if kind == models.JobKindBatch && len(seeds) == 0 {
+		// A batch fetches its URL and every seed URL.
+		seeds = models.StringSlice{fullURL}
+	}
 	for _, s := range spec.SeedURLs {
 		if s = strings.TrimSpace(s); s != "" {
-			if _, _, err := ParseTarget(s); err != nil {
+			if kind == models.JobKindBatch {
+				if s, err = batchURL(s); err != nil {
+					return nil, err
+				}
+			} else if _, _, err := ParseTarget(s); err != nil {
 				return nil, err
 			}
 			seeds = append(seeds, s)
+		}
+	}
+	if kind == models.JobKindBatch {
+		seeds = uniqueStrings(seeds)
+		if len(seeds) > MaxBatchURLs {
+			return nil, invalidInput("a batch may contain at most %d URLs", MaxBatchURLs)
 		}
 	}
 	if err := m.ValidateSettings(spec.Settings, spec.Limits, allowPlugins); err != nil {
@@ -207,12 +263,18 @@ func (m *Manager) CreateFromSpec(spec JobSpec, allowPlugins bool) (*models.Crawl
 	if len(spec.OwnerRef) > 191 || len(spec.ExternalID) > 191 {
 		return nil, invalidInput("owner_ref and external_id must be at most 191 characters")
 	}
-	depth := 10
+	depth := m.config.Crawler.MaxDepth
+	if spec.MaxDepth == nil && spec.Settings != nil && spec.Settings.MaxDepth != nil {
+		spec.MaxDepth = spec.Settings.MaxDepth // the setting wins at run time; record it on the job too
+	}
 	if spec.MaxDepth != nil {
 		if *spec.MaxDepth < 0 {
 			return nil, invalidInput("max_depth must be >= 0")
 		}
 		depth = *spec.MaxDepth
+	}
+	if kind == models.JobKindBatch {
+		depth = 0
 	}
 	region := strings.TrimSpace(spec.Region)
 	if region == "auto" {
@@ -220,6 +282,7 @@ func (m *Manager) CreateFromSpec(spec JobSpec, allowPlugins bool) (*models.Crawl
 	}
 
 	job := &models.CrawlJob{
+		Kind:       kind,
 		TargetURL:  fullURL,
 		Domain:     domain,
 		SeedURLs:   seeds,
@@ -246,15 +309,44 @@ func (m *Manager) CreateFromSpec(spec JobSpec, allowPlugins bool) (*models.Crawl
 		job.Status = models.JobStatusQueued
 		job.QueuedAt = &now
 	}
-	if err := m.db.Create(job).Error; err != nil {
+	if err := m.createJob(job); err != nil {
 		return nil, err
 	}
-	log.Printf("[JobManager] Created job %s for %s (status=%s, owner=%q)", job.ID, fullURL, job.Status, job.OwnerRef)
+	log.Printf("[JobManager] Created %s job %s for %s (status=%s, owner=%q)", job.Kind, job.ID, fullURL, job.Status, job.OwnerRef)
 	if job.Status == models.JobStatusQueued {
 		m.emit(job, EventJobQueued, nil)
 		m.nudge()
 	}
 	return job, nil
+}
+
+// createJob inserts a job. GORM replaces zero values that have a column
+// default (max_depth: 10) with the default, so a max_depth of 0 is written
+// explicitly afterwards.
+func (m *Manager) createJob(job *models.CrawlJob) error {
+	depth := job.MaxDepth
+	if err := m.db.Create(job).Error; err != nil {
+		return err
+	}
+	if depth == 0 && job.MaxDepth != 0 {
+		if err := m.db.Model(job).Update("max_depth", 0).Error; err != nil {
+			return err
+		}
+		job.MaxDepth = 0
+	}
+	return nil
+}
+
+func uniqueStrings(list []string) []string {
+	seen := make(map[string]bool, len(list))
+	out := make([]string, 0, len(list))
+	for _, s := range list {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func nilIfEmpty(s *models.JobSettings) *models.JobSettings {
@@ -474,6 +566,7 @@ func (m *Manager) DuplicateJob(jobID string) (*models.CrawlJob, error) {
 		}
 	}
 	newJob := &models.CrawlJob{
+		Kind:       src.Kind,
 		TargetURL:  src.TargetURL,
 		Domain:     src.Domain,
 		SeedURLs:   append(models.StringSlice(nil), src.SeedURLs...),
@@ -487,7 +580,7 @@ func (m *Manager) DuplicateJob(jobID string) (*models.CrawlJob, error) {
 		Webhook:    src.Webhook,
 		ScheduleID: src.ScheduleID,
 	}
-	if err := m.db.Create(newJob).Error; err != nil {
+	if err := m.createJob(newJob); err != nil {
 		return nil, err
 	}
 	log.Printf("[JobManager] Duplicated job %s → %s", src.ID, newJob.ID)

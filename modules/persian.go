@@ -210,8 +210,57 @@ func isASCIILetter(s string, i int) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
+// multiplierAt returns the multiplier word ("میلیون", "k", …) that s starts
+// with and its byte length, or 1 and 0.
+func multiplierAt(s string) (float64, int) {
+	for _, m := range priceMultipliers {
+		if !strings.HasPrefix(s, m.word) {
+			continue
+		}
+		if m.word[0] < utf8.RuneSelf && isASCIILetter(s, len(m.word)) {
+			continue
+		}
+		return m.mult, len(m.word)
+	}
+	return 1, 0
+}
+
+// rangeConnectors join the two ends of a range: "۲۵ تا ۳۰", "25 - 30", "25 to 30".
+var rangeConnectors = []string{"تا", "الی", "إلى", "to", "-", "–", "—", "~"}
+
+// rangeEnd recognises the rest of a range after its first number: a
+// connector, a second number and the multiplier written once for both, as
+// in "۲۵ تا ۳۰ میلیون". It returns that multiplier and the byte length
+// consumed from s, or 0 when s does not continue a range with a multiplier.
+func rangeEnd(s string) (float64, int) {
+	rest := strings.TrimLeft(s, " \u200c")
+	matched := false
+	for _, c := range rangeConnectors {
+		if strings.HasPrefix(rest, c) && (c[0] >= utf8.RuneSelf || !isASCIILetter(c, 0) || !isASCIILetter(rest, len(c))) {
+			rest = strings.TrimLeft(rest[len(c):], " \u200c")
+			matched = true
+			break
+		}
+	}
+	if !matched || rest == "" || !isASCIIDigit(rest[0]) {
+		return 0, 0
+	}
+	_, _, end, ok := findNumber(rest)
+	if !ok {
+		return 0, 0
+	}
+	after := strings.TrimLeft(rest[end:], " \u200c")
+	mult, n := multiplierAt(after)
+	if n == 0 {
+		return 0, 0
+	}
+	return mult, len(s) - len(after) + n
+}
+
 // ParsePrice extracts a price from text such as "۱۲۵,۰۰۰ تومان", "1.2 میلیون تومان",
 // "۲۵ هزار تومان", "120,000 ریال", "$12.99", "12.99 €", "رایگان" (free → 0).
+// For a range ("از ۲۵ تا ۳۰ میلیون تومان") it returns the lower end, with
+// the multiplier written once after the upper end applied to it too.
 func ParsePrice(s string) (Price, bool) {
 	raw := strings.TrimSpace(s)
 	t := strings.ToLower(NormalizePersian(ToLatinDigits(raw)))
@@ -225,16 +274,12 @@ func ParsePrice(s string) (Price, bool) {
 	}
 
 	rest := strings.TrimLeft(t[end:], " \u200c")
-	for _, m := range priceMultipliers {
-		if !strings.HasPrefix(rest, m.word) {
-			continue
-		}
-		if m.word[0] < utf8.RuneSelf && isASCIILetter(rest, len(m.word)) {
-			continue
-		}
-		val *= m.mult
-		end = len(t) - len(rest) + len(m.word)
-		break
+	if mult, n := multiplierAt(rest); n > 0 {
+		val *= mult
+		end = len(t) - len(rest) + n
+	} else if mult, n := rangeEnd(t[end:]); n > 0 {
+		val *= mult
+		end += n
 	}
 
 	currency := ""

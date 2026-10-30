@@ -5,99 +5,452 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="/favicon.ico" sizes="any">
     <link rel="icon" href="/static/favicon-32.png" type="image/png">
-    <title>{{.schedule.Name}} - Schedules - Mole</title>
+    <title>{{if .isNew}}New schedule{{else}}{{.schedule.Name}}{{end}} - Schedules - Mole</title>
     <script src="/static/js/tailwind.js"></script>
+    <style>
+        .tab-active { border-bottom: 2px solid #4f46e5; color: #4f46e5; }
+        .switch { position: relative; display: inline-flex; flex-shrink: 0; width: 2.5rem; height: 1.375rem; }
+        .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+        .switch span { width: 100%; height: 100%; border-radius: 9999px; background: #d1d5db; transition: background .15s; pointer-events: none; }
+        .switch span::after { content: ""; position: absolute; top: .1875rem; left: .1875rem; width: 1rem; height: 1rem; border-radius: 9999px; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.2); transition: transform .15s; }
+        .switch input:checked + span { background: #4f46e5; }
+        .switch input:checked + span::after { transform: translateX(1.125rem); }
+        .switch input:focus-visible + span { box-shadow: 0 0 0 2px #fff, 0 0 0 4px #6366f1; }
+    </style>
+    {{template "settingsStyles"}}
 </head>
 <body class="bg-gray-100 min-h-screen">
     {{template "nav" .}}
     {{template "statusStyles"}}
+    <script src="/static/js/settings-form.js"></script>
 
     <div class="max-w-7xl mx-auto px-4 py-8">
         <a href="/schedules" class="text-sm text-indigo-600 hover:underline">← All schedules</a>
+
+        {{if .isNew}}
+        <div class="mt-3 mb-6">
+            <h1 class="text-2xl font-bold text-gray-800">New schedule</h1>
+            <p class="text-sm text-gray-500 mt-1">A schedule runs the same crawl again and again, for example every morning, and compares each run with the previous one so you see what is new, changed or gone.</p>
+            {{with .sourceJob}}
+            <div class="mt-4 rounded-lg border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-900">
+                Prefilled from the crawl <a href="/jobs/{{.ID}}" class="font-medium underline">{{.TargetURL}}</a>: its URLs and every setting are copied. Choose when it should run, then create the schedule. The crawl itself is not changed.
+            </div>
+            {{end}}
+        </div>
+        {{else}}
         <div class="bg-white rounded-lg shadow p-6 mt-3 mb-6">
             <div class="flex flex-wrap items-start justify-between gap-4">
                 <div class="min-w-0">
-                    <h1 class="text-2xl font-bold text-gray-800">{{.schedule.Name}}</h1>
-                    <p class="text-sm text-gray-500 mt-1 break-all">{{.schedule.Template.TargetURL}}</p>
+                    <h1 class="text-2xl font-bold text-gray-800 break-words">{{.schedule.Name}}</h1>
+                    <p class="text-sm text-gray-500 mt-1 break-all">{{if eq .schedule.Template.Kind "batch"}}Checks {{add (len .schedule.Template.SeedURLs) 1}} URLs · {{end}}{{.schedule.Template.TargetURL}}</p>
                     <div class="flex flex-wrap gap-2 mt-3 text-xs">
                         <span class="px-2 py-0.5 rounded {{if .schedule.Enabled}}bg-green-100 text-green-800{{else}}bg-gray-100 text-gray-600{{end}}">{{if .schedule.Enabled}}enabled{{else}}disabled{{end}}</span>
-                        <span class="px-2 py-0.5 rounded bg-gray-100 text-gray-700"><code>{{.schedule.Cron}}</code> · {{.schedule.Timezone}}</span>
-                        {{if .schedule.Enabled}}<span class="px-2 py-0.5 rounded bg-indigo-50 text-indigo-700">next run {{until .schedule.NextRunAt}}</span>{{end}}
-                        {{if .schedule.ChangeDetection}}<span class="px-2 py-0.5 rounded bg-amber-50 text-amber-700">Δ change detection</span>{{end}}
+                        <span class="px-2 py-0.5 rounded bg-gray-100 text-gray-700" title="cron: {{.schedule.Cron}}">🕑 {{with describeCron .schedule.Cron}}{{.}}{{else}}<code>{{.schedule.Cron}}</code>{{end}} · {{.schedule.Timezone}}</span>
+                        {{if .schedule.ChangeDetection}}<span class="px-2 py-0.5 rounded bg-amber-50 text-amber-700">Δ compares runs</span>{{end}}
                         {{if .schedule.OwnerRef}}<span class="px-2 py-0.5 rounded bg-gray-100 text-gray-600">👤 {{.schedule.OwnerRef}}</span>{{end}}
                         <span class="px-2 py-0.5 rounded bg-gray-100 text-gray-600">{{.schedule.RunCount}} runs</span>
                     </div>
+                    {{if .upcoming}}<p class="text-xs text-gray-500 mt-3">Next runs: {{range $i, $t := .upcoming}}{{if $i}} · {{end}}<span class="text-gray-700">{{$t.Format "Mon 2 Jan 15:04"}}</span>{{end}} <span class="text-gray-400">({{.schedule.Timezone}})</span></p>{{end}}
                 </div>
                 <div class="flex flex-wrap gap-2">
                     <button onclick="runNow()" class="bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700 text-sm">▶ Run now</button>
-                    <button onclick="toggle()" class="bg-gray-600 text-white py-2 px-4 rounded-md hover:bg-gray-700 text-sm">{{if .schedule.Enabled}}Disable{{else}}Enable{{end}}</button>
-                    <button onclick="removeSchedule()" class="border border-red-300 text-red-600 py-2 px-3 rounded-md hover:bg-red-50 text-sm">Delete</button>
+                    <button onclick="toggleEnabled()" class="bg-gray-600 text-white py-2 px-4 rounded-md hover:bg-gray-700 text-sm">{{if .schedule.Enabled}}⏸ Disable{{else}}▶ Enable{{end}}</button>
+                    <button onclick="removeSchedule()" class="border border-red-300 text-red-600 py-2 px-3 rounded-md hover:bg-red-50 text-sm" title="Delete this schedule (its crawls are kept)">🗑</button>
                 </div>
             </div>
         </div>
+        {{end}}
 
-        <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
-            <div class="lg:col-span-3 bg-white rounded-lg shadow">
-                <div class="px-6 py-4 border-b border-gray-200"><h2 class="font-semibold text-gray-800">Runs</h2></div>
+        <div class="bg-white rounded-lg shadow">
+            {{if not .isNew}}
+            <div class="border-b border-gray-200">
+                <nav class="flex gap-8 px-6">
+                    <button onclick="showTab('runs')" class="tab-btn py-4 text-sm font-medium" data-tab="runs">Runs ({{len .runs}})</button>
+                    <button onclick="showTab('settings')" class="tab-btn py-4 text-sm font-medium" data-tab="settings">⚙ Settings</button>
+                </nav>
+            </div>
+
+            <div id="tab-runs" class="tab-content">
                 <div class="overflow-x-auto">
                     <table class="w-full">
                         <thead class="bg-gray-50"><tr>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Started</th>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Pages</th>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Changes</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Pages</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Changes since the previous run</th>
                         </tr></thead>
                         <tbody class="divide-y divide-gray-100">
                             {{range .runs}}
                             <tr class="hover:bg-gray-50">
-                                <td class="px-4 py-3 text-sm"><a href="/jobs/{{.Job.ID}}" class="text-indigo-600 hover:underline">{{.Job.CreatedAt.Format "Jan 02 15:04"}}</a></td>
-                                <td class="px-4 py-3">{{template "statusBadge" .Job.Status}}</td>
-                                <td class="px-4 py-3 text-sm text-gray-600">{{.Job.CrawledURLs}}</td>
-                                <td class="px-4 py-3 text-sm">
+                                <td class="px-6 py-3 text-sm"><a href="/jobs/{{.Job.ID}}" class="text-indigo-600 hover:underline">{{.Job.CreatedAt.Format "Mon 2 Jan 15:04"}}</a></td>
+                                <td class="px-6 py-3">{{template "statusBadge" .Job.Status}}</td>
+                                <td class="px-6 py-3 text-sm text-gray-600">{{.Job.CrawledURLs}}</td>
+                                <td class="px-6 py-3 text-sm">
                                     {{$n := index .Changes "new"}}{{$c := index .Changes "changed"}}{{$r := index .Changes "removed"}}
-                                    {{if or $n $c $r}}<a href="/jobs/{{.Job.ID}}#changes" class="inline-flex gap-2"><span class="text-green-700">+{{$n}} new</span><span class="text-amber-700">~{{$c}} changed</span><span class="text-red-700">−{{$r}} removed</span></a>{{else}}<span class="text-gray-400">—</span>{{end}}
+                                    {{if or $n $c $r}}<a href="/jobs/{{.Job.ID}}#changes" class="inline-flex gap-3"><span class="text-green-700">+{{$n}} new</span><span class="text-amber-700">~{{$c}} changed</span><span class="text-red-700">−{{$r}} removed</span></a>{{else}}<span class="text-gray-400">—</span>{{end}}
                                 </td>
                             </tr>
                             {{else}}
-                            <tr><td colspan="4" class="px-4 py-10 text-center text-gray-500">No runs yet. Press "Run now" to start the first one.</td></tr>
+                            <tr><td colspan="4" class="px-6 py-14 text-center text-gray-500">
+                                <p>No runs yet.</p>
+                                <p class="text-sm mt-1">{{if .schedule.Enabled}}The first one starts {{until .schedule.NextRunAt}}, or press "Run now".{{else}}The schedule is disabled; press "Run now" or enable it.{{end}}</p>
+                            </td></tr>
                             {{end}}
                         </tbody>
                     </table>
                 </div>
             </div>
+            {{end}}
 
-            <form class="lg:col-span-2 bg-white rounded-lg shadow p-6" onsubmit="save(event)">
-                <h2 class="font-semibold text-gray-800 mb-4">Edit schedule</h2>
-                <div id="schedule-form"></div>
-                <div class="flex justify-end pt-6"><button type="submit" id="save-btn" class="px-6 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm font-medium">Save changes</button></div>
-            </form>
+            <div id="tab-settings" class="tab-content p-6{{if not .isNew}} hidden{{end}}">
+                <p class="text-sm text-gray-500 mb-6">Every run creates a crawl with these settings. Anything left on <b>Default</b> follows the engine's <code class="bg-gray-100 px-1 rounded">config.yaml</code>; the default is shown next to each option.{{if not .isNew}} Changes apply from the next run.{{end}}</p>
+                <div id="settings-alert" class="hidden mb-4 p-3 rounded-md text-sm"></div>
+
+                <div class="lg:grid lg:grid-cols-[13rem_1fr] lg:gap-8">
+                    <aside class="hidden lg:block">
+                        <nav class="sticky top-4 space-y-0.5 text-sm" id="settings-index">
+                            <a href="#sec-schedule" class="set-nav font-medium">🗓 Schedule</a>
+                            {{template "settingsNav"}}
+                        </nav>
+                    </aside>
+
+                    <form id="settings-form" data-form-mode="schedule" onsubmit="saveSchedule(event)" class="min-w-0 space-y-6" novalidate>
+                        <fieldset class="contents">
+
+                        <section id="sec-schedule" class="set-card">
+                            <header class="set-head"><h4>🗓 Schedule</h4><p>What each run does, and when.</p></header>
+                            <div class="set-body space-y-6">
+                                <div>
+                                    <label class="set-label" for="sch-name">Name</label>
+                                    <input type="text" id="sch-name" class="set-input" placeholder="Phone prices on shop.ir" dir="auto">
+                                    <p class="set-hint">Shown in the list and in notifications. Empty = the start URL.</p>
+                                </div>
+
+                                <div>
+                                    <label class="set-label">Each run</label>
+                                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                        <label class="fetch-opt"><input type="radio" name="sch-kind" value="crawl"><span><b>Crawls a site</b><small>Starts from a URL and follows links within the site, up to the link depth under Crawl scope.</small></span></label>
+                                        <label class="fetch-opt"><input type="radio" name="sch-kind" value="batch"><span><b>Checks a list of pages</b><small>Fetches exactly the URLs you list and follows no links. Best for price and stock monitoring.</small></span></label>
+                                    </div>
+                                </div>
+
+                                <div id="sch-crawl-urls">
+                                    <label class="set-label" for="sch-url">Start URL</label>
+                                    <input type="text" id="sch-url" class="set-input" placeholder="https://shop.ir/category/phones" dir="ltr">
+                                    <details class="mt-2" id="sch-seeds-wrap">
+                                        <summary class="text-xs text-indigo-600 cursor-pointer">More start URLs <span id="sch-seed-count" class="text-gray-400"></span></summary>
+                                        <textarea id="sch-seeds" rows="4" class="set-input font-mono mt-2" placeholder="https://shop.ir/category/laptops&#10;https://shop.ir/category/tablets" dir="ltr"></textarea>
+                                        <p class="set-hint">One per line. All of them are crawled in the same run.</p>
+                                    </details>
+                                    <p id="sch-vars-note" class="hidden set-hint"></p>
+                                </div>
+                                <div id="sch-batch-urls" class="hidden">
+                                    <div class="flex items-baseline justify-between gap-2">
+                                        <label class="set-label" for="sch-urls">Pages to check</label>
+                                        <span id="sch-url-count" class="text-xs text-gray-500"></span>
+                                    </div>
+                                    <textarea id="sch-urls" rows="8" class="set-input font-mono" placeholder="https://shop-a.ir/product/123&#10;https://shop-b.ir/p/galaxy-a55" dir="ltr"></textarea>
+                                    <p class="set-hint">One URL per line, up to 10,000. Duplicates are removed.</p>
+                                </div>
+
+                                <div class="border-t border-gray-100 pt-5">
+                                    <label class="set-label">Runs</label>
+                                    <div class="flex flex-wrap items-center gap-2 text-sm text-gray-700">
+                                        <select id="sch-freq" class="set-input bg-white w-auto">
+                                            <option value="hourly">Every hour</option>
+                                            <option value="hours">Every few hours</option>
+                                            <option value="daily">Every day</option>
+                                            <option value="weekly">Every week</option>
+                                            <option value="monthly">Every month</option>
+                                            <option value="custom">Custom (cron)</option>
+                                        </select>
+                                        <span data-freq="hours">every
+                                            <select id="sch-every" class="set-input bg-white w-auto inline-block"><option>2</option><option>3</option><option>4</option><option selected>6</option><option>8</option><option>12</option></select> hours</span>
+                                        <span data-freq="weekly">on
+                                            <select id="sch-weekday" class="set-input bg-white w-auto inline-block">
+                                                <option value="6">Saturday</option><option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option>
+                                                <option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option>
+                                            </select></span>
+                                        <span data-freq="monthly">on day
+                                            <select id="sch-day" class="set-input bg-white w-auto inline-block"></select></span>
+                                        <span data-freq="daily weekly monthly">at <input type="time" id="sch-time" value="03:00" class="set-input w-auto inline-block"></span>
+                                        <span data-freq="hourly hours">at minute <input type="number" id="sch-minute" min="0" max="59" value="0" class="set-input w-20 inline-block"></span>
+                                        <span data-freq="custom" class="flex-1 min-w-[12rem]"><input type="text" id="sch-cron" class="set-input font-mono" placeholder="0 3 * * *" dir="ltr"></span>
+                                    </div>
+                                    <p data-freq="custom" class="set-hint">Cron: minute hour day-of-month month weekday, e.g. <code>30 8 * * 6</code>. Also <code>@daily</code> or <code>@every 90m</code>.</p>
+                                    <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <div>
+                                            <label class="set-label" for="sch-tz">Time zone</label>
+                                            <select id="sch-tz" class="set-input bg-white"></select>
+                                        </div>
+                                    </div>
+                                    <div id="sch-preview" class="mt-3 rounded-md bg-gray-50 border border-gray-200 p-3 text-sm text-gray-700"></div>
+                                </div>
+
+                                <div class="border-t border-gray-100 pt-5 space-y-4">
+                                    <div class="set-row"><div><span class="set-label">Enabled</span><p class="set-hint">Runs on its own. A disabled schedule only runs when you press "Run now".</p></div><label class="switch"><input type="checkbox" id="sch-enabled"><span></span></label></div>
+                                    <div class="set-row"><div><span class="set-label">Compare each run with the previous one</span><p class="set-hint">Records new, changed and removed pages, and changed extracted and detected fields (prices, stock…). Needed for change alerts and <code>page.changed</code> webhooks.</p></div><label class="switch"><input type="checkbox" id="sch-changes"><span></span></label></div>
+                                    <div class="set-row"><div><span class="set-label">Skip a run while the previous one is still going</span><p class="set-hint">Avoids piling up runs when a crawl takes longer than the interval.</p></div><label class="switch"><input type="checkbox" id="sch-skip"><span></span></label></div>
+                                </div>
+                            </div>
+                        </section>
+
+                        {{template "settingsSections" .}}
+
+                        </fieldset>
+
+                        <div class="sticky bottom-0 z-10 -mx-1 px-1 py-3 bg-white border-t border-gray-200 flex flex-wrap items-center justify-between gap-3">
+                            <a href="{{if .isNew}}{{with .sourceJob}}/jobs/{{.ID}}{{else}}/schedules{{end}}{{else}}/schedules/{{.schedule.ID}}{{end}}" class="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50">Cancel</a>
+                            <div class="flex items-center gap-3 min-w-0">
+                                <span id="save-status" class="hidden text-sm"></span>
+                                <button type="submit" id="save-btn" class="flex-shrink-0 px-6 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 transition text-sm font-medium">{{if .isNew}}Create schedule{{else}}Save changes{{end}}</button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
         </div>
     </div>
 
     <script>
         var catalog = {{.catalogJSON}};
+        var defaultSettings = {{.defaultSettingsJSON}};
+        var pluginCatalog = {{.pluginsJSON}};
+        var settingsEditable = true;
         var schedule = {{.scheduleJSON}};
-        var editor = Mole.scheduleEditor(document.getElementById('schedule-form'), schedule, catalog);
-        var base = '/api/v1/schedules/' + schedule.id;
-        async function save(e) {
-            e.preventDefault();
-            var btn = document.getElementById('save-btn'); btn.disabled = true;
-            try { await Mole.api('PUT', base, editor.get()); Mole.toast('Saved'); setTimeout(function () { location.reload(); }, 600); }
-            catch (err) { Mole.toast(err.message, false); btn.disabled = false; }
+        var isNew = {{if .isNew}}true{{else}}false{{end}};
+        var tpl = schedule.template || {};
+
+        // The form edits the crawl each run creates. Older schedules kept the
+        // link depth on the template; it becomes the depth setting here.
+        var currentSettings = Object.assign({}, tpl.settings || {});
+        if (tpl.max_depth > 0 && currentSettings.max_depth === undefined) currentSettings.max_depth = tpl.max_depth;
+        var jobOptions = { priority: tpl.priority || 0, region: tpl.region || '', limits: tpl.limits || {}, webhook: tpl.webhook || {} };
+        var jobSeedCount = 1 + (tpl.seed_urls || []).length;
+
+        function showTab(t) {
+            document.querySelectorAll('.tab-content').forEach(function (e) { e.classList.toggle('hidden', e.id !== 'tab-' + t); });
+            document.querySelectorAll('.tab-btn').forEach(function (b) {
+                var on = b.getAttribute('data-tab') === t;
+                b.classList.toggle('tab-active', on); b.classList.toggle('text-gray-500', !on);
+            });
+            if (history.replaceState) history.replaceState(null, '', '#' + t);
         }
+
+        /* ── Kind and URLs ── */
+        function lines(id) {
+            return document.getElementById(id).value.split('\n').map(function (l) { return l.trim(); }).filter(Boolean);
+        }
+        function kind() { var r = document.querySelector('input[name="sch-kind"]:checked'); return r ? r.value : 'crawl'; }
+        function syncKind() {
+            var batch = kind() === 'batch';
+            document.getElementById('sch-crawl-urls').classList.toggle('hidden', batch);
+            document.getElementById('sch-batch-urls').classList.toggle('hidden', !batch);
+            document.getElementById('scope-batch-note').classList.toggle('hidden', !batch);
+            countURLs();
+        }
+        function countURLs() {
+            var n = lines('sch-urls').length, seeds = lines('sch-seeds').length;
+            document.getElementById('sch-url-count').textContent = n ? n.toLocaleString() + ' URL' + (n === 1 ? '' : 's') : '';
+            document.getElementById('sch-seed-count').textContent = seeds ? '(' + seeds + ')' : '';
+        }
+
+        /* ── When: frequency builder ↔ cron ── */
+        var timezones = ['Asia/Tehran', 'UTC', 'Asia/Dubai', 'Europe/Istanbul', 'Europe/London', 'Europe/Berlin', 'America/New_York'];
+        function pad(n) { return (n < 10 ? '0' : '') + n; }
+        function freq() { return document.getElementById('sch-freq').value; }
+        function syncFreq() {
+            var f = freq();
+            document.querySelectorAll('[data-freq]').forEach(function (el) {
+                el.classList.toggle('hidden', el.getAttribute('data-freq').split(' ').indexOf(f) < 0);
+            });
+            if (f === 'custom' && !document.getElementById('sch-cron').value.trim()) document.getElementById('sch-cron').value = buildCron('daily');
+            previewSoon();
+        }
+        function buildCron(f) {
+            f = f || freq();
+            var t = (document.getElementById('sch-time').value || '00:00').split(':');
+            var h = parseInt(t[0], 10) || 0, m = parseInt(t[1], 10) || 0;
+            var minute = Math.min(59, Math.max(0, parseInt(document.getElementById('sch-minute').value, 10) || 0));
+            switch (f) {
+                case 'hourly': return minute + ' * * * *';
+                case 'hours': return minute + ' */' + document.getElementById('sch-every').value + ' * * *';
+                case 'daily': return m + ' ' + h + ' * * *';
+                case 'weekly': return m + ' ' + h + ' * * ' + document.getElementById('sch-weekday').value;
+                case 'monthly': return m + ' ' + h + ' ' + document.getElementById('sch-day').value + ' * *';
+            }
+            return document.getElementById('sch-cron').value.trim();
+        }
+        // loadCron shows a cron expression in the builder when it has one of the
+        // builder's shapes, and as a custom expression otherwise.
+        function loadCron(expr) {
+            expr = (expr || '').trim().replace(/\s+/g, ' ');
+            var set = function (id, v) { document.getElementById(id).value = v; };
+            var f = 'custom', m;
+            if ((m = expr.match(/^(\d{1,2}) \* \* \* \*$/))) { f = 'hourly'; set('sch-minute', m[1]); }
+            else if ((m = expr.match(/^(\d{1,2}) \*\/(2|3|4|6|8|12) \* \* \*$/))) { f = 'hours'; set('sch-minute', m[1]); set('sch-every', m[2]); }
+            else if ((m = expr.match(/^(\d{1,2}) (\d{1,2}) \* \* \*$/))) { f = 'daily'; set('sch-time', pad(+m[2]) + ':' + pad(+m[1])); }
+            else if ((m = expr.match(/^(\d{1,2}) (\d{1,2}) \* \* ([0-7])$/))) { f = 'weekly'; set('sch-time', pad(+m[2]) + ':' + pad(+m[1])); set('sch-weekday', String(+m[3] % 7)); }
+            else if ((m = expr.match(/^(\d{1,2}) (\d{1,2}) ([1-9]|1\d|2[0-8]) \* \*$/))) { f = 'monthly'; set('sch-time', pad(+m[2]) + ':' + pad(+m[1])); set('sch-day', m[3]); }
+            if (f !== 'custom' && (+(m[1]) > 59 || (f !== 'hourly' && f !== 'hours' && +(m[2]) > 23))) f = 'custom';
+            set('sch-freq', f);
+            set('sch-cron', f === 'custom' ? expr : '');
+        }
+
+        var previewTimer = null, cronError = '';
+        function previewSoon() { clearTimeout(previewTimer); previewTimer = setTimeout(preview, 250); }
+        async function preview() {
+            var box = document.getElementById('sch-preview');
+            var expr = buildCron(), tz = document.getElementById('sch-tz').value;
+            if (!expr) { cronError = 'Enter a cron expression'; box.innerHTML = '<span class="text-red-600">' + cronError + '</span>'; return; }
+            try {
+                var d = (await Mole.api('GET', '/api/v1/cron/preview?count=3&cron=' + encodeURIComponent(expr) + '&timezone=' + encodeURIComponent(tz))).data;
+                cronError = '';
+                var fmt = new Intl.DateTimeFormat('en-GB', { timeZone: tz, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+                box.innerHTML = '<div><b>' + Mole.esc(d.description || 'Custom schedule') + '</b> <span class="text-gray-400 font-mono text-xs ml-1">' + Mole.esc(expr) + '</span></div>' +
+                    '<div class="text-xs text-gray-500 mt-1">Next runs: ' + d.next.map(function (t) { return Mole.esc(fmt.format(new Date(t))); }).join(' · ') + ' (' + Mole.esc(tz) + ')</div>';
+            } catch (err) {
+                cronError = err.message;
+                box.innerHTML = '<span class="text-red-600">' + Mole.esc(err.message) + '</span>';
+            }
+        }
+
+        /* ── Save ── */
+        function scheduleProblem() {
+            var add = function (id, msg) { markInvalid(document.getElementById(id), true); return msg; };
+            if (kind() === 'batch') {
+                var urls = lines('sch-urls');
+                if (!urls.length) return add('sch-urls', 'List at least one URL to check');
+                if (urls.length > 10000) return add('sch-urls', 'A batch may contain at most 10,000 URLs (' + urls.length.toLocaleString() + ' listed)');
+            } else if (!document.getElementById('sch-url').value.trim()) {
+                return add('sch-url', 'Enter the start URL');
+            }
+            if (cronError) return add(freq() === 'custom' ? 'sch-cron' : 'sch-freq', 'When: ' + cronError);
+            return '';
+        }
+        function highlightScheduleError(msg) {
+            var m = msg.toLowerCase(), id = null;
+            if (m.indexOf('cron') >= 0) id = freq() === 'custom' ? 'sch-cron' : 'sch-freq';
+            else if (m.indexOf('timezone') >= 0) id = 'sch-tz';
+            else if (m.indexOf('batch') >= 0) id = 'sch-urls';
+            else if (m.indexOf('url') >= 0 && m.indexOf('webhook') < 0) id = kind() === 'batch' ? 'sch-urls' : 'sch-url';
+            if (id) { markInvalid(document.getElementById(id), true); return true; }
+            return false;
+        }
+        function scheduleBody() {
+            var settings = buildPayload();
+            delete settings.change_detection; delete settings.compare_with_job_id; // set per schedule, see sec-schedule
+            var o = collectOptions();
+            var t = {
+                kind: kind(),
+                template_vars: tpl.template_vars,
+                priority: o.priority || undefined,
+                region: o.region || undefined,
+                settings: Object.keys(settings).length ? settings : undefined,
+                limits: Object.keys(o.limits).length ? o.limits : undefined,
+                webhook: o.webhook.url ? o.webhook : undefined
+            };
+            if (t.kind === 'batch') {
+                var urls = lines('sch-urls').filter(function (u, i, all) { return all.indexOf(u) === i; });
+                t.target_url = urls[0]; t.seed_urls = urls.slice(1);
+                delete t.template_vars;
+            } else {
+                t.target_url = document.getElementById('sch-url').value.trim();
+                t.seed_urls = lines('sch-seeds');
+            }
+            return {
+                name: document.getElementById('sch-name').value.trim(),
+                owner_ref: schedule.owner_ref || undefined,
+                cron: buildCron(),
+                timezone: document.getElementById('sch-tz').value,
+                enabled: document.getElementById('sch-enabled').checked,
+                change_detection: document.getElementById('sch-changes').checked,
+                skip_if_running: document.getElementById('sch-skip').checked,
+                source_job_id: schedule.source_job_id || undefined,
+                template: t
+            };
+        }
+        async function saveSchedule(e) {
+            e.preventDefault();
+            var problem = settingsFormProblem() || scheduleProblem();
+            if (problem) { showAlert(problem, false); return; }
+            var btn = document.getElementById('save-btn'), label = btn.textContent;
+            btn.disabled = true; btn.textContent = 'Saving…';
+            try {
+                if (isNew) {
+                    var res = await Mole.api('POST', '/api/v1/schedules', scheduleBody());
+                    location.href = '/schedules/' + res.data.id;
+                    return;
+                }
+                await Mole.api('PUT', '/api/v1/schedules/' + schedule.id, scheduleBody());
+                showAlert('Saved. Changes apply from the next run.', true);
+                setTimeout(function () { location.reload(); }, 800);
+            } catch (err) {
+                var msg = err.message.replace(/^invalid input: /, '');
+                showAlert((isNew ? 'Not created: ' : 'Not saved: ') + msg, false);
+                if (!highlightScheduleError(msg)) highlightServerError(msg);
+            }
+            btn.disabled = false; btn.textContent = label;
+        }
+
+        /* ── Actions on a saved schedule ── */
         async function runNow() {
-            try { var res = await Mole.api('POST', base + '/run'); location.href = '/jobs/' + res.data.id; }
+            try { var res = await Mole.api('POST', '/api/v1/schedules/' + schedule.id + '/run'); location.href = '/jobs/' + res.data.id; }
             catch (err) { Mole.toast(err.message, false); }
         }
-        async function toggle() {
-            try { await Mole.api('POST', base + '/' + (schedule.enabled ? 'disable' : 'enable')); location.reload(); }
+        async function toggleEnabled() {
+            try { await Mole.api('POST', '/api/v1/schedules/' + schedule.id + '/' + (schedule.enabled ? 'disable' : 'enable')); location.reload(); }
             catch (err) { Mole.toast(err.message, false); }
         }
         async function removeSchedule() {
-            if (!confirm('Delete this schedule? Crawls it already created are kept.')) return;
-            try { await Mole.api('DELETE', base); location.href = '/schedules'; }
+            if (!confirm('Delete this schedule? The crawls it already ran are kept.')) return;
+            try { await Mole.api('DELETE', '/api/v1/schedules/' + schedule.id); location.href = '/schedules'; }
             catch (err) { Mole.toast(err.message, false); }
         }
+
+        document.addEventListener('DOMContentLoaded', function () {
+            document.getElementById('sch-name').value = schedule.name || '';
+            var k = tpl.kind === 'batch' ? 'batch' : 'crawl';
+            document.querySelector('input[name="sch-kind"][value="' + k + '"]').checked = true;
+            if (k === 'batch') {
+                document.getElementById('sch-urls').value = [tpl.target_url].concat(tpl.seed_urls || []).filter(Boolean).join('\n');
+            } else {
+                document.getElementById('sch-url').value = tpl.target_url || '';
+                document.getElementById('sch-seeds').value = (tpl.seed_urls || []).join('\n');
+                document.getElementById('sch-seeds-wrap').open = (tpl.seed_urls || []).length > 0;
+            }
+            if (tpl.template_vars && Object.keys(tpl.template_vars).length) {
+                var note = document.getElementById('sch-vars-note');
+                note.textContent = 'URL variables: ' + Object.keys(tpl.template_vars).map(function (n) { return n + ' = ' + tpl.template_vars[n]; }).join(', ') + ' (set through the API; kept as they are).';
+                note.classList.remove('hidden');
+            }
+            var day = document.getElementById('sch-day');
+            for (var i = 1; i <= 28; i++) day.insertAdjacentHTML('beforeend', '<option value="' + i + '">' + i + '</option>');
+            var tz = schedule.timezone || 'Asia/Tehran', tzSel = document.getElementById('sch-tz');
+            (timezones.indexOf(tz) < 0 ? [tz].concat(timezones) : timezones).forEach(function (z) {
+                tzSel.insertAdjacentHTML('beforeend', '<option value="' + Mole.esc(z) + '">' + Mole.esc(z) + '</option>');
+            });
+            tzSel.value = tz;
+            loadCron(schedule.cron || '0 3 * * *');
+            document.getElementById('sch-enabled').checked = schedule.enabled !== false;
+            document.getElementById('sch-changes').checked = schedule.change_detection !== false;
+            document.getElementById('sch-skip').checked = schedule.skip_if_running !== false;
+
+            document.querySelectorAll('input[name="sch-kind"]').forEach(function (r) { r.addEventListener('change', syncKind); });
+            ['sch-urls', 'sch-seeds'].forEach(function (id) { document.getElementById(id).addEventListener('input', countURLs); });
+            document.getElementById('sch-freq').addEventListener('change', syncFreq);
+            ['sch-every', 'sch-weekday', 'sch-day', 'sch-time', 'sch-minute', 'sch-tz'].forEach(function (id) { document.getElementById(id).addEventListener('change', previewSoon); });
+            ['sch-cron', 'sch-minute', 'sch-time'].forEach(function (id) { document.getElementById(id).addEventListener('input', previewSoon); });
+
+            populateSettings();
+            syncKind();
+            syncFreq();
+            if (!isNew) {
+                var fromHash = function () { showTab(location.hash === '#settings' ? 'settings' : 'runs'); };
+                fromHash();
+                window.addEventListener('hashchange', fromHash);
+            }
+        });
     </script>
 </body>
 </html>

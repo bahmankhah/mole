@@ -117,6 +117,14 @@ func TestParsePrice(t *testing.T) {
 		{"رایگان", 0, "", true},
 		{"Free", 0, "", true},
 		{"ناموجود", 0, "", false},
+		// Ranges: the lower end, with the multiplier written once for both.
+		{"از ۲۵ تا ۳۰ میلیون تومان", 25e6, "IRT", true},
+		{"۲۵ الی ۳۰ میلیون تومان", 25e6, "IRT", true},
+		{"۱.۵-۲ میلیون تومان", 1.5e6, "IRT", true},
+		{"2 to 3k USD", 2000, "USD", true},
+		{"۲۰ هزار تا ۱ میلیون تومان", 20000, "IRT", true},
+		{"۵۰۰,۰۰۰ تا ۷۰۰,۰۰۰ تومان", 500000, "IRT", true},
+		{"۳ تا ۵ عدد", 3, "", true},
 	}
 	for _, tt := range tests {
 		got, ok := ParsePrice(tt.in)

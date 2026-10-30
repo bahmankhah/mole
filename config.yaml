@@ -133,6 +133,7 @@ worker:
   max_running_per_owner: 2     # fairness between tenants (owner_ref); 0 = unlimited
   lease_ttl: 60s               # a job whose worker stops renewing its lease is requeued
   poll_interval: 2s
+  # browser: false             # headless browser on this machine; unset = detect at start
 
 security:
   allow_private_networks: false   # true only for local use: lets crawls reach localhost/LAN (SSRF risk)
@@ -182,3 +183,29 @@ plugins:
   allow_in_api: false         # plugins run arbitrary Python; keep them off for API clients
   after_job_delay: 2m
   timeout: 60s
+
+documents:
+  max_pages: 500              # PDF pages converted per file (needs poppler-utils: pdftotext)
+  timeout: 60s                # per file
+
+cache:
+  enabled: true               # /v1/scrape with max_age can answer from earlier results
+  ttl: 168h                   # entries older than this are deleted
+  max_entry_bytes: 8388608    # larger (compressed) results are not cached
+
+search:
+  provider: ""                # "", searxng, brave or serper; empty disables /v1/search
+  base_url: ""                # searxng instance URL (optional endpoint override for brave/serper)
+  api_key: ""                 # brave / serper key (env MOLE_SEARCH_API_KEY)
+  proxy: ""                   # optional proxy for provider requests, e.g. socks5://de-proxy:1080
+  timeout: 15s
+  default_lang: ""            # e.g. fa
+  default_country: ""         # e.g. ir
+
+# Other machines joining this server as workers: README "Adding worker nodes".
+cluster:
+  advertise_url: ""           # URL nodes use to reach this server, e.g. https://mole.example.com
+  node_database_host: ""      # MySQL host as nodes see it (default database.host)
+  node_database_port: ""
+  node_s3_endpoint: ""        # S3 endpoint as nodes see it (default storage.s3.endpoint)
+  allow_local_storage: false  # nodes need shared storage (storage.driver: s3)

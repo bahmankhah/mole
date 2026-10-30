@@ -1,0 +1,391 @@
+{{/* The crawl settings form, shared by the job page (one crawl) and the
+schedule page (the crawl each run creates). The page wraps it in a
+<form data-form-mode="job|schedule">, includes /static/js/settings-form.js
+and defines the globals that script documents. */}}
+
+{{define "settingsStyles"}}
+<style>
+    .set-card { border: 1px solid #e5e7eb; border-radius: .5rem; scroll-margin-top: 1rem; }
+    .set-card + .set-card { margin-top: 1.5rem; } /* cards sit inside a display:contents fieldset, so the form's space-y does not reach them */
+    .set-head { background: #f9fafb; padding: .75rem 1rem; border-bottom: 1px solid #e5e7eb; border-radius: .5rem .5rem 0 0; }
+    .set-head h4 { font-size: .875rem; font-weight: 600; color: #374151; }
+    .set-head p { font-size: .75rem; color: #6b7280; margin-top: .125rem; }
+    .set-body { padding: 1rem; }
+    .set-label { display: block; font-size: .875rem; font-weight: 500; color: #374151; margin-bottom: .25rem; }
+    .set-sub { font-size: .75rem; font-weight: 400; color: #9ca3af; }
+    .set-hint { font-size: .75rem; color: #9ca3af; margin-top: .25rem; }
+    .set-input { width: 100%; padding: .5rem .75rem; border: 1px solid #d1d5db; border-radius: .375rem; font-size: .875rem; }
+    .set-input:focus { outline: none; box-shadow: 0 0 0 2px #6366f1; border-color: transparent; }
+    .set-input:disabled { background: #f3f4f6; color: #6b7280; }
+    .set-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    .set-row .set-label { margin-bottom: 0; }
+    .set-advanced summary { cursor: pointer; font-size: .875rem; font-weight: 500; color: #4f46e5; }
+    .set-nav { display: block; padding: .375rem .625rem; border-radius: .375rem; color: #4b5563; }
+    .set-nav:hover { background: #eef2ff; color: #3730a3; }
+    .tri { display: inline-flex; flex-shrink: 0; border: 1px solid #d1d5db; border-radius: .375rem; overflow: hidden; font-size: .75rem; }
+    .tri button { padding: .3rem .6rem; background: #fff; color: #4b5563; white-space: nowrap; }
+    .tri button + button { border-left: 1px solid #d1d5db; }
+    .tri button.on { background: #4f46e5; color: #fff; }
+    .tri button.on.tri-default { background: #e0e7ff; color: #3730a3; }
+    .tri button:disabled { cursor: not-allowed; opacity: .7; }
+    .fetch-opt { display: flex; gap: .5rem; align-items: flex-start; border: 1px solid #e5e7eb; border-radius: .5rem; padding: .75rem; cursor: pointer; transition: border-color .15s, background .15s; }
+    .fetch-opt:hover { border-color: #a5b4fc; }
+    .fetch-opt input { margin-top: .2rem; }
+    .fetch-opt b { display: block; font-size: .875rem; color: #1f2937; }
+    .fetch-opt small { display: block; font-size: .75rem; color: #6b7280; margin-top: .125rem; line-height: 1.3; }
+    .fetch-opt:has(input:checked) { border-color: #6366f1; background: #eef2ff; }
+    .field-error { outline: 2px solid #ef4444 !important; outline-offset: 1px; box-shadow: 0 0 0 4px rgba(239,68,68,.2) !important; border-radius: .375rem; }
+    [data-form-mode="schedule"] .job-only { display: none; }
+    .schedule-only { display: none; }
+    [data-form-mode="schedule"] .schedule-only { display: block; }
+</style>
+{{end}}
+
+{{define "settingsNav"}}
+    <a href="#sec-fetch" class="set-nav">🌐 Fetching</a>
+    <a href="#sec-scope" class="set-nav">🧭 Crawl scope</a>
+    <a href="#sec-speed" class="set-nav">⏱ Speed &amp; politeness</a>
+    <a href="#sec-output" class="set-nav">📦 Output &amp; extraction</a>
+    <a href="#sec-network" class="set-nav">🛡 Network &amp; anti-bot</a>
+    <a href="#sec-request" class="set-nav">✉️ HTTP request</a>
+    <a href="#sec-monitor" class="set-nav">🔔 Monitoring &amp; webhook</a>
+    <a href="#sec-queue" class="set-nav">⛔ Queue &amp; limits</a>
+    <a href="#sec-search" class="set-nav">🔎 Search &amp; matching</a>
+    <a href="#sec-plugins" class="set-nav">🧩 Plugins</a>
+{{end}}
+
+{{define "settingsSections"}}
+<!-- Fetching -->
+<section id="sec-fetch" class="set-card">
+    <header class="set-head"><h4>🌐 Fetching</h4><p>How each page is downloaded.</p></header>
+    <div class="set-body space-y-5">
+        <div>
+            <label class="set-label">How pages are fetched</label>
+            <div id="set-fetch-mode" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2">
+                <label class="fetch-opt"><input type="radio" name="fetch-mode" value=""><span><b>Default</b><small id="fetch-default-label"></small></span></label>
+                <label class="fetch-opt"><input type="radio" name="fetch-mode" value="http"><span><b>Fast HTTP</b><small>No JavaScript. Fastest and cheapest; uses a real browser TLS fingerprint.</small></span></label>
+                <label class="fetch-opt"><input type="radio" name="fetch-mode" value="fallback"><span><b>HTTP, browser if blocked</b><small>HTTP first; pages that return a CDN/WAF challenge (ArvanCloud, Cloudflare…) or an empty JS shell are re-fetched in the browser.</small></span></label>
+                <label class="fetch-opt"><input type="radio" name="fetch-mode" value="browser"><span><b>Headless browser</b><small>Every page is rendered in Chromium. Needed for JavaScript apps; slowest.</small></span></label>
+            </div>
+            <p class="set-hint mt-2">POST seed requests are always sent over HTTP.</p>
+        </div>
+
+        <div id="browser-options" class="rounded-lg border border-indigo-100 bg-indigo-50/40 p-4 space-y-4">
+            <div class="flex items-center justify-between gap-3">
+                <h5 class="text-sm font-semibold text-gray-700">Browser options</h5>
+                <span id="browser-options-note" class="text-xs text-gray-500"></span>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label class="set-label">Wait for selector</label>
+                    <input type="text" id="set-headless-selector" placeholder="#content, .results-list" class="set-input font-mono">
+                    <p class="set-hint">Capture the page once this element appears. Default: <span class="def-val" data-key="headless_wait_selector"></span></p>
+                </div>
+                <div>
+                    <label class="set-label">Extra render wait (seconds)</label>
+                    <input type="number" id="set-render-wait" min="0" max="60" class="set-input">
+                    <p class="set-hint">After the network goes idle. Default: <span class="def-val" data-key="headless_render_wait"></span>s</p>
+                </div>
+            </div>
+            <div>
+                <label class="set-label">Don't load</label>
+                <div id="set-block-resources"></div>
+                <p class="set-hint">Skipping images, fonts and media makes rendering much faster.</p>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="set-row"><div><span class="set-label">Screenshot each page</span><p class="set-hint">Stored with the page (Pages &amp; Data tab, API).</p></div><div class="tri" id="set-screenshot" data-default="false"></div></div>
+                <div class="set-row"><div><span class="set-label">Full-page screenshots</span><p class="set-hint">Instead of the visible viewport.</p></div><div class="tri" id="set-full-page" data-default="false"></div></div>
+            </div>
+            <div>
+                <label class="set-label">Page actions</label>
+                <p class="set-hint mb-2">Run after each page renders, e.g. click "load more", scroll for lazy content, accept cookies. Results are saved with the page.</p>
+                <div id="set-actions"></div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="set-label">Request timeout (seconds)</label>
+                <input type="number" id="set-request-timeout" min="1" max="300" class="set-input">
+                <p class="set-hint">Default: <span class="def-val" data-key="request_timeout_seconds"></span></p>
+            </div>
+            <div>
+                <label class="set-label">Retries for failed pages</label>
+                <input type="number" id="set-max-retries" min="0" max="10" class="set-input">
+                <p class="set-hint">Timeouts, 429, 502 and 503 are retried. Default: <span class="def-val" data-key="max_retries"></span></p>
+            </div>
+            <div class="md:col-span-2">
+                <label class="set-label">User-Agent</label>
+                <input type="text" id="set-user-agent" class="set-input">
+                <p class="set-hint truncate">Default: <span class="def-val" data-key="user_agent"></span></p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Crawl scope -->
+<section id="sec-scope" class="set-card">
+    <header class="set-head"><h4>🧭 Crawl scope</h4><p>Which pages are visited. Links are followed only within the site's domain.</p></header>
+    <div class="set-body space-y-5">
+        <p id="scope-batch-note" class="hidden rounded-md bg-amber-50 border border-amber-200 text-amber-800 text-xs p-3">This is a batch: it fetches exactly the listed URLs and follows no links, so link depth and the URL patterns below do not apply.</p>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="set-label">Max link depth</label>
+                <input type="number" id="set-max-depth" min="0" max="100" class="set-input">
+                <p class="set-hint">0 = only the start URL(s). Default: <span class="def-val" data-key="max_depth"></span></p>
+            </div>
+            <div>
+                <label class="set-label">Max pages</label>
+                <input type="number" id="set-max-pages" min="0" class="set-input">
+                <p class="set-hint">0 = unlimited. Default: <span class="def-val" data-key="max_pages"></span></p>
+            </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="set-label">Only crawl URLs matching <span class="set-sub">(regex, one per line)</span></label>
+                <textarea id="set-url-include" rows="3" placeholder="/blog/.*&#10;/products/[0-9]+" class="set-input font-mono"></textarea>
+            </div>
+            <div>
+                <label class="set-label">Skip URLs matching <span class="set-sub">(regex, one per line)</span></label>
+                <textarea id="set-url-exclude" rows="3" placeholder="/admin/.*&#10;\?sort=" class="set-input font-mono"></textarea>
+            </div>
+        </div>
+        <p class="set-hint -mt-3">When "only crawl" patterns are set, the skip patterns are ignored. Start URLs are always fetched.</p>
+        <div class="set-row"><div><span class="set-label">Respect robots.txt</span><p class="set-hint">Skip paths the site disallows.</p></div><div class="tri" id="set-respect-robots" data-default-key="respect_robots_txt"></div></div>
+        <div class="set-row"><div><span class="set-label">Skip duplicate content</span><p class="set-hint">Pages whose body is identical to an earlier page are not processed again.</p></div><div class="tri" id="set-skip-content-dup" data-default-key="skip_content_duplicates"></div></div>
+        <details class="set-advanced">
+            <summary>Advanced: URL cleaning and file types</summary>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
+                <div>
+                    <label class="set-label">Extra query parameters to strip <span class="set-sub">(one per line)</span></label>
+                    <textarea id="set-extra-tracking" rows="3" placeholder="session_id&#10;token" class="set-input font-mono"></textarea>
+                    <p class="set-hint">utm_*, fbclid, gclid and other common tracking parameters are always removed before de-duplication.</p>
+                </div>
+                <div>
+                    <label class="set-label">File extensions to skip <span class="set-sub">(one per line)</span></label>
+                    <textarea id="set-skip-extensions" rows="3" placeholder=".pdf&#10;.zip" class="set-input font-mono"></textarea>
+                    <p class="set-hint">Empty = the default list (<span id="skip-ext-count"></span> extensions: images, documents, archives, media, fonts…).</p>
+                </div>
+            </div>
+        </details>
+    </div>
+</section>
+
+<!-- Speed -->
+<section id="sec-speed" class="set-card">
+    <header class="set-head"><h4>⏱ Speed &amp; politeness</h4><p>Faster crawls are more likely to be rate-limited or blocked.</p></header>
+    <div class="set-body grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div>
+            <label class="set-label">Parallel requests</label>
+            <input type="number" id="set-max-concurrent" min="1" max="64" class="set-input">
+            <p class="set-hint">Workers for this job. Default: <span class="def-val" data-key="max_concurrent_requests"></span></p>
+        </div>
+        <div>
+            <label class="set-label">Delay between requests (ms)</label>
+            <input type="number" id="set-politeness-delay" min="0" max="60000" class="set-input">
+            <p class="set-hint">Per worker, randomized ±1s. Default: <span class="def-val" data-key="politeness_delay_ms"></span>ms</p>
+        </div>
+        <div>
+            <label class="set-label">Max requests/sec per site</label>
+            <input type="number" id="set-host-rate" min="0" step="0.1" class="set-input">
+            <p class="set-hint">Shared by all jobs. A job can only be slower than the engine limit (<span class="def-val" data-key="host_rate_limit"></span>).</p>
+        </div>
+    </div>
+</section>
+
+<!-- Output -->
+<section id="sec-output" class="set-card">
+    <header class="set-head"><h4>📦 Output &amp; extraction</h4><p>What is produced for each page: shown on the Pages &amp; Data tab, in exports and in the API.</p></header>
+    <div class="set-body space-y-5">
+        <div>
+            <label class="set-label">Per-page outputs</label>
+            <p class="set-hint mt-0 mb-3">Choose what each page produces. Nothing selected uses the engine default.</p>
+            <div id="set-formats"></div>
+        </div>
+        <div class="set-row"><div><span class="set-label">Main content only</span><p class="set-hint">Remove navigation, headers, footers and ads before converting.</p></div><div class="tri" id="set-only-main" data-default="false"></div></div>
+        <div class="set-row"><div><span class="set-label">Store raw response body</span><p class="set-hint">Keeps the fetched HTML/JSON in the database (or object storage). Can grow the database a lot.</p></div><div class="tri" id="set-save-text-content" data-default-key="save_text_content"></div></div>
+        <div class="border-t border-gray-100 pt-5">
+            <div class="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+                <label class="set-label mb-0">Structured extraction</label>
+                <span class="set-hint">CSS selectors or <code>xpath:</code> expressions</span>
+            </div>
+            <p class="set-hint mb-2"><b>price</b>, <b>number</b> and <b>date</b> understand Persian/Arabic digits, «هزار/میلیون», تومان/ریال and Jalali dates. Use <b>list</b> for repeated items (products in a category, table rows).</p>
+            <div id="set-extract-fields"></div>
+            <label class="set-label mt-4">Extract only on URLs matching <span class="set-sub">(regex, optional)</span></label>
+            <input type="text" id="set-extract-match" placeholder="/product/" class="set-input font-mono">
+        </div>
+        <div class="border-t border-gray-100 pt-5">
+            <label class="set-label">LLM extraction <span id="llm-state" class="text-xs font-normal"></span></label>
+            <textarea id="set-llm-prompt" rows="2" placeholder="Extract product name, price in Toman, and whether it is in stock" class="set-input"></textarea>
+            <label class="set-label mt-3">Expected output <span class="set-sub">(JSON schema or example object, optional)</span></label>
+            <textarea id="set-llm-schema" rows="3" placeholder='{"name": "string", "price": "number", "in_stock": "boolean"}' class="set-input font-mono"></textarea>
+            <p class="set-hint">Runs on each page's Markdown with the model configured under <code>llm:</code>. Tokens count toward the job's LLM limit.</p>
+        </div>
+    </div>
+</section>
+
+<!-- Network -->
+<section id="sec-network" class="set-card">
+    <header class="set-head"><h4>🛡 Network &amp; anti-bot</h4><p>Where requests come from and how they look to the site.</p></header>
+    <div class="set-body space-y-5">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="set-label">Proxy pool</label>
+                <select id="set-proxy-pool" class="set-input bg-white"></select>
+                <p class="set-hint">"Automatic" follows <code>network.proxy_routes</code> (e.g. <code>.ir</code> → Iranian exit IPs).</p>
+            </div>
+            <div>
+                <label class="set-label">TLS fingerprint</label>
+                <select id="set-fingerprint" class="set-input bg-white"></select>
+                <p class="set-hint">The TLS handshake (JA3/JA4) HTTP fetches present. Default: <span class="def-val" data-key="tls_fingerprint"></span></p>
+            </div>
+        </div>
+        <div>
+            <label class="set-label">Job-specific proxies <span class="set-sub">(one per line; override the pool)</span></label>
+            <textarea id="set-proxies" rows="2" placeholder="http://user:pass@1.2.3.4:8080&#10;socks5://5.6.7.8:1080" class="set-input font-mono"></textarea>
+        </div>
+        <div class="set-row"><div><span class="set-label">Sticky exit IP</span><p class="set-hint">Keep one proxy per site for the whole job (needed for logins and some WAFs).</p></div><div class="tri" id="set-sticky-proxy" data-default="false"></div></div>
+    </div>
+</section>
+
+<!-- HTTP request -->
+<section id="sec-request" class="set-card">
+    <header class="set-head"><h4>✉️ HTTP request</h4><p>Method and body apply to the start URL(s); extra headers are sent with every request.</p></header>
+    <div class="set-body space-y-5">
+        <div>
+            <label class="set-label">Method</label>
+            <div class="inline-flex rounded-md border border-gray-300 overflow-hidden">
+                <button type="button" id="method-get" onclick="setRequestMethod('GET')" class="px-4 py-2 text-sm font-medium focus:outline-none">GET</button>
+                <button type="button" id="method-post" onclick="setRequestMethod('POST')" class="px-4 py-2 text-sm font-medium border-l border-gray-300 focus:outline-none">POST</button>
+            </div>
+            <input type="hidden" id="set-request-method" value="GET">
+            <p class="set-hint">Links found in responses are always fetched with GET. For API-style POST crawls set max link depth to 0.</p>
+        </div>
+        <div>
+            <div class="flex items-center justify-between mb-1">
+                <label class="set-label mb-0">Headers</label>
+                {{if .settingsEditable}}<button type="button" onclick="addHeaderRow()" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">+ Add header</button>{{end}}
+            </div>
+            <p class="set-hint mb-2">Override the crawler's default headers when the same name is used (including User-Agent).</p>
+            <div id="header-rows" class="space-y-2"></div>
+        </div>
+        <div id="post-body-section" class="hidden space-y-3">
+            <div>
+                <label class="set-label">Request body</label>
+                <textarea id="set-request-body" rows="6" placeholder='{"query": "{{"{{Q}}"}}", "page": "{{"{{PAGE}}"}}"}' class="set-input font-mono" oninput="onBodyInput()"></textarea>
+                <p class="set-hint">JSON, form data or raw text. Use <code class="bg-gray-100 px-1 rounded">&#123;&#123;VAR&#125;&#125;</code> for template variables. Content-Type is inferred unless you set a header.</p>
+            </div>
+            <div id="body-tpl-section" class="hidden">
+                <div class="border border-indigo-200 bg-indigo-50 rounded-lg p-4 space-y-3">
+                    <div class="flex items-center justify-between">
+                        <h5 class="text-sm font-semibold text-indigo-700">Payload variables</h5>
+                        <span id="body-tpl-seed-count" class="text-xs text-indigo-500 font-mono"></span>
+                    </div>
+                    <p class="text-xs text-gray-600">Commas for lists, dash for ranges (e.g. <code class="bg-white px-1 rounded">1,hamster,5-10</code>). Each start URL is requested with every expanded payload.</p>
+                    <div id="body-tpl-vars" class="space-y-2"></div>
+                    <div id="body-tpl-preview-wrap" class="hidden">
+                        <button type="button" onclick="toggleBodyPreview()" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Preview expanded payloads ▾</button>
+                        <div id="body-tpl-preview" class="hidden mt-2 max-h-40 overflow-y-auto bg-white border rounded p-2 text-xs text-gray-600 font-mono space-y-0.5"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Monitoring -->
+<section id="sec-monitor" class="set-card">
+    <header class="set-head"><h4>🔔 Monitoring &amp; webhook</h4><p>Compare runs and notify another system about this job.</p></header>
+    <div class="set-body space-y-5">
+        <div class="job-only space-y-5">
+            <div class="set-row"><div><span class="set-label">Detect changes</span><p class="set-hint">Record new, changed (with a diff) and removed pages compared with a baseline job. Scheduled jobs compare with the schedule's previous run automatically.</p></div><div class="tri" id="set-change-detection" data-default="false"></div></div>
+            <div>
+                <label class="set-label">Baseline job id <span class="set-sub">(optional for scheduled jobs)</span></label>
+                <input type="text" id="set-compare-with" placeholder="e.g. 7aaca62a-151c-41d9-81dd-60284e2ffd53" class="set-input font-mono">
+            </div>
+        </div>
+        <p class="schedule-only set-hint mt-0">Change detection is set under <a href="#sec-schedule" class="text-indigo-600 hover:underline">Schedule</a>: each run is compared with the previous run.</p>
+        <div class="border-t border-gray-100 pt-5 space-y-3">
+            <label class="set-label">Webhook</label>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <input type="url" id="wh-url" placeholder="https://app.example.com/hooks/mole" class="set-input md:col-span-2">
+                <input type="text" id="wh-secret" placeholder="signing secret (optional)" autocomplete="off" class="set-input font-mono">
+            </div>
+            <div id="wh-events"></div>
+            <p class="set-hint">No events selected = lifecycle events only (started, paused, completed, failed, cancelled, changes). A saved secret shows as ******** — leave it to keep it.</p>
+        </div>
+    </div>
+</section>
+
+<!-- Queue & limits -->
+<section id="sec-queue" class="set-card">
+    <header class="set-head"><h4>⛔ Queue &amp; limits</h4><p>Hard caps the job stops at, and where it may run.</p></header>
+    <div class="set-body space-y-5">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="set-label">Priority</label>
+                <input type="number" id="opt-priority" class="set-input">
+                <p class="set-hint">Higher runs first when workers are busy.</p>
+            </div>
+            <div>
+                <label class="set-label">Region</label>
+                <select id="opt-region" class="set-input bg-white"></select>
+                <p class="set-hint">Run only on workers started with <code>--region</code> (e.g. a machine with an Iranian IP).</p>
+            </div>
+        </div>
+        <div>
+            <label class="set-label">Usage limits <span class="set-sub">(empty = unlimited; the job stops cleanly when one is reached)</span></label>
+            <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+                <label class="text-xs text-gray-500">Pages<input type="number" min="0" id="lim-pages" class="set-input mt-1"></label>
+                <label class="text-xs text-gray-500">Requests<input type="number" min="0" id="lim-requests" class="set-input mt-1"></label>
+                <label class="text-xs text-gray-500">Download (MB)<input type="number" min="0" id="lim-mb" class="set-input mt-1"></label>
+                <label class="text-xs text-gray-500">Browser time (sec)<input type="number" min="0" id="lim-browser" class="set-input mt-1"></label>
+                <label class="text-xs text-gray-500">LLM tokens<input type="number" min="0" id="lim-llm" class="set-input mt-1"></label>
+                <label class="text-xs text-gray-500">Duration (min)<input type="number" min="0" id="lim-duration" class="set-input mt-1"></label>
+            </div>
+            <p class="set-hint mt-2">The pages limit and "Max pages" under Crawl scope both apply; the smaller one wins.</p>
+        </div>
+    </div>
+</section>
+
+<!-- Search & matching -->
+<section id="sec-search" class="set-card">
+    <header class="set-head"><h4>🔎 Search &amp; matching</h4><p>Phrase detection, the keyword index and semantic search for this job.</p></header>
+    <div class="set-body space-y-5">
+        <div>
+            <label class="set-label">Job phrases <span class="set-sub">(one per line; replaces the global phrase list for this job)</span></label>
+            <textarea id="set-phrases" rows="3" placeholder="قیمت ویژه&#10;out of stock" class="set-input" dir="auto"></textarea>
+        </div>
+        <div class="set-row"><div><span class="set-label">Match extracted words only</span><p class="set-hint">Ignore manual phrases and only use words extracted from this crawl.</p></div><div class="tri" id="set-use-crawl-phrases-only" data-default-key="use_crawl_phrases_only"></div></div>
+        <div class="set-row"><div><span class="set-label">Word extraction (keyword index)</span><p class="set-hint">Index every word of each page for keyword search.</p></div><div class="tri" id="set-enable-word-extraction" data-default-key="enable_word_extraction"></div></div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+                <label class="set-label">Language</label>
+                <select id="set-language" class="set-input bg-white"><option value="">Default</option><option value="fa">Persian</option><option value="en">English</option></select>
+            </div>
+            <div class="md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div class="set-row"><span class="set-label">Stemming</span><div class="tri" id="set-stemming" data-default-key="enable_stemming"></div></div>
+                <div class="set-row"><span class="set-label">Lemmatization</span><div class="tri" id="set-lemmatization" data-default-key="enable_lemmatization"></div></div>
+            </div>
+        </div>
+        <div class="set-row"><div><span class="set-label">Semantic search (AI embeddings)</span><p class="set-hint">Embed each page with a multilingual model so it can be searched by meaning. Adds work per page.</p></div><div class="tri" id="set-enable-semantic" data-default-key="enable_semantic_search"></div></div>
+    </div>
+</section>
+
+<!-- Plugins -->
+<section id="sec-plugins" class="set-card">
+    <header class="set-head"><h4>🧩 Plugins</h4><p>Python scripts under <code>plugins/</code>. After-crawl receives each page as JSON on stdin; after-job runs after the job ends with <code>--job-id</code>. Errors are logged and never stop the crawl.</p></header>
+    <div class="set-body grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+            <label for="set-after-crawl-plugin" class="set-label">After each page</label>
+            <select id="set-after-crawl-plugin" class="set-input bg-white"></select>
+            <p id="after-crawl-plugin-desc" class="set-hint"></p>
+        </div>
+        <div>
+            <label for="set-after-job-plugin" class="set-label">After the job</label>
+            <select id="set-after-job-plugin" class="set-input bg-white"></select>
+            <p id="after-job-plugin-desc" class="set-hint"></p>
+        </div>
+    </div>
+</section>
+{{end}}

@@ -261,26 +261,28 @@ const (
 
 // exportRecord is one page in an export.
 type exportRecord struct {
-	PageID       uint                   `json:"page_id"`
-	URL          string                 `json:"url"`
-	FinalURL     string                 `json:"final_url,omitempty"`
-	StatusCode   int                    `json:"status_code"`
-	Title        string                 `json:"title,omitempty"`
-	ContentType  string                 `json:"content_type,omitempty"`
-	Depth        int                    `json:"depth"`
-	CrawledAt    time.Time              `json:"crawled_at"`
-	Error        string                 `json:"error,omitempty"`
-	Markdown     *string                `json:"markdown,omitempty"`
-	Text         *string                `json:"text,omitempty"`
-	Metadata     map[string]interface{} `json:"metadata,omitempty"`
-	Links        []string               `json:"links,omitempty"`
-	Extracted    json.RawMessage        `json:"extracted,omitempty"`
-	LLMExtracted json.RawMessage        `json:"llm_extracted,omitempty"`
+	PageID      uint                   `json:"page_id"`
+	URL         string                 `json:"url"`
+	FinalURL    string                 `json:"final_url,omitempty"`
+	StatusCode  int                    `json:"status_code"`
+	Title       string                 `json:"title,omitempty"`
+	ContentType string                 `json:"content_type,omitempty"`
+	Depth       int                    `json:"depth"`
+	CrawledAt   time.Time              `json:"crawled_at"`
+	Error       string                 `json:"error,omitempty"`
+	Markdown    *string                `json:"markdown,omitempty"`
+	Text        *string                `json:"text,omitempty"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	Links       []string               `json:"links,omitempty"`
+	Extracted   json.RawMessage        `json:"extracted,omitempty"`
+	models.DetectedData
+	LLMExtracted json.RawMessage `json:"llm_extracted,omitempty"`
 }
 
 // Export streams a job's pages (with content) as JSON, JSON Lines or CSV.
 // CSV starts with a UTF-8 BOM so Excel shows Persian text correctly; nested
-// extraction results are flattened into "extracted.<field>" columns.
+// extraction results are flattened into "extracted.<field>" columns and the
+// detectors' results into "<format>.<field>" columns ("product.price.amount").
 func (m *Manager) Export(jobID, format string, onlySuccessful bool, w io.Writer) error {
 	if _, err := m.GetJob(jobID); err != nil {
 		return notFound(err)
@@ -348,6 +350,7 @@ func toExportRecord(p PageResult) exportRecord {
 		if len(c.Extracted) > 0 {
 			rec.Extracted = json.RawMessage(c.Extracted)
 		}
+		rec.DetectedData = c.DetectedData
 		if len(c.LLMExtracted) > 0 {
 			rec.LLMExtracted = json.RawMessage(c.LLMExtracted)
 		}
@@ -370,16 +373,19 @@ func writeCSV(w io.Writer, records []exportRecord) error {
 			row["markdown"] = *r.Markdown
 			hasMarkdown = true
 		}
-		for _, src := range []struct {
-			prefix string
-			raw    json.RawMessage
-		}{{"extracted", r.Extracted}, {"llm", r.LLMExtracted}} {
-			if len(src.raw) == 0 {
+		sources := []models.DetectedField{{Format: "extracted", Value: models.JSONRaw(r.Extracted)}}
+		sources = append(sources, r.DetectedData.Fields()...)
+		sources = append(sources, models.DetectedField{Format: "llm", Value: models.JSONRaw(r.LLMExtracted)})
+		for _, src := range sources {
+			if len(src.Value) == 0 {
 				continue
 			}
 			var v interface{}
-			if json.Unmarshal(src.raw, &v) == nil {
-				flatten(src.prefix, v, row, extraCols)
+			if json.Unmarshal(src.Value, &v) == nil {
+				if m, ok := v.(map[string]interface{}); ok && src.Format != "extracted" && src.Format != "llm" {
+					delete(m, "sources") // where a detected value came from is for debugging, not a column
+				}
+				flatten(src.Format, v, row, extraCols)
 			}
 		}
 		if t, ok := r.Metadata["description"].(string); ok {

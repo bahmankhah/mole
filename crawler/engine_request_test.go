@@ -3,6 +3,7 @@ package crawler
 import (
 	"testing"
 
+	"github.com/resolver/crawler/config"
 	"github.com/resolver/crawler/models"
 )
 
@@ -97,5 +98,26 @@ func TestIsTextualContentType(t *testing.T) {
 		if isTextualContentType(ct) {
 			t.Errorf("did not expect to save %q", ct)
 		}
+	}
+}
+
+func TestIncludeDocumentsKeepsGlobalSkipList(t *testing.T) {
+	cfg := config.DefaultConfig()
+	before := len(cfg.Crawler.SkipExtensions)
+	on := true
+	rs, err := BuildRunSettings(cfg, &models.JobSettings{IncludeDocuments: &on}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range rs.SkipExtensions {
+		if e == ".pdf" || e == ".docx" {
+			t.Fatalf("%s still skipped", e)
+		}
+	}
+	if len(rs.SkipExtensions) != before-2 || len(cfg.Crawler.SkipExtensions) != before {
+		t.Fatalf("skip list %d (global %d → %d)", len(rs.SkipExtensions), before, len(cfg.Crawler.SkipExtensions))
+	}
+	if rs.convertsDocuments() {
+		t.Fatal("documents converted although no output uses their text")
 	}
 }

@@ -112,9 +112,10 @@ func newScrapeCmd() *cobra.Command {
 	var fullPage bool
 	c := &cobra.Command{
 		Use:   "scrape <url>",
-		Short: "Fetch one page and print it as Markdown, text, HTML, links, metadata or extracted data",
+		Short: "Fetch one page and print it as Markdown, text, HTML, links, metadata, product data or extracted data",
 		Example: `  mole scrape https://example.com
   mole scrape digikala.com/product/dkp-123 --browser --main-only -f markdown,metadata
+  mole scrape https://shop.ir/p/1 -f product
   mole scrape https://shop.ir/p/1 --extract fields.json -o json
   mole scrape https://site.ir --browser --screenshot shot.png --full-page
   mole scrape https://news.ir/a/1 --llm-prompt "title, author and publish date"`,
@@ -187,7 +188,7 @@ func newScrapeCmd() *cobra.Command {
 	}
 	ff.register(c)
 	fl := c.Flags()
-	fl.StringSliceVarP(&formats, "formats", "f", nil, "outputs: markdown, html, text, links, metadata (default markdown,metadata)")
+	fl.StringSliceVarP(&formats, "formats", "f", nil, "outputs: markdown, html, text, links, metadata, product (default markdown,metadata)")
 	fl.BoolVar(&mainOnly, "main-only", false, "keep only the main content (drop navigation, footers, ads)")
 	fl.StringVar(&screenshot, "screenshot", "", "save a PNG screenshot to this file (uses the browser)")
 	fl.BoolVar(&fullPage, "full-page", false, "screenshot the full page instead of the viewport")
@@ -248,11 +249,21 @@ func writeScrapeResult(res *crawler.ScrapeResult, outFile string) error {
 		fmt.Fprintln(os.Stderr, "extraction:", res.ExtractError)
 	}
 	switch {
-	case res.Extracted != nil || len(res.LLMExtracted) > 0:
+	case !res.Detected.IsEmpty() || res.Extracted != nil || len(res.LLMExtracted) > 0:
+		data := map[string]interface{}{}
+		if b, err := json.Marshal(res.Detected); err == nil { // product, article, … as top-level keys
+			_ = json.Unmarshal(b, &data)
+		}
+		if res.Extracted != nil {
+			data["extracted"] = res.Extracted
+		}
+		if len(res.LLMExtracted) > 0 {
+			data["llm_extracted"] = res.LLMExtracted
+		}
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 		enc.SetEscapeHTML(false)
-		return enc.Encode(map[string]interface{}{"extracted": res.Extracted, "llm_extracted": res.LLMExtracted})
+		return enc.Encode(data)
 	case res.Markdown != "":
 		_, err := fmt.Fprintln(out, res.Markdown)
 		return err

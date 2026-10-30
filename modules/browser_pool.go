@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -345,4 +346,35 @@ func (p *BrowserPool) Close() {
 		}
 		p.forget(proc)
 	}
+}
+
+// browserProbe imports Playwright and checks that its Chromium build is
+// installed, without starting a browser.
+const browserProbe = `import os, sys
+from playwright.sync_api import sync_playwright
+p = sync_playwright().start()
+try:
+    path = p.chromium.executable_path
+finally:
+    p.stop()
+if not os.path.exists(path):
+    sys.exit("chromium is not installed (" + path + "); run: python -m playwright install chromium")
+`
+
+// CheckBrowser reports why the headless browser cannot run on this machine,
+// or nil when the fetch script, Playwright and Chromium are all present.
+func CheckBrowser(ctx context.Context, python, script string) error {
+	if _, err := os.Stat(script); err != nil {
+		return fmt.Errorf("headless script not found: %s", script)
+	}
+	out, err := exec.CommandContext(ctx, python, "-c", browserProbe).CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			return fmt.Errorf("%s: %w", python, err)
+		}
+		lines := strings.Split(msg, "\n")
+		return fmt.Errorf("%s: %s", python, strings.TrimSpace(lines[len(lines)-1]))
+	}
+	return nil
 }

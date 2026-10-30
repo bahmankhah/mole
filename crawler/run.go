@@ -59,7 +59,7 @@ type Run struct {
 	inflight int64
 
 	// usage counters (absolute values, seeded from the job row)
-	uRequests, uPages, uBytes, uBrowserMs, uLLMTokens, uErrors, uScreenshots, uProxy int64
+	uRequests, uPages, uBytes, uBrowserMs, uLLMTokens, uErrors, uScreenshots, uProxy, uDocPages int64
 
 	changesNew, changesChanged int64
 
@@ -77,6 +77,14 @@ func newRun(e *Engine, job *models.CrawlJob) (*Run, error) {
 	rs, err := BuildRunSettings(e.cfg, job.Settings, job.Limits, e.proxies)
 	if err != nil {
 		return nil, err
+	}
+	// The job's max_depth applies unless its settings override it; a batch
+	// fetches exactly its URLs.
+	if job.Settings == nil || job.Settings.MaxDepth == nil {
+		rs.MaxDepth = job.MaxDepth
+	}
+	if job.Kind == models.JobKindBatch {
+		rs.MaxDepth = 0
 	}
 	r := &Run{
 		e:           e,
@@ -191,7 +199,7 @@ func (r *Run) start() error {
 	atomic.StoreInt64(&r.matches, matches)
 	u := job.Usage
 	r.uRequests, r.uPages, r.uBytes, r.uBrowserMs = u.Requests, u.Pages, u.Bytes, u.BrowserMs
-	r.uLLMTokens, r.uErrors, r.uScreenshots, r.uProxy = u.LLMTokens, u.Errors, u.Screenshots, u.ProxyRequests
+	r.uLLMTokens, r.uErrors, r.uScreenshots, r.uProxy, r.uDocPages = u.LLMTokens, u.Errors, u.Screenshots, u.ProxyRequests, u.DocumentPages
 	r.pluginRuns, r.pluginFailures, r.pluginLastErr = job.AfterCrawlRuns, job.AfterCrawlFailures, job.AfterCrawlError
 
 	r.frontier.ResetProcessingURLs()
@@ -436,6 +444,7 @@ func (r *Run) usage() models.JobUsage {
 		Errors:        atomic.LoadInt64(&r.uErrors),
 		Screenshots:   atomic.LoadInt64(&r.uScreenshots),
 		ProxyRequests: atomic.LoadInt64(&r.uProxy),
+		DocumentPages: atomic.LoadInt64(&r.uDocPages),
 	}
 }
 
@@ -457,6 +466,7 @@ func usageColumns(u models.JobUsage, into map[string]interface{}) {
 	into["usage_errors"] = u.Errors
 	into["usage_screenshots"] = u.Screenshots
 	into["usage_proxy_requests"] = u.ProxyRequests
+	into["usage_document_pages"] = u.DocumentPages
 }
 
 // flush writes counters and renews the lease. It returns false when this
@@ -662,6 +672,13 @@ func (r *Run) addSeedURLs() error {
 	}
 	if method != "POST" {
 		for _, seed := range seeds {
+			if job.Kind == models.JobKindBatch {
+				// A batch fetches its URLs only: no robots.txt or sitemap discovery.
+				if err := r.frontier.AddSeedRequest(seed, "", ""); err != nil {
+					log.Printf("[Run %s] Failed to add batch URL %s: %v", short(job.ID), seed, err)
+				}
+				continue
+			}
 			r.frontier.AddSeedURLs(seed)
 		}
 		return nil
