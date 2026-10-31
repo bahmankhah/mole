@@ -285,7 +285,7 @@
           '<span class="text-gray-300 mx-1">·</span><button type="button" data-fp="none" class="text-indigo-600 hover:underline">Clear</button></div>' : '') +
         '</div>' +
         '<div class="grid gap-3 ' + grid + '">' + cards + '</div>' +
-        '<p class="mt-2 text-xs text-gray-400">Read from the JSON-LD, microdata and OpenGraph data sites publish for search engines. Results appear on each page, in exports (<code>product.price</code> … columns) and in change detection. Pages without such data return nothing.</p>'
+        '<p class="mt-2 text-xs text-gray-400">Each page runs the detector of its type (product pages the product detector, articles the article one; business and FAQ run on every page). Data comes from the JSON-LD, microdata and OpenGraph sites publish for search engines; product pages without it are read from their HTML. Results appear on each page, in exports (<code>product.price</code> … columns) and in change detection.</p>'
         : '');
 
     function paint() {
@@ -316,6 +316,114 @@
         container.querySelectorAll('input:checked').forEach(function (i) { checked[i.value] = true; });
         return (catalog.formats || []).filter(function (f) { return checked[f]; });
       }
+    };
+  };
+
+  /* ── Tags ─────────────────────────────────────────────────────────── */
+  var typeIcons = { product: '🛒', listing: '📋', article: '📰', job_posting: '💼', event: '🎫', faq: '❓', business: '🏢', home: '🏠', document: '📄', other: '·' };
+  Mole.typeIcon = function (t) { return typeIcons[t] || '🏷'; };
+
+  // isPageType reports whether a tag is one of the detected page types.
+  Mole.isPageType = function (tag, catalog) {
+    return (catalog.page_types || []).some(function (p) { return p.type === tag; });
+  };
+
+  // tagPill renders a tag: page-type tags with their icon, custom tags plain.
+  Mole.tagPill = function (tag, catalog, extra) {
+    var typed = Mole.isPageType(tag, catalog || {});
+    return '<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs ' +
+      (typed ? 'bg-indigo-50 text-indigo-700' : 'bg-amber-50 text-amber-800') + (extra ? ' ' + extra : '') + '" dir="auto">' +
+      (typed ? '<span>' + Mole.typeIcon(tag) + '</span>' : '#') + Mole.esc(tag) + '</span>';
+  };
+
+  // normalizeTag mirrors models.NormalizeTag: lower-case, words joined by "-".
+  Mole.normalizeTag = function (t) { return (t || '').trim().toLowerCase().split(/\s+/).filter(Boolean).join('-'); };
+
+  // tagRulesEditor edits [{pattern, tag}] rows. The tag input suggests the
+  // page types; any other text is a custom tag. opts: {editable, onChange}.
+  Mole.tagRulesEditor = function (container, rules, catalog, opts) {
+    opts = opts || {};
+    var editable = opts.editable !== false, dis = editable ? '' : ' disabled';
+    var listId = 'tag-suggest-' + Math.random().toString(36).slice(2);
+    var inputCls = 'px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-500';
+    container.innerHTML =
+      '<datalist id="' + listId + '">' + (catalog.page_types || []).map(function (p) {
+        return '<option value="' + Mole.esc(p.type) + '">' + Mole.esc(p.label) + '</option>';
+      }).join('') + '</datalist>' +
+      '<div class="tr-rows space-y-2"></div>' +
+      (editable ? '<button type="button" class="tr-add mt-2 text-sm text-indigo-600 hover:underline">+ Add rule</button>' : '');
+    var rows = container.querySelector('.tr-rows');
+    function add(r) {
+      var row = document.createElement('div');
+      row.className = 'tr-row flex items-center gap-2';
+      row.innerHTML =
+        '<input type="text" data-k="pattern" placeholder="URL regex, e.g. /gsp-\\d+/" class="flex-1 font-mono ' + inputCls + '"' + dis + '>' +
+        '<span class="text-gray-400 text-sm">→</span>' +
+        '<input type="text" data-k="tag" list="' + listId + '" placeholder="tag (product, sale…)" class="w-44 ' + inputCls + '"' + dis + '>' +
+        (editable ? '<button type="button" class="tr-del px-2 py-2 text-gray-400 hover:text-red-600 text-lg leading-none" title="Remove">&times;</button>' : '');
+      row.querySelector('[data-k="pattern"]').value = r.pattern || '';
+      row.querySelector('[data-k="tag"]').value = r.tag || '';
+      rows.appendChild(row);
+    }
+    (rules || []).forEach(add);
+    if (!rows.children.length && editable) add({});
+    function changed() { if (opts.onChange) opts.onChange(api.get()); }
+    // on* handlers, not addEventListener: the form re-creates editors on reset.
+    container.onclick = function (e) {
+      if (e.target.classList.contains('tr-add')) { add({}); changed(); }
+      if (e.target.classList.contains('tr-del')) { e.target.closest('.tr-row').remove(); if (!rows.children.length) add({}); changed(); }
+    };
+    container.oninput = changed;
+    var api = {
+      get: function () {
+        return Array.prototype.map.call(rows.querySelectorAll('.tr-row'), function (row) {
+          return { pattern: row.querySelector('[data-k="pattern"]').value.trim(), tag: Mole.normalizeTag(row.querySelector('[data-k="tag"]').value) };
+        }).filter(function (r) { return r.pattern || r.tag; });
+      }
+    };
+    return api;
+  };
+
+  // keepTagsPicker chooses keep_tags: none (keep every page), "auto" (the
+  // types of the enabled detectors) or a list of tags. customTags() returns
+  // the tags of the current rules, offered next to the page types.
+  Mole.keepTagsPicker = function (container, selected, catalog, opts) {
+    opts = opts || {};
+    var editable = opts.editable !== false;
+    var sel = {};
+    (selected || []).forEach(function (t) { sel[t] = true; });
+    function render() {
+      var tags = (catalog.page_types || []).map(function (p) { return p.type; });
+      (opts.customTags ? opts.customTags() : []).concat(Object.keys(sel)).forEach(function (t) {
+        if (t && t !== 'auto' && tags.indexOf(t) < 0) tags.push(t);
+      });
+      var chip = function (value, label, title) {
+        return '<label class="kt-chip inline-flex items-center gap-1.5 px-2.5 py-1 mr-2 mb-2 rounded-full border text-sm select-none ' +
+          (editable ? 'cursor-pointer' : 'opacity-70') + '"' + (title ? ' title="' + Mole.esc(title) + '"' : '') + '>' +
+          '<input type="checkbox" class="h-3.5 w-3.5 text-indigo-600 rounded" value="' + Mole.esc(value) + '"' + (sel[value] ? ' checked' : '') + (editable ? '' : ' disabled') + '>' +
+          label + '</label>';
+      };
+      container.innerHTML =
+        chip('auto', '✨ Types of the enabled detectors', 'Product pages when the Product detector is on, articles for Article, and so on') +
+        tags.map(function (t) {
+          return chip(t, (Mole.isPageType(t, catalog) ? Mole.typeIcon(t) + ' ' : '#') + Mole.esc(t));
+        }).join('');
+      paint();
+    }
+    function paint() {
+      container.querySelectorAll('.kt-chip').forEach(function (el) {
+        var on = el.querySelector('input').checked;
+        el.classList.toggle('bg-indigo-50', on); el.classList.toggle('border-indigo-400', on); el.classList.toggle('text-indigo-800', on);
+        el.classList.toggle('bg-white', !on); el.classList.toggle('border-gray-300', !on); el.classList.toggle('text-gray-700', !on);
+      });
+    }
+    container.onchange = function (e) {
+      if (e.target.type === 'checkbox') { sel[e.target.value] = e.target.checked; if (!e.target.checked) delete sel[e.target.value]; paint(); if (opts.onChange) opts.onChange(); }
+    };
+    render();
+    return {
+      refresh: render,
+      get: function () { return Object.keys(sel).filter(function (t) { return sel[t]; }); }
     };
   };
 

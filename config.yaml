@@ -202,6 +202,24 @@ search:
   default_lang: ""            # e.g. fa
   default_country: ""         # e.g. ir
 
+# Product grouping: a crawl's product pages matched into groups (the same
+# product on several sites, or one product's variants) and compared on the
+# fields you pick. Used by a crawl's Groups tab, by a schedule (every run
+# feeds the same groups, so each field builds a history) and by the
+# Comparisons page. A group's own match_mode/threshold/compare fields win
+# over these defaults.
+grouping:
+  enabled: true                       # false hides Groups from the UI and API
+  default_match_mode: auto            # auto (exact keys, then fuzzy), exact_only, or manual
+  default_threshold: 0.72             # fuzzy name/token similarity (0..1) a new group starts at
+  default_group_by_variant: true      # compare each size/colour/storage variant separately, not just the base product
+  max_product_groups_per_job_group: 5000  # safety cap on distinct products/variants tracked per crawl or schedule
+  default_compare_fields: []          # fields recorded per run when a crawl names none; empty = price, regular_price, availability
+                                      # any detected product field works: price, regular_price, discount_percent, low_price,
+                                      # high_price, offer_count, availability, condition, seller, rating, review_count,
+                                      # brand, sku, gtin, mpn, category — or the name of one of the job's own extract_fields
+  extra_stop_words: []                # marketing words to strip before fuzzy matching, beyond the built-in list
+
 # Other machines joining this server as workers: README "Adding worker nodes".
 cluster:
   advertise_url: ""           # URL nodes use to reach this server, e.g. https://mole.example.com

@@ -67,16 +67,23 @@ func (h *Handler) Index(c *gin.Context) {
 }
 
 // CreateJob creates a new crawl job.
-// Supports URL templates with {{VAR}} placeholders.
-// When template_vars is provided, the URL is expanded into multiple seed URLs.
+//
+// target_url may hold several start URLs, one per line: the first is the
+// job's target and the rest become seed URLs. Every start URL's own domain
+// is in scope, so one crawl covers several sites — which is what the
+// "compare products" switch on the form then groups and compares.
+// A single URL may instead carry {{VAR}} placeholders, expanded with
+// template_vars into many seed URLs on the same site.
 func (h *Handler) CreateJob(c *gin.Context) {
 	var req struct {
-		TargetURL    string              `json:"target_url" form:"target_url"`
-		Domain       string              `json:"domain" form:"domain"`
-		MaxDepth     int                 `json:"max_depth" form:"max_depth"`
-		Settings     *models.JobSettings `json:"settings"`
-		TemplateVars map[string]string   `json:"template_vars"` // var_name → value expression (e.g. "1,hamster,5-10")
-		Start        bool                `json:"start"`
+		TargetURL     string              `json:"target_url" form:"target_url"`
+		SeedURLs      []string            `json:"seed_urls"`
+		Domain        string              `json:"domain" form:"domain"`
+		MaxDepth      int                 `json:"max_depth" form:"max_depth"`
+		Settings      *models.JobSettings `json:"settings"`
+		TemplateVars  map[string]string   `json:"template_vars"` // var_name → value expression (e.g. "1,hamster,5-10")
+		GroupProducts bool                `json:"group_products" form:"group_products"`
+		Start         bool                `json:"start"`
 	}
 
 	contentType := c.GetHeader("Content-Type")
@@ -88,6 +95,7 @@ func (h *Handler) CreateJob(c *gin.Context) {
 		req.Domain = c.PostForm("domain")
 		req.MaxDepth, _ = strconv.Atoi(c.PostForm("max_depth"))
 		req.Start = c.PostForm("start") == "1"
+		req.GroupProducts = c.PostForm("group_products") == "1"
 
 		// Parse template_vars from form: keys like "var_NAME" → value expression.
 		req.TemplateVars = make(map[string]string)
@@ -109,11 +117,33 @@ func (h *Handler) CreateJob(c *gin.Context) {
 	if target == "" {
 		target = req.Domain
 	}
+	targets := jobs.SplitTargets(target)
+	seeds := req.SeedURLs
+	if len(targets) > 0 {
+		target, seeds = targets[0], append(append([]string{}, targets[1:]...), seeds...)
+	}
+	if len(seeds) > 0 && len(req.TemplateVars) > 0 {
+		err := "give either several start URLs or one URL with {{VAR}} placeholders, not both"
+		if isForm {
+			c.Redirect(http.StatusFound, "/?error="+url.QueryEscape(err))
+			return
+		}
+		c.JSON(http.StatusBadRequest, Response{Success: false, Error: err})
+		return
+	}
 	if req.MaxDepth == 0 {
 		req.MaxDepth = 10
 	}
+	if req.GroupProducts {
+		if req.Settings == nil {
+			req.Settings = &models.JobSettings{}
+		}
+		on := true
+		req.Settings.GroupProducts = &on
+	}
 	job, err := h.jobManager.CreateFromSpec(jobs.JobSpec{
 		URL:          target,
+		SeedURLs:     seeds,
 		TemplateVars: req.TemplateVars,
 		MaxDepth:     &req.MaxDepth,
 		Settings:     req.Settings,
@@ -189,6 +219,24 @@ func (h *Handler) GetJob(c *gin.Context) {
 				schedule = s
 			}
 		}
+		// Product groups of this crawl's scope: its schedule (so the table
+		// spans every run), or the crawl itself.
+		var grouping interface{}
+		groupingUnmatched := template.JS("[]")
+		groupingScopeType, groupingScopeID, grouped := jobs.ScopeForJob(job)
+		grouped = grouped && h.jobManager.Config().Grouping.Enabled
+		if grouped {
+			gpage, gper := groupingPage(c)
+			if d, err := h.jobManager.GetGroupingDashboard(groupingScopeType, groupingScopeID, c.Query("field"), gpage, gper); err == nil {
+				d.BasePath, d.Anchor = "/jobs/"+job.ID, "groups"
+				grouping = d
+				if b, err := json.Marshal(d.Unmatched); err == nil {
+					groupingUnmatched = template.JS(b)
+				}
+			} else {
+				grouped = false
+			}
+		}
 		opts := gin.H{"priority": job.Priority, "region": job.Region, "limits": job.Limits}
 		if job.Webhook != nil {
 			w := *job.Webhook
@@ -203,7 +251,11 @@ func (h *Handler) GetJob(c *gin.Context) {
 			changeCounts["new"]+changeCounts["changed"]+changeCounts["removed"] > 0
 		ps := h.pluginStatus(job)
 		pluginJSON, _ := json.Marshal(ps)
+		// A crawl can start from several sites; show how each of them went.
+		siteStats := h.jobManager.JobSiteStats(job.ID)
 		c.HTML(http.StatusOK, "job.html", gin.H{
+			"siteStats":           siteStats,
+			"showSiteStats":       len(siteStats) > 1,
 			"pluginStatus":        ps,
 			"pluginJSON":          template.JS(pluginJSON),
 			"showPlugins":         ps.AfterCrawl != "" || ps.AfterJob != "",
@@ -216,6 +268,11 @@ func (h *Handler) GetJob(c *gin.Context) {
 			"changeCounts":        changeCounts,
 			"changeTotal":         changeCounts["new"] + changeCounts["changed"] + changeCounts["removed"],
 			"schedule":            schedule,
+			"grouping":            grouping,
+			"showGrouping":        grouped,
+			"groupingScopeType":   groupingScopeType,
+			"groupingScopeID":     groupingScopeID,
+			"groupingUnmatched":   groupingUnmatched,
 			"job":                 job,
 			"subdomains":          subdomains,
 			"matches":             matches,

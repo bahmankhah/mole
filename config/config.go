@@ -32,6 +32,21 @@ type Config struct {
 	Documents DocumentsConfig `yaml:"documents"`
 	Cache     CacheConfig     `yaml:"cache"`
 	Search    SearchConfig    `yaml:"search"`
+	Grouping  GroupingConfig  `yaml:"grouping"`
+}
+
+// GroupingConfig sets the defaults for product grouping and the
+// comparisons built on it: how a crawl's or schedule's product pages are
+// matched across the sites it covers, when the crawl names no override of
+// its own.
+type GroupingConfig struct {
+	Enabled                     bool     `yaml:"enabled"`            // false hides the feature from the UI and API
+	DefaultMatchMode            string   `yaml:"default_match_mode"` // auto, exact_only or manual
+	DefaultThreshold            float64  `yaml:"default_threshold"`  // fuzzy name/token similarity (0..1) a new group's match_threshold starts at
+	DefaultGroupByVariant       bool     `yaml:"default_group_by_variant"`
+	MaxProductGroupsPerJobGroup int      `yaml:"max_product_groups_per_job_group"` // distinct products/variants tracked per crawl or schedule, a safety cap
+	DefaultCompareFields        []string `yaml:"default_compare_fields,omitempty"` // fields recorded per run when a group names none; empty = price, regular_price, availability
+	ExtraStopWords              []string `yaml:"extra_stop_words,omitempty"`       // marketing words stripped before fuzzy name matching, beyond the built-in list
 }
 
 // DocumentsConfig controls how PDF and DOCX responses are converted to text.
@@ -550,6 +565,13 @@ func DefaultConfig() *Config {
 		},
 		Search: SearchConfig{
 			Timeout: 15 * time.Second,
+		},
+		Grouping: GroupingConfig{
+			Enabled:                     true,
+			DefaultMatchMode:            "auto",
+			DefaultThreshold:            0.72,
+			DefaultGroupByVariant:       true,
+			MaxProductGroupsPerJobGroup: 5000,
 		},
 	}
 }

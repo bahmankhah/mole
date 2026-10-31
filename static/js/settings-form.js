@@ -36,6 +36,7 @@ function populateSettings(){
     setVal('set-politeness-delay',s.politeness_delay_ms);
     setVal('set-max-depth',s.max_depth);
     setVal('set-max-pages',s.max_pages);
+    setVal('set-max-pages-domain',s.max_pages_per_domain);
     setVal('set-max-retries',s.max_retries);
     setVal('set-user-agent',s.user_agent);
     document.getElementById('set-url-include').value=(s.url_include_patterns||[]).join('\n');
@@ -265,6 +266,7 @@ function buildPayload(){
     v=intVal('set-politeness-delay');if(v!==undefined)p.politeness_delay_ms=v;
     v=intVal('set-max-depth');if(v!==undefined)p.max_depth=v;
     v=intVal('set-max-pages');if(v!==undefined)p.max_pages=v;
+    v=intVal('set-max-pages-domain');if(v!==undefined)p.max_pages_per_domain=v;
     v=intVal('set-max-retries');if(v!==undefined)p.max_retries=v;
     v=strVal('set-user-agent');if(v!==undefined)p.user_agent=v;
     v=linesVal('set-url-include');if(v!==undefined)p.url_include_patterns=v;
@@ -340,6 +342,13 @@ function validateSettingsForm(){
         if((type==='click'||type==='type'||type==='wait_for_selector')&&!sel.value.trim())add(sel,'Page action '+(i+1)+' ('+type+'): selector is required');
         if(type==='evaluate'&&!val.value.trim())add(val,'Page action '+(i+1)+': script is required');
     });
+    document.querySelectorAll('#set-tag-rules .tr-row').forEach(function(row,i){
+        var pat=row.querySelector('[data-k="pattern"]'),tag=row.querySelector('[data-k="tag"]');
+        if(!pat.value.trim()&&!tag.value.trim())return;
+        if(!pat.value.trim())add(pat,'Tag rule '+(i+1)+': URL pattern is required');
+        else{try{new RegExp(pat.value.trim());}catch(e){add(pat,'Tag rule '+(i+1)+': invalid regex ('+e.message+')');}}
+        if(!Mole.normalizeTag(tag.value))add(tag,'Tag rule '+(i+1)+': tag is required');
+    });
     var wh=document.getElementById('wh-url');
     if(wh.value.trim()&&!/^https?:\/\/[^\s]+$/i.test(wh.value.trim()))add(wh,'Webhook URL must start with http:// or https://');
     return problems;
@@ -352,7 +361,7 @@ function highlightServerError(msg){
         document.querySelectorAll('#set-extract-fields [data-k="name"]').forEach(function(inp){if(inp.value.trim()===field[1]&&!target)target=inp.closest('.fe-row');});
         target=target||document.getElementById('set-extract-fields');
     }
-    var rules=[['include pattern','set-url-include'],['exclude pattern','set-url-exclude'],['extract_url_match','set-extract-match'],
+    var rules=[['tag rule','set-tag-rules'],['keep tag','set-keep-tags'],['keep_tags','set-keep-tags'],['max_kept_pages','set-max-kept'],['include pattern','set-url-include'],['exclude pattern','set-url-exclude'],['extract_url_match','set-extract-match'],
         ['browser action','set-actions'],['proxy pool','set-proxy-pool'],['proxy','set-proxies'],['fingerprint','set-fingerprint'],
         ['host_rate_limit','set-host-rate'],['webhook','wh-url'],['limits','lim-pages'],['llm','set-llm-prompt'],
         ['payload variable','body-tpl-vars'],['resource type','set-block-resources'],['format','set-formats'],['plugin','set-after-crawl-plugin']];
@@ -379,7 +388,7 @@ function settingsFormProblem(){
     return '';
 }
 function resetToDefaults(){
-    ['set-max-concurrent','set-request-timeout','set-politeness-delay','set-max-depth','set-max-pages','set-max-retries','set-user-agent',
+    ['set-max-concurrent','set-request-timeout','set-politeness-delay','set-max-depth','set-max-pages','set-max-pages-domain','set-max-retries','set-user-agent',
      'set-url-include','set-url-exclude','set-extra-tracking','set-skip-extensions','set-headless-selector'].forEach(function(id){document.getElementById(id).value='';});
     ['set-skip-content-dup','set-respect-robots','set-enable-semantic','set-save-text-content','set-enable-word-extraction',
      'set-use-crawl-phrases-only','set-stemming','set-lemmatization'].forEach(function(id){setTri(id,undefined);});
@@ -492,6 +501,13 @@ function populateExtra(s){
     document.getElementById('set-phrases').value=(s.phrases||[]).join('\n');
     setTri('set-change-detection', s.change_detection);
     setVal('set-compare-with', s.compare_with_job_id);
+    editors.tagRules=Mole.tagRulesEditor(document.getElementById('set-tag-rules'), s.tag_rules||[], catalog, {editable:ed, onChange:function(){if(editors.keepTags)editors.keepTags.refresh();}});
+    editors.keepTags=Mole.keepTagsPicker(document.getElementById('set-keep-tags'), s.keep_tags||[], catalog, {editable:ed, customTags:function(){
+        return editors.tagRules.get().map(function(r){return r.tag;}).filter(Boolean);
+    }});
+    setVal('set-max-kept', s.max_kept_pages);
+    document.getElementById('set-scope-domains').value=(s.scope_domains||[]).join('\n');
+    populateGrouping(s, ed);
 
     var o=jobOptions||{};
     setVal('opt-priority', o.priority||0);
@@ -531,6 +547,70 @@ function extendPayload(p){
     v=linesVal('set-phrases'); if(v!==undefined)p.phrases=v;
     v=getTri('set-change-detection'); if(v!==undefined)p.change_detection=v;
     v=strVal('set-compare-with'); if(v!==undefined)p.compare_with_job_id=v;
+    v=editors.tagRules.get(); if(v.length)p.tag_rules=v;
+    v=editors.keepTags.get(); if(v.length)p.keep_tags=v;
+    v=intVal('set-max-kept'); if(v!==undefined&&v>0)p.max_kept_pages=v;
+    v=linesVal('set-scope-domains'); if(v!==undefined)p.scope_domains=v;
+    if(document.getElementById('set-group-products').checked){
+        p.group_products=true;
+        var fields=compareFieldsValue(); if(fields.length)p.compare_fields=fields;
+        p.group_by_variant=document.getElementById('set-group-by-variant').checked;
+        p.match_threshold=parseFloat(document.getElementById('set-match-threshold').value);
+        p.match_mode=document.getElementById('set-match-mode').value;
+    }
+}
+
+/* ── Group & compare ──
+   The field picker offers the engine's detected product fields (from
+   /v1/info) plus whatever extract fields this job defines, since those are
+   read from each page's extracted JSON. */
+function groupingFieldChoices(){
+    var out=(catalog.compare_fields||[]).slice();
+    var seen={}; out.forEach(function(f){seen[f.name]=true;});
+    (editors.fields?editors.fields.get():[]).forEach(function(f){
+        if(f.name&&!seen[f.name]){ seen[f.name]=true; out.push({name:f.name,label:f.name,kind:'extracted'}); }
+    });
+    return out;
+}
+function renderCompareFields(chosen, editable){
+    var box=document.getElementById('set-compare-fields');
+    if(!box) return;
+    box.innerHTML=groupingFieldChoices().map(function(f){
+        var on=chosen.indexOf(f.name)>=0;
+        return '<label class="flex items-center gap-2 text-sm text-gray-700">'+
+            '<input type="checkbox" data-compare-field="'+Mole.esc(f.name)+'"'+(on?' checked':'')+(editable?'':' disabled')+'> '+
+            Mole.esc(f.label)+' <span class="text-xs text-gray-400">'+Mole.esc(f.kind)+'</span></label>';
+    }).join('');
+}
+function compareFieldsValue(){
+    return Array.prototype.map.call(document.querySelectorAll('[data-compare-field]:checked'), function(el){
+        return el.getAttribute('data-compare-field');
+    });
+}
+function syncGrouping(){
+    var on=document.getElementById('set-group-products').checked;
+    document.getElementById('grouping-opts').classList.toggle('hidden', !on);
+    // Name strictness only means something when names are matched at all.
+    var mode=document.getElementById('set-match-mode');
+    var wrap=document.getElementById('set-threshold-wrap');
+    if(mode&&wrap) wrap.classList.toggle('hidden', mode.value!=='auto');
+}
+function populateGrouping(s, editable){
+    var on=s.group_products===true;
+    var box=document.getElementById('set-group-products');
+    if(!box) return;
+    box.checked=on;
+    box.addEventListener('change', syncGrouping);
+    renderCompareFields(s.compare_fields&&s.compare_fields.length?s.compare_fields:(catalog.compare_fields?['price','regular_price','availability']:[]), editable);
+    document.getElementById('set-group-by-variant').checked=s.group_by_variant!==false;
+    var mode=document.getElementById('set-match-mode');
+    mode.value=s.match_mode||'auto';
+    mode.addEventListener('change', syncGrouping);
+    var th=document.getElementById('set-match-threshold');
+    th.value=s.match_threshold!=null?s.match_threshold:0.72;
+    document.getElementById('set-match-threshold-val').textContent=th.value;
+    th.addEventListener('input', function(){ document.getElementById('set-match-threshold-val').textContent=this.value; });
+    syncGrouping();
 }
 
 function collectOptions(){

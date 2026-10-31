@@ -83,6 +83,7 @@ type JobSummary struct {
 	StopReason   string           `json:"stop_reason,omitempty"`
 	TargetURL    string           `json:"target_url"`
 	CrawledURLs  int              `json:"crawled_urls"`
+	KeptURLs     int              `json:"kept_urls"` // crawled pages kept (keep_tags); equals crawled_urls without it
 	TotalURLs    int              `json:"total_urls"`
 	FoundMatches int              `json:"found_matches"`
 	Usage        models.JobUsage  `json:"usage"`
@@ -97,7 +98,7 @@ func Summarize(j *models.CrawlJob) JobSummary {
 	return JobSummary{
 		ID: j.ID, Kind: j.Kind, ExternalID: j.ExternalID, OwnerRef: j.OwnerRef, ScheduleID: j.ScheduleID,
 		Status: j.Status, StopReason: j.StopReason, TargetURL: j.TargetURL,
-		CrawledURLs: j.CrawledURLs, TotalURLs: j.TotalURLs, FoundMatches: j.FoundMatches,
+		CrawledURLs: j.CrawledURLs, KeptURLs: j.KeptURLs, TotalURLs: j.TotalURLs, FoundMatches: j.FoundMatches,
 		Usage: j.Usage, Error: j.ErrorMessage, CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, CompletedAt: j.CompletedAt,
 	}
 }

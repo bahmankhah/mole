@@ -203,20 +203,17 @@ func (e *HTMLLinkExtractor) ExtractLinksWithAnchors(baseURL string, content []by
 	})
 
 	// Extract URLs from srcset attributes (responsive images)
+	// (see srcsetURLs for why this is not a plain split on ",")
 	doc.Find("[srcset]").Each(func(_ int, s *goquery.Selection) {
 		srcset, exists := s.Attr("srcset")
 		if !exists || srcset == "" {
 			return
 		}
-		// srcset format: "url1 1x, url2 2x" or "url1 100w, url2 200w"
-		for _, candidate := range strings.Split(srcset, ",") {
-			parts := strings.Fields(strings.TrimSpace(candidate))
-			if len(parts) >= 1 {
-				resolved := e.resolveLink(baseURL, parts[0])
-				if resolved != "" {
-					if _, ok := linkMap[resolved]; !ok {
-						linkMap[resolved] = linkEntry{url: resolved}
-					}
+		for _, candidate := range srcsetURLs(srcset) {
+			resolved := e.resolveLink(baseURL, candidate)
+			if resolved != "" {
+				if _, ok := linkMap[resolved]; !ok {
+					linkMap[resolved] = linkEntry{url: resolved}
 				}
 			}
 		}
@@ -477,4 +474,31 @@ func (r *RobotsParser) ParseRobots(baseURL string, content []byte) *RobotsResult
 	}
 
 	return result
+}
+
+// srcsetURLs returns the URLs of a srcset attribute: "url1 1x, url2 2x" or
+// "url1 100w, url2 200w". Candidates are separated by a comma that *ends a
+// token*, never by a comma inside a URL — image CDNs put commas in their
+// query strings ("?x-oss-process=image/resize,w_800/quality,q_80"), and
+// splitting on those produces fragments like "w_800/quality" that resolve
+// against the page URL into pages that do not exist.
+func srcsetURLs(srcset string) []string {
+	var out []string
+	expectURL := true
+	for _, token := range strings.Fields(srcset) {
+		trimmed := strings.TrimRight(token, ",")
+		endsCandidate := len(trimmed) != len(token) // the token ended the candidate
+		if expectURL {
+			if trimmed != "" {
+				out = append(out, trimmed)
+				expectURL = endsCandidate
+			}
+			continue
+		}
+		// A descriptor (2x, 100w); the candidate ends at its comma.
+		if endsCandidate {
+			expectURL = true
+		}
+	}
+	return out
 }

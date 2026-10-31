@@ -37,8 +37,28 @@ type Product struct {
 	Rating          float64           `json:"rating,omitempty"`
 	BestRating      float64           `json:"best_rating,omitempty"` // scale of Rating (usually 5)
 	ReviewCount     int               `json:"review_count,omitempty"`
-	Sources         map[string]string `json:"sources,omitempty"` // field → where it was found
+	Variants        []ProductVariant  `json:"variants,omitempty"` // purchasable variants (size, colour, storage…), from hasVariant
+	Sources         map[string]string `json:"sources,omitempty"`  // field → where it was found
 }
+
+// ProductVariant is one purchasable variant of a Product (a size, colour,
+// storage capacity…), read from a schema.org hasVariant list. Attributes are
+// parsed out of Name so the same variant can be matched across sites that
+// word it differently ("128GB Black" vs. "مشکی 128 گیگابایت").
+type ProductVariant struct {
+	Name         string            `json:"name,omitempty"`
+	SKU          string            `json:"sku,omitempty"`
+	GTIN         string            `json:"gtin,omitempty"`
+	MPN          string            `json:"mpn,omitempty"`
+	Price        *modules.Price    `json:"price,omitempty"`
+	RegularPrice *modules.Price    `json:"regular_price,omitempty"`
+	Availability string            `json:"availability,omitempty"`
+	Image        string            `json:"image,omitempty"`
+	Attributes   map[string]string `json:"attributes,omitempty"` // color, storage, ram, size — parsed from Name
+}
+
+// maxProductVariants bounds the variants read off one page.
+const maxProductVariants = 40
 
 // Shop platforms whose default product templates are read.
 const (
@@ -90,6 +110,7 @@ func detectProduct(pg *pageData) *Product {
 			}
 		}
 	}
+	fixIranianCurrency(pg, out)
 	out.finish()
 	return out
 }
@@ -180,7 +201,72 @@ func productFromSchema(m map[string]interface{}, base *url.URL) *Product {
 		}
 	}
 	applyOffers(p, offers)
+	p.Variants = variantsFromSchema(m, base)
 	return p
+}
+
+// variantsFromSchema reads a ProductGroup's hasVariant list into individual
+// purchasable variants, each with the offer a buyer would take and the
+// attributes parsed out of its name.
+func variantsFromSchema(m map[string]interface{}, base *url.URL) []ProductVariant {
+	list := schemaList(m["hasVariant"])
+	if len(list) == 0 {
+		return nil
+	}
+	var out []ProductVariant
+	for _, v := range list {
+		vm, ok := v.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name := cleanInline(schemaString(vm["name"]))
+		sku := schemaString(vm["sku"])
+		if sku == "" {
+			sku = schemaString(vm["productID"])
+		}
+		mpn := schemaString(vm["mpn"])
+		var gtin string
+		for _, k := range []string{"gtin", "gtin13", "gtin12", "gtin14", "gtin8", "isbn"} {
+			if gtin = schemaString(vm[k]); gtin != "" {
+				break
+			}
+		}
+		price, regular, availability := chosenOffer(flattenOffers(vm["offers"], 0))
+		if name == "" && sku == "" && gtin == "" && price == nil {
+			continue
+		}
+		var image string
+		if imgs := schemaImages(vm["image"], base, 1); len(imgs) > 0 {
+			image = imgs[0]
+		}
+		out = append(out, ProductVariant{
+			Name: name, SKU: sku, GTIN: gtin, MPN: mpn,
+			Price: price, RegularPrice: regular, Availability: availability, Image: image,
+			Attributes: ParseVariantAttributes(name),
+		})
+		if len(out) >= maxProductVariants {
+			break
+		}
+	}
+	return out
+}
+
+// chosenOffer picks the offer a buyer would take: the first in stock with a
+// price, else the first priced offer.
+func chosenOffer(offers []offer) (price, regular *modules.Price, availability string) {
+	for i := range offers {
+		o := &offers[i]
+		if o.price == nil {
+			continue
+		}
+		if price == nil || (availability != "in_stock" && o.availability == "in_stock") {
+			price, regular, availability = o.price, o.regular, o.availability
+		}
+		if availability == "in_stock" {
+			break
+		}
+	}
+	return price, regular, availability
 }
 
 // schemaRating reads an AggregateRating: value, scale and number of reviews.

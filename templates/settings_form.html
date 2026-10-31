@@ -1,7 +1,7 @@
 {{/* The crawl settings form, shared by the job page (one crawl) and the
 schedule page (the crawl each run creates). The page wraps it in a
-<form data-form-mode="job|schedule">, includes /static/js/settings-form.js
-and defines the globals that script documents. */}}
+<form data-form-mode="job|schedule">, includes /static/js/settings-form.js,
+defines the globals that script documents and calls populateSettings(). */}}
 
 {{define "settingsStyles"}}
 <style>
@@ -44,6 +44,8 @@ and defines the globals that script documents. */}}
 {{define "settingsNav"}}
     <a href="#sec-fetch" class="set-nav">🌐 Fetching</a>
     <a href="#sec-scope" class="set-nav">🧭 Crawl scope</a>
+    <a href="#sec-tags" class="set-nav">🏷 Tags &amp; keep</a>
+    <a href="#sec-grouping" class="set-nav">⚖️ Group &amp; compare</a>
     <a href="#sec-speed" class="set-nav">⏱ Speed &amp; politeness</a>
     <a href="#sec-output" class="set-nav">📦 Output &amp; extraction</a>
     <a href="#sec-network" class="set-nav">🛡 Network &amp; anti-bot</a>
@@ -125,7 +127,7 @@ and defines the globals that script documents. */}}
 
 <!-- Crawl scope -->
 <section id="sec-scope" class="set-card">
-    <header class="set-head"><h4>🧭 Crawl scope</h4><p>Which pages are visited. Links are followed only within the site's domain.</p></header>
+    <header class="set-head"><h4>🧭 Crawl scope</h4><p>Which pages are visited. Links are followed within the site's own domain, plus any domain you add below.</p></header>
     <div class="set-body space-y-5">
         <p id="scope-batch-note" class="hidden rounded-md bg-amber-50 border border-amber-200 text-amber-800 text-xs p-3">This is a batch: it fetches exactly the listed URLs and follows no links, so link depth and the URL patterns below do not apply.</p>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -139,6 +141,11 @@ and defines the globals that script documents. */}}
                 <input type="number" id="set-max-pages" min="0" class="set-input">
                 <p class="set-hint">0 = unlimited. Default: <span class="def-val" data-key="max_pages"></span></p>
             </div>
+            <div>
+                <label class="set-label">Max pages per site</label>
+                <input type="number" id="set-max-pages-domain" min="0" class="set-input">
+                <p class="set-hint">0 = no per-site cap. With several start URLs this keeps one sprawling site from spending the whole budget; when a site reaches its share the crawl carries on with the others.</p>
+            </div>
         </div>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
@@ -151,6 +158,11 @@ and defines the globals that script documents. */}}
             </div>
         </div>
         <p class="set-hint -mt-3">When "only crawl" patterns are set, the skip patterns are ignored. Start URLs are always fetched.</p>
+        <div>
+            <label class="set-label">Also crawl these domains <span class="set-sub">(one per line)</span></label>
+            <textarea id="set-scope-domains" rows="3" placeholder="shop-b.ir&#10;shop-c.com" class="set-input font-mono" dir="ltr"></textarea>
+            <p class="set-hint">The domain of every start URL is followed already — to cover several shops in one crawl, list them as start URLs. Add a domain here only to follow links <i>into</i> a site you do not start from. Each domain keeps its own rate limit and its own share of the page budget.</p>
+        </div>
         <div class="set-row"><div><span class="set-label">Respect robots.txt</span><p class="set-hint">Skip paths the site disallows.</p></div><div class="tri" id="set-respect-robots" data-default-key="respect_robots_txt"></div></div>
         <div class="set-row"><div><span class="set-label">Skip duplicate content</span><p class="set-hint">Pages whose body is identical to an earlier page are not processed again.</p></div><div class="tri" id="set-skip-content-dup" data-default-key="skip_content_duplicates"></div></div>
         <details class="set-advanced">
@@ -168,6 +180,62 @@ and defines the globals that script documents. */}}
                 </div>
             </div>
         </details>
+    </div>
+</section>
+
+<!-- Tags & keep -->
+<section id="sec-tags" class="set-card">
+    <header class="set-head"><h4>🏷 Tags &amp; keep</h4><p>Every page is tagged with its detected type (product, listing, article…) and with the tags of the rules its URL matches. Filter pages by tag on the Pages &amp; Data tab.</p></header>
+    <div class="set-body space-y-5">
+        <div>
+            <label class="set-label">Tag rules <span class="set-sub">(URL regex → tag, case-insensitive)</span></label>
+            <p class="set-hint mt-0 mb-2">A page can match several rules and gets every tag. Pick a page type (product, article, job_posting…) to also <b>set the page's type</b>, which overrides detection and runs that type's detector; any other word is a custom tag. Rules can be changed after the crawl: the pages are re-tagged without fetching them again.</p>
+            <div id="set-tag-rules"></div>
+        </div>
+        <div class="border-t border-gray-100 pt-5">
+            <label class="set-label">Keep only pages tagged</label>
+            <p class="set-hint mt-0 mb-2">Nothing selected keeps every page. Otherwise every page is still fetched and its links followed, so the crawl reaches what you want through category and listing pages, but only pages with one of these tags are saved with their content and extraction. The others are listed as skipped (URL, status, type and tags only).</p>
+            <div id="set-keep-tags"></div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="set-label">Max kept pages</label>
+                <input type="number" id="set-max-kept" min="0" class="set-input">
+                <p class="set-hint">Stop once this many pages are kept, e.g. 500 products. 0 or empty = no limit. "Max pages" still counts every fetched page.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Group & compare -->
+<section id="sec-grouping" class="set-card">
+    <header class="set-head"><h4>⚖️ Group &amp; compare products</h4><p>Match this crawl's product pages into groups — the same product on several sites, or the same product's variants — and record the fields you pick on every run, so each one builds a history.</p></header>
+    <div class="set-body space-y-5">
+        <div class="set-row"><div><span class="set-label">Group products and compare them</span><p class="set-hint">Matching runs when a crawl finishes. For a schedule, every run feeds the same groups, so you see how each field changed between runs.</p></div><label class="switch"><input type="checkbox" id="set-group-products"><span></span></label></div>
+        <div id="grouping-opts" class="space-y-5">
+            <div>
+                <label class="set-label">Fields to track</label>
+                <div id="set-compare-fields" class="grid grid-cols-2 md:grid-cols-3 gap-1.5 mt-1"></div>
+                <p class="set-hint mt-2">Price is what the comparison table ranks by. Your own extract fields can be tracked too — add them under Output &amp; extraction and they appear here.</p>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label class="set-label" for="set-match-mode">Matching</label>
+                    <select id="set-match-mode" class="set-input bg-white">
+                        <option value="auto">Auto: barcode/model number, then name</option>
+                        <option value="exact_only">Exact only: barcode or model number</option>
+                        <option value="manual">Manual: I will assign matches myself</option>
+                    </select>
+                    <p class="set-hint">Exact-only and manual never merge two pages by name; what they do not match is listed under the table for you to assign.</p>
+                </div>
+                <div id="set-threshold-wrap">
+                    <label class="set-label">Name match strictness</label>
+                    <input type="range" id="set-match-threshold" min="0.4" max="0.95" step="0.01" class="w-full">
+                    <p class="set-hint"><span id="set-match-threshold-val"></span> — products with a barcode or brand+model number are matched exactly; the rest are matched by name at this similarity. Higher avoids false matches.</p>
+                </div>
+                <div class="set-row items-start"><div><span class="set-label">Compare by variant</span><p class="set-hint">Compares each size/colour/storage variant separately, not just the base product.</p></div><label class="switch"><input type="checkbox" id="set-group-by-variant"><span></span></label></div>
+            </div>
+        </div>
     </div>
 </section>
 

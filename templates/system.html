@@ -183,6 +183,7 @@
                     <dt class="text-gray-500">Proxy pools</dt><dd class="col-span-2">{{range .catalog.ProxyPools}}<span class="mr-2 px-1.5 py-0.5 bg-gray-100 rounded">{{.}}</span>{{else}}<span class="text-gray-400">none — direct connections</span>{{end}}</dd>
                     <dt class="text-gray-500">Proxy routes</dt><dd class="col-span-2">{{range .catalog.ProxyRoutes}}<div><code>{{.Match}}</code> → {{if .Pool}}{{.Pool}}{{else}}default{{end}}{{if .Region}} (region {{.Region}}){{end}}</div>{{else}}<span class="text-gray-400">none</span>{{end}}</dd>
                     <dt class="text-gray-500">Plugins</dt><dd class="col-span-2">{{range .catalog.Plugins}}<span class="mr-2 px-1.5 py-0.5 bg-gray-100 rounded" title="{{.Description}}">{{.ID}}</span>{{else}}<span class="text-gray-400">none</span>{{end}}{{if not .catalog.PluginsInAPI}}<span class="block text-xs text-gray-400">disabled for /v1 clients</span>{{end}}</dd>
+                    <dt class="text-gray-500">Product grouping</dt><dd class="col-span-2">{{if .config.Grouping.Enabled}}✓ on · matching: {{.config.Grouping.DefaultMatchMode}} (default threshold {{.config.Grouping.DefaultThreshold}}) · up to {{.config.Grouping.MaxProductGroupsPerJobGroup}} products per crawl or schedule{{else}}<span class="text-gray-400">disabled (<code>grouping.enabled: false</code>)</span>{{end}}</dd>
                 </dl>
             </div>
             <div class="bg-white rounded-lg shadow p-6">

@@ -148,6 +148,8 @@ func (h *Handler) RegisterV1(g *gin.RouterGroup) {
 	g.POST("/crawls/:id/duplicate", h.V1DuplicateCrawl)
 	g.POST("/crawls/:id/after-job", h.V1RunAfterJob)
 	g.GET("/crawls/:id/pages", h.V1ListPages)
+	g.GET("/crawls/:id/tags", h.V1TagCounts)
+	g.PUT("/crawls/:id/tag-rules", h.V1SetTagRules)
 	g.GET("/crawls/:id/pages/:pageId", h.V1GetPage)
 	g.GET("/crawls/:id/pages/:pageId/screenshot", h.V1Screenshot)
 	g.GET("/crawls/:id/changes", h.V1ListChanges)
@@ -169,6 +171,22 @@ func (h *Handler) RegisterV1(g *gin.RouterGroup) {
 	g.GET("/cron/preview", h.V1CronPreview)
 	g.POST("/schedules/:id/enable", h.v1ScheduleEnabled(true))
 	g.POST("/schedules/:id/disable", h.v1ScheduleEnabled(false))
+
+	// Grouping within a crawl or a schedule — which is how several sites
+	// are compared: give the crawl several start URLs — and the actions
+	// that work in either scope.
+	g.GET("/crawls/:id/groups", h.V1CrawlGrouping)
+	g.POST("/crawls/:id/regroup", h.V1RegroupCrawl)
+	g.GET("/schedules/:id/groups", h.V1ScheduleGrouping)
+	g.POST("/schedules/:id/regroup", h.V1RegroupSchedule)
+	g.GET("/grouping/fields", h.V1GroupingFields)
+	g.POST("/grouping/product-groups", h.V1CreateProductGroup)
+	g.POST("/grouping/assign", h.V1AssignUnmatched)
+	g.POST("/grouping/members/:memberId/pin", h.v1MemberAction(h.jobManager.PinGroupMember, gin.H{"pinned": true}))
+	g.POST("/grouping/members/:memberId/unpin", h.v1MemberAction(h.jobManager.UnpinGroupMember, gin.H{"pinned": false}))
+	g.POST("/grouping/members/:memberId/exclude", h.v1MemberAction(h.jobManager.ExcludeGroupMember, gin.H{"excluded": true}))
+	g.POST("/grouping/members/:memberId/unexclude", h.v1MemberAction(h.jobManager.UnexcludeGroupMember, gin.H{"excluded": false}))
+	g.POST("/grouping/members/:memberId/move", h.V1MoveGroupMember)
 
 	g.GET("/owners/:ref/usage", h.V1OwnerUsage)
 	g.GET("/owners/:ref/limits", h.V1GetOwnerLimits)
@@ -493,7 +511,9 @@ func (h *Handler) V1RunAfterJob(c *gin.Context) {
 
 // V1ListPages lists pages with an id cursor; content=1 includes derived
 // content, body=1 includes stored bodies, successful=1 / failed=1 filter by
-// outcome and order=desc lists newest first.
+// outcome, q=words keeps pages whose title or URL contains every word,
+// tag=… keeps pages with that tag, skipped=include|only adds or shows only
+// pages skipped by keep_tags, and order=desc lists newest first.
 func (h *Handler) V1ListPages(c *gin.Context) {
 	job, okj := h.loadJob(c)
 	if !okj {
@@ -503,6 +523,7 @@ func (h *Handler) V1ListPages(c *gin.Context) {
 		JobID: job.ID, AfterID: queryUint(c, "cursor"), Limit: queryInt(c, "limit", 50),
 		WithContent: queryBool(c, "content"), WithBody: queryBool(c, "body"), OnlySuccessful: queryBool(c, "successful"),
 		OnlyFailed: queryBool(c, "failed"), NewestFirst: c.Query("order") == "desc",
+		Search: c.Query("q"), Tag: c.Query("tag"), Skipped: c.Query("skipped"),
 	})
 	if err != nil {
 		v1Error(c, err)
@@ -513,6 +534,40 @@ func (h *Handler) V1ListPages(c *gin.Context) {
 		cursor = strconv.FormatUint(uint64(next), 10)
 	}
 	c.JSON(http.StatusOK, gin.H{"data": pages, "next_cursor": cursor})
+}
+
+// V1TagCounts counts a crawl's pages per tag (kept and skipped).
+func (h *Handler) V1TagCounts(c *gin.Context) {
+	job, okj := h.loadJob(c)
+	if !okj {
+		return
+	}
+	counts, err := h.jobManager.TagCounts(job.ID)
+	if err != nil {
+		v1Error(c, err)
+		return
+	}
+	ok(c, http.StatusOK, counts)
+}
+
+// V1SetTagRules replaces a crawl's tag rules and re-tags its pages.
+func (h *Handler) V1SetTagRules(c *gin.Context) {
+	job, okj := h.loadJob(c)
+	if !okj {
+		return
+	}
+	var req struct {
+		TagRules []models.TagRule `json:"tag_rules"`
+	}
+	if _, okb := bindJSON(c, &req); !okb {
+		return
+	}
+	changed, err := h.jobManager.SetTagRules(job.ID, req.TagRules)
+	if err != nil {
+		v1Error(c, err)
+		return
+	}
+	ok(c, http.StatusOK, gin.H{"tag_rules": req.TagRules, "retagged_pages": changed})
 }
 
 func pageIDParam(c *gin.Context) (uint, bool) {
@@ -598,7 +653,8 @@ func (h *Handler) V1Export(c *gin.Context) {
 	c.Header("Content-Type", ctype)
 	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="crawl-%s.%s"`, job.ID[:8], format))
 	c.Status(http.StatusOK)
-	if err := h.jobManager.Export(job.ID, format, queryBool(c, "successful"), c.Writer); err != nil {
+	filter := jobs.PageQuery{OnlySuccessful: queryBool(c, "successful"), Search: c.Query("q"), Tag: c.Query("tag")}
+	if err := h.jobManager.ExportFiltered(job.ID, format, filter, c.Writer); err != nil {
 		// Headers are already sent; report the problem in the stream.
 		fmt.Fprintf(c.Writer, "\nexport error: %v\n", err)
 	}

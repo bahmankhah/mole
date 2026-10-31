@@ -69,10 +69,20 @@
                     <h2 class="text-xl font-semibold mb-4">🕷️ Create Crawl Job</h2>
                     <form id="crawl-form" action="/api/jobs" method="POST" class="space-y-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">URL or Domain</label>
-                            <input type="text" name="target_url" id="target-url-input" placeholder="https://example.com/page or example.com" required
-                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500" oninput="onURLInput()">
-                            <p class="text-xs text-gray-500 mt-1">Enter a full URL or domain. Use <code class="bg-gray-100 px-1 rounded">&#123;&#123;VAR&#125;&#125;</code> for template variables.</p>
+                            <div class="flex items-baseline justify-between mb-1">
+                                <label class="block text-sm font-medium text-gray-700">Start URLs <span class="font-normal text-gray-400">— one per line</span></label>
+                                <span id="url-count" class="text-xs font-mono text-indigo-500"></span>
+                            </div>
+                            <textarea name="target_url" id="target-url-input" rows="2" required oninput="onURLInput()"
+                                placeholder="https://example.com/category&#10;https://another-shop.com/category" dir="ltr"
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+                            <p class="text-xs text-gray-500 mt-1">A full URL or a bare domain. Add a line per site to cover several sites in <b>one</b> crawl — each one's own domain is crawled. Use <code class="bg-gray-100 px-1 rounded">&#123;&#123;VAR&#125;&#125;</code> for template variables (single URL only).</p>
+                            <label id="group-products-wrap" class="hidden mt-3 p-3 rounded-lg border border-indigo-200 bg-indigo-50 cursor-pointer items-start gap-2">
+                                <input type="checkbox" name="group_products" value="1" id="group-products" checked class="mt-0.5 h-4 w-4 text-indigo-600 border-gray-300 rounded">
+                                <span class="text-sm text-indigo-900">Compare products across these sites
+                                    <span class="block text-xs text-indigo-700/80 mt-0.5">Matches the same product on each site — by barcode or model number where possible, by name otherwise — and shows price, stock and the fields you track side by side.</span>
+                                </span>
+                            </label>
                         </div>
 
                         <!-- Advanced: URL Template Variables -->
@@ -614,8 +624,32 @@
         var tplVarRe = /\{\{(\w+)\}\}/g;
         var prevVarNames = [];
 
+        /* Start URLs are whitespace-separated, matching jobs.SplitTargets on
+           the server: the first is the job's target, the rest are seeds. */
+        function startURLs() {
+            return document.getElementById('target-url-input').value.split(/\s+/).filter(Boolean);
+        }
+
+        function baseDomainOf(raw) {
+            var host = raw.replace(/^[a-z]+:\/\//i, '').split('/')[0].split('?')[0].replace(/^www\./i, '');
+            return host.toLowerCase();
+        }
+
         function onURLInput() {
-            var url = document.getElementById('target-url-input').value;
+            var urls = startURLs();
+            var domains = {};
+            urls.forEach(function (u) { var d = baseDomainOf(u); if (d) { domains[d] = true; } });
+            var siteCount = Object.keys(domains).length;
+
+            var countEl = document.getElementById('url-count');
+            countEl.textContent = urls.length > 1 ? urls.length + ' URLs · ' + siteCount + ' site' + (siteCount === 1 ? '' : 's') : '';
+
+            // Comparing needs at least two sites to compare between.
+            var cmp = document.getElementById('group-products-wrap');
+            cmp.classList.toggle('hidden', siteCount < 2);
+            cmp.classList.toggle('flex', siteCount >= 2);
+
+            var url = urls.length === 1 ? urls[0] : '';
             var names = [];
             var seen = {};
             var m;

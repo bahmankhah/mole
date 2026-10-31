@@ -1,0 +1,225 @@
+{{/*
+  The comparison table of one grouping scope, shared by the crawl page (its
+  "Groups" tab) and the comparison page. Expects a *jobs.GroupingDashboard
+  as "." and renders the site columns, one row per matched product, and the
+  pages nothing matched yet. The page including it must also include
+  "groupingScript" once, which wires the field switcher and the member
+  actions against /api/v1/grouping/*.
+*/}}
+{{define "groupingStyles"}}
+<style>
+    .cmp-cell { padding: .5rem .75rem; vertical-align: top; }
+    .cmp-best { background: #ecfdf5; }
+    .cmp-best .cmp-val { color: #047857; font-weight: 700; }
+    .cmp-up { color: #b91c1c; }
+    .cmp-down { color: #047857; }
+    .cmp-spark { display: block; margin-top: .25rem; }
+    .cmp-stale { color: #9ca3af; text-decoration: line-through; }
+    .cmp-pin { opacity: 0; transition: opacity .12s; }
+    tr:hover .cmp-pin { opacity: 1; }
+</style>
+{{end}}
+
+{{define "groupingTable"}}
+<div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+    <div class="flex flex-wrap items-center gap-2">
+        <span class="text-xs text-gray-500">Compare</span>
+        <select id="cmp-field" class="set-input bg-white w-auto text-sm">
+            {{range .Fields}}<option value="{{.}}" {{if eq . $.Field}}selected{{end}}>{{.}}</option>{{end}}
+        </select>
+        <span class="text-xs text-gray-500">
+            <b>{{.TotalGroups}}</b> product{{if ne .TotalGroups 1}}s{{end}}
+            {{if gt .TotalPages 1}}· page {{.Page}} of {{.TotalPages}}{{end}}
+        </span>
+        {{if .LastObservedAt}}<span class="text-xs text-gray-400">last recorded {{ago .LastObservedAt}}</span>{{end}}
+    </div>
+    <div class="flex flex-wrap items-center gap-2">
+        <button onclick="cmpRegroup()" class="px-3 py-1.5 text-xs font-medium rounded bg-indigo-50 text-indigo-700 hover:bg-indigo-100" title="Recompute matching from the pages already crawled">↻ Re-match</button>
+    </div>
+</div>
+
+<div class="flex flex-wrap gap-2 mb-5">
+    {{range .Sites}}
+    <div class="px-3 py-2 rounded-lg border {{if eq .Status "running"}}border-indigo-200 bg-indigo-50{{else if eq .Status "failed"}}border-red-200 bg-red-50{{else}}border-gray-200 bg-gray-50{{end}} text-xs">
+        <div class="font-medium text-gray-800">{{.Label}}{{if .Disabled}} <span class="text-gray-400">(disabled)</span>{{end}}</div>
+        <div class="text-gray-500 mt-0.5">{{if .Status}}{{template "statusBadge" .Status}}{{else}}<span class="text-gray-400">not run yet</span>{{end}} · {{.ProductCount}} matched{{if .CompletedAt}} · {{ago .CompletedAt}}{{end}}</div>
+        {{if .LatestJobID}}<a href="/jobs/{{.LatestJobID}}" class="text-indigo-600 hover:underline">view crawl →</a>{{end}}
+    </div>
+    {{end}}
+</div>
+
+{{if eq (len .Sites) 1}}
+<p class="mb-4 text-xs rounded-md bg-indigo-50 border border-indigo-200 text-indigo-900 p-3">
+    This crawl covers <b>one site</b>, so there is nothing to compare prices <i>against</i> — what you see is each product once,
+    with the pages that were merged into it. To compare sites against each other, start a crawl with
+    <b>one start URL per site</b>; every start URL's own domain is crawled and each becomes a column here.
+    Run it on a schedule and each product keeps a history, so changes show up between runs.
+</p>
+{{end}}
+
+{{if .Rows}}
+<div class="overflow-x-auto">
+    <table class="w-full text-sm">
+        <thead class="bg-gray-50"><tr>
+            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Product</th>
+            {{range .Sites}}<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">{{.Label}}</th>{{end}}
+        </tr></thead>
+        <tbody class="divide-y divide-gray-100">
+            {{range $row := .Rows}}
+            <tr class="hover:bg-gray-50 align-top">
+                <td class="cmp-cell max-w-xs">
+                    <div class="font-medium text-gray-800 truncate" title="{{$row.Label}}">{{if $row.Label}}{{$row.Label}}{{else}}<span class="text-gray-400">untitled</span>{{end}}</div>
+                    <div class="text-xs text-gray-400">
+                        {{if $row.Brand}}{{$row.Brand}} · {{end}}{{if $row.VariantLabel}}{{$row.VariantLabel}} · {{end}}{{$row.MatchMethod}}{{if $row.Confidence}} {{printf "%.0f" (mulf $row.Confidence 100)}}%{{end}}
+                        {{if gt (len $row.Members) 1}}
+                        · <span class="text-indigo-600">{{len $row.Members}} pages merged</span>
+                        {{end}}
+                        {{if and $row.LowestValue $row.HighestValue (gt (derefF $row.HighestValue) (derefF $row.LowestValue))}}
+                        · spread {{printf "%.0f" (subf (derefF $row.HighestValue) (derefF $row.LowestValue))}} {{$row.Currency}}
+                        {{end}}
+                    </div>
+                </td>
+                {{range $site := $.Sites}}
+                {{$cell := index $row.Cells $site.SiteKey}}
+                <td class="cmp-cell {{if and $cell (not $cell.Stale) $cell.Num $row.LowestValue (eq (derefF $cell.Num) (derefF $row.LowestValue))}}cmp-best{{end}}">
+                    {{if $cell}}
+                    <a href="{{$cell.URL}}" target="_blank" rel="noopener" class="cmp-val {{if $cell.Stale}}cmp-stale{{else}}text-gray-800{{end}} hover:underline">
+                        {{if $cell.Num}}{{printf "%.0f" (derefF $cell.Num)}} {{$cell.Currency}}{{else}}{{$cell.Text}}{{end}}
+                    </a>
+                    {{if $cell.Stale}}
+                    <div class="text-xs text-amber-700" title="This site's latest run no longer found this product. The value above is what it last cost there.">⚠ not in the latest run</div>
+                    {{else if $cell.Changed}}
+                    <div class="text-xs {{if gt $cell.Delta 0.0}}cmp-up{{else}}cmp-down{{end}}">
+                        {{if gt $cell.Delta 0.0}}▲{{else}}▼{{end}} {{printf "%.0f" (absf $cell.Delta)}} since the previous run
+                    </div>
+                    {{else if $cell.TextChanged}}
+                    <div class="text-xs text-indigo-700">was {{$cell.PreviousText}}</div>
+                    {{end}}
+                    {{if gt $cell.Pages 1}}
+                    <details class="text-xs text-gray-500 mt-0.5">
+                        <summary class="cursor-pointer {{if $cell.Disagrees}}text-amber-700{{else}}text-indigo-600{{end}}">
+                            merged from {{$cell.Pages}} pages{{if $cell.Disagrees}} · {{printf "%.0f" (derefF $cell.Low)}}–{{printf "%.0f" (derefF $cell.High)}}{{end}}
+                        </summary>
+                        <div class="mt-1 space-y-0.5">
+                            {{if $cell.Disagrees}}<div class="text-amber-700">These pages do not agree on the value — they may not all be the same product. Use ✕ on the ones that do not belong.</div>{{end}}
+                            <div class="truncate" title="{{$cell.URL}}">{{$cell.URL}}</div>
+                            {{range $cell.AlsoURLs}}<div class="truncate text-gray-400" title="{{.}}">{{.}}</div>{{end}}
+                        </div>
+                    </details>
+                    {{end}}
+                    <div class="text-xs text-gray-400">
+                        {{ago $cell.ObservedAt}}{{if gt $cell.Runs 1}} · {{$cell.Runs}} runs{{end}}
+                        {{if $cell.MemberID}}
+                        <span class="cmp-pin ml-1">
+                            <button onclick="cmpPin({{$cell.MemberID}}, {{$cell.Pinned}})" title="{{if $cell.Pinned}}Pinned here — click to unpin{{else}}Confirm this match{{end}}">{{if $cell.Pinned}}📌{{else}}📍{{end}}</button>
+                            <button onclick="cmpExclude({{$cell.MemberID}})" title="Not this product — never match it here again">✕</button>
+                        </span>
+                        {{end}}
+                    </div>
+                    {{else}}<span class="text-gray-300">—</span>{{end}}
+                </td>
+                {{end}}
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</div>
+{{if gt .TotalPages 1}}
+<div class="flex flex-wrap items-center justify-center gap-2 mt-5 text-sm">
+    {{if gt .Page 1}}
+    <a href="{{.BasePath}}?field={{.Field}}&page={{subtract .Page 1}}#{{.Anchor}}" class="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-50">← Previous</a>
+    {{end}}
+    {{range pages .Page .TotalPages}}
+    <a href="{{$.BasePath}}?field={{$.Field}}&page={{.}}#{{$.Anchor}}"
+       class="px-3 py-1.5 rounded border {{if eq . $.Page}}bg-indigo-600 text-white border-indigo-600{{else}}bg-white border-gray-300 hover:bg-gray-50{{end}}">{{.}}</a>
+    {{end}}
+    {{if lt .Page .TotalPages}}
+    <a href="{{.BasePath}}?field={{.Field}}&page={{add .Page 1}}#{{.Anchor}}" class="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-50">Next →</a>
+    {{end}}
+    <span class="text-xs text-gray-400 ml-2">{{.TotalGroups}} products · biggest groups first</span>
+</div>
+{{end}}
+{{else}}
+<p class="text-gray-500 text-sm py-8 text-center">No matched products yet. Matching runs when a crawl finishes — or press "Re-match" to run it over the pages already crawled.</p>
+{{end}}
+
+{{if .Unmatched}}
+<div class="mt-8 border-t border-gray-100 pt-6">
+    <h3 class="text-sm font-semibold text-gray-700 mb-1">Not yet matched ({{len .Unmatched}})</h3>
+    <p class="text-xs text-gray-500 mb-3">Found on one site with no confident match elsewhere. Assign it to a product, or leave it — it is retried on the next match.</p>
+    <div class="space-y-2">
+        {{range $i, $u := .Unmatched}}
+        <div class="flex flex-wrap items-center gap-3 p-3 border border-gray-200 rounded-lg text-sm">
+            <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600">{{$u.SiteLabel}}</span>
+            <a href="{{$u.URL}}" target="_blank" rel="noopener" class="flex-1 min-w-0 truncate text-indigo-600 hover:underline">{{if $u.Title}}{{$u.Title}}{{else}}{{$u.URL}}{{end}}</a>
+            <span class="text-gray-700 font-medium">{{if $u.Num}}{{printf "%.0f" (derefF $u.Num)}} {{$u.Currency}}{{else}}{{$u.Text}}{{end}}</span>
+            <select class="set-input bg-white w-auto text-xs" data-cmp-assign="{{$i}}">
+                <option value="">Assign to…</option>
+                {{range $.Rows}}<option value="{{.ID}}">{{if .Label}}{{.Label}}{{else}}untitled{{end}}{{if .VariantLabel}} ({{.VariantLabel}}){{end}}</option>{{end}}
+            </select>
+        </div>
+        {{end}}
+    </div>
+</div>
+{{end}}
+{{end}}
+
+{{define "groupingScript"}}
+<script>
+    /* Wires the shared comparison table. The page defines, before this:
+         cmpScope     {type, id}   the grouping scope shown (schedule or crawl)
+         cmpUnmatched [...]        the dashboard's unmatched rows, in render order  */
+    function cmpReload(params) {
+        var url = new URL(location.href);
+        Object.keys(params || {}).forEach(function (k) { url.searchParams.set(k, params[k]); });
+        location.href = url.toString();
+    }
+    (function () {
+        var sel = document.getElementById('cmp-field');
+        if (sel) sel.addEventListener('change', function () { cmpReload({ field: this.value, page: 1 }); });
+    })();
+    async function cmpRegroup() {
+        var path = cmpScope.type === 'schedule' ? '/api/v1/schedules/' + cmpScope.id + '/regroup'
+            : '/api/v1/crawls/' + cmpScope.id + '/regroup';
+        try {
+            var r = (await Mole.api('POST', path)).data.result || {};
+            if (r.reason) { Mole.toast('Nothing grouped: ' + r.reason, false); return; }
+            Mole.toast(r.candidates + ' products in ' + r.groups + ' groups (' + r.created + ' new) from ' +
+                r.product_pages + ' pages · ' + r.observations + ' values recorded' +
+                (r.merged ? ' · ' + r.merged + ' duplicate groups merged' : '') +
+                (r.retired ? ' · ' + r.retired + ' no longer listed' : ''));
+            setTimeout(function () { location.reload(); }, 900);
+        } catch (err) { Mole.toast(err.message, false); }
+    }
+    async function cmpPin(memberID, pinned) {
+        try {
+            await Mole.api('POST', '/api/v1/grouping/members/' + memberID + '/' + (pinned ? 'unpin' : 'pin'));
+            Mole.toast(pinned ? 'Unpinned' : 'Pinned');
+            setTimeout(function () { location.reload(); }, 400);
+        } catch (err) { Mole.toast(err.message, false); }
+    }
+    async function cmpExclude(memberID) {
+        if (!confirm('Mark this page as not that product? It will be kept out of every group here from now on.')) return;
+        try {
+            await Mole.api('POST', '/api/v1/grouping/members/' + memberID + '/exclude');
+            Mole.toast('Excluded');
+            setTimeout(function () { location.reload(); }, 400);
+        } catch (err) { Mole.toast(err.message, false); }
+    }
+    document.querySelectorAll('[data-cmp-assign]').forEach(function (sel) {
+        sel.addEventListener('change', async function () {
+            var u = cmpUnmatched[+this.getAttribute('data-cmp-assign')], target = this.value;
+            if (!target || !u) { return; }
+            try {
+                await Mole.api('POST', '/api/v1/grouping/assign', {
+                    scope_type: cmpScope.type, scope_id: cmpScope.id, product_group_id: target,
+                    crawl_job_id: u.crawl_job_id, page_id: u.page_id, site_key: u.site_key,
+                    site_label: u.site_label, url: u.url, variant_key: u.variant_key
+                });
+                Mole.toast('Assigned');
+                setTimeout(function () { location.reload(); }, 400);
+            } catch (err) { Mole.toast(err.message, false); this.value = ''; }
+        });
+    });
+</script>
+{{end}}

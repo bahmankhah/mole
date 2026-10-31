@@ -54,6 +54,18 @@ func detectArticle(pg *pageData) *Article {
 	return out
 }
 
+// articleFromPage reads an article page that has no schema.org or OpenGraph
+// article data from its meta tags and markup.
+func articleFromPage(pg *pageData) *Article {
+	out := &Article{Sources: map[string]string{}}
+	mergeInto(out, articleFromMeta(pg), SourceMeta, out.Sources)
+	mergeInto(out, articleFromHTML(pg), SourceHTML, out.Sources)
+	if out.Headline == "" {
+		return nil
+	}
+	return out
+}
+
 func articleFromSchema(m map[string]interface{}, base *url.URL) *Article {
 	a := &Article{
 		Headline:    cleanInline(schemaString(m["headline"])),

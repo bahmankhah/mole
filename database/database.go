@@ -107,6 +107,7 @@ func (d *Database) migrate() error {
 		&models.PhraseMatch{},
 		&models.PageEmbedding{},
 		&models.PageContent{},
+		&models.PageTag{},
 		&models.PageChange{},
 		&models.Schedule{},
 		&models.WebhookDelivery{},
@@ -116,10 +117,15 @@ func (d *Database) migrate() error {
 		&models.JoinToken{},
 		&models.OwnerLimit{},
 		&models.ScrapeCacheEntry{},
+		&models.ProductGroup{},
+		&models.ProductGroupMember{},
+		&models.FieldObservation{},
 	)
 	if err != nil {
 		return err
 	}
+
+	d.dropObsoleteGroupingColumns()
 
 	// Create additional composite index for search performance (ignore if exists)
 	if !d.indexExists("phrase_matches", "idx_phrase_match_phrase_url") {
@@ -129,6 +135,12 @@ func (d *Database) migrate() error {
 	// Create composite index for doc_hash + crawl_job_id deduplication (ignore if exists)
 	if !d.indexExists("crawled_pages", "idx_doc_crawl_job") {
 		d.DB.Exec("CREATE INDEX idx_doc_crawl_job ON crawled_pages(doc_hash, crawl_job_id)")
+	}
+
+	// A job's kept pages in id order: page lists, "load more" cursors and
+	// title/URL search walk this index and stop once a page of results is found.
+	if !d.indexExists("crawled_pages", "idx_crawled_pages_job_id") {
+		d.DB.Exec("CREATE INDEX idx_crawled_pages_job_id ON crawled_pages(crawl_job_id, is_archived, skipped, id)")
 	}
 
 	// Queue claim order: highest priority first, then oldest.
@@ -146,6 +158,63 @@ func (d *Database) migrate() error {
 }
 
 // indexExists checks whether an index exists on a given table in the current database.
+// dropObsoleteGroupingColumns removes the columns left by the first shape
+// of product grouping, where a group belonged to a job group rather than to
+// a scope (a crawl, a schedule or a comparison). AutoMigrate adds columns
+// but never drops them, and the old ones are NOT NULL without a default, so
+// every insert into product_groups fails until they are gone.
+func (d *Database) dropObsoleteGroupingColumns() {
+	obsolete := []struct{ table, column string }{
+		{"product_groups", "job_group_id"},
+		{"product_groups", "lowest_price"},
+		{"product_groups", "highest_price"},
+		{"product_group_members", "job_group_id"},
+		{"product_group_members", "group_site_id"},
+	}
+	for _, o := range obsolete {
+		if !d.columnExists(o.table, o.column) {
+			continue
+		}
+		if err := d.DB.Exec(fmt.Sprintf("ALTER TABLE `%s` DROP COLUMN `%s`", o.table, o.column)).Error; err != nil {
+			log.Printf("[Migrate] Could not drop obsolete column %s.%s: %v", o.table, o.column, err)
+			continue
+		}
+		log.Printf("[Migrate] Dropped obsolete column %s.%s", o.table, o.column)
+	}
+	// price_observations became field_observations, which records any
+	// compared field rather than only a price. Drop it only while empty,
+	// so no observation anyone kept is thrown away.
+	if d.tableExists("price_observations") {
+		var rows int64
+		d.DB.Raw("SELECT COUNT(*) FROM price_observations").Scan(&rows)
+		if rows == 0 {
+			if err := d.DB.Exec("DROP TABLE price_observations").Error; err == nil {
+				log.Printf("[Migrate] Dropped empty obsolete table price_observations (replaced by field_observations)")
+			}
+		} else {
+			log.Printf("[Migrate] price_observations holds %d rows and is no longer used; drop it by hand once you no longer want them", rows)
+		}
+	}
+}
+
+func (d *Database) columnExists(table, column string) bool {
+	var count int64
+	d.DB.Raw(
+		"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
+		table, column,
+	).Scan(&count)
+	return count > 0
+}
+
+func (d *Database) tableExists(table string) bool {
+	var count int64
+	d.DB.Raw(
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+		table,
+	).Scan(&count)
+	return count > 0
+}
+
 func (d *Database) indexExists(table, indexName string) bool {
 	var count int64
 	d.DB.Raw(

@@ -33,7 +33,7 @@ func (m *Manager) schedulerLoop(ctx context.Context) {
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	var lastHeartbeat, lastCleanup time.Time
+	var lastHeartbeat, lastCleanup, lastLiveRegroup time.Time
 	for {
 		m.reclaimExpiredLeases()
 		if m.applyWorkerState() {
@@ -41,6 +41,10 @@ func (m *Manager) schedulerLoop(ctx context.Context) {
 		}
 		m.fireSchedules()
 		m.runDueAfterJobPlugins(ctx)
+		if time.Since(lastLiveRegroup) >= liveRegroupInterval {
+			lastLiveRegroup = time.Now()
+			m.regroupLiveJobs()
+		}
 		if time.Since(lastHeartbeat) >= 15*time.Second {
 			lastHeartbeat = time.Now()
 			m.heartbeat()
@@ -54,6 +58,40 @@ func (m *Manager) schedulerLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 		case <-m.wake:
+		}
+	}
+}
+
+// liveRegroupInterval is how often a crawl that is still running has its
+// products matched again, so the comparison table fills in while the crawl
+// works instead of appearing only at the end.
+const liveRegroupInterval = 90 * time.Second
+
+// regroupLiveJobs matches the products of the crawls this worker is
+// running right now, over the pages they have fetched so far.
+func (m *Manager) regroupLiveJobs() {
+	if !m.config.Grouping.Enabled {
+		return
+	}
+	var running []models.CrawlJob
+	if err := m.db.Select("id", "settings", "schedule_id", "group_id").
+		Where("status = ? AND worker_id = ?", models.JobStatusRunning, m.workerID).
+		Limit(20).Find(&running).Error; err != nil {
+		return
+	}
+	for i := range running {
+		job := running[i]
+		scopeType, scopeID, grouped := ScopeForJob(&job)
+		if !grouped {
+			continue
+		}
+		res, err := m.Regroup(scopeType, scopeID, RegroupOptions{Partial: true})
+		if err != nil {
+			log.Printf("[Grouping] Live pass for scope %s/%s failed: %v", scopeType, scopeID, err)
+			continue
+		}
+		if res.Groups > 0 {
+			log.Printf("[Grouping] Live pass for scope %s/%s: %d groups so far", scopeType, scopeID, res.Groups)
 		}
 	}
 }
@@ -240,6 +278,7 @@ func (m *Manager) onRunEnded(job *models.CrawlJob, out crawler.Outcome) {
 	if out.Changes != nil && (out.Changes.New+out.Changes.Changed+out.Changes.Removed) > 0 {
 		m.emit(job, EventJobChanges, map[string]interface{}{"changes": out.Changes})
 	}
+	m.onGroupJobEnded(job)
 	m.nudge()
 }
 

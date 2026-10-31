@@ -10,6 +10,7 @@ import (
 	"github.com/resolver/crawler/config"
 	"github.com/resolver/crawler/content"
 	"github.com/resolver/crawler/models"
+	"github.com/resolver/crawler/modules"
 	"github.com/resolver/crawler/netx"
 )
 
@@ -40,8 +41,27 @@ type RunSettings struct {
 	Phrases          []string
 	ChangeDetection  bool
 	CompareWithJobID string
-	Limits           models.JobLimits
+	TagRules         []TagRule
+	KeepTags         map[string]bool // nil = keep every page
+	MaxKeptPages     int
+	// ScopeDomains are further base domains the crawl may follow links
+	// into, besides the job's own; nil = the job's domain only.
+	ScopeDomains map[string]bool
+	// MaxPagesPerDomain caps the pages taken from any one site, so one
+	// site of a multi-site crawl cannot spend the whole page budget.
+	// 0 = no per-site cap.
+	MaxPagesPerDomain int
+	Limits            models.JobLimits
 }
+
+// TagRule is a compiled models.TagRule.
+type TagRule struct {
+	Pattern *regexp.Regexp
+	Tag     string
+}
+
+// maxTagRules bounds the rules of a job; each is matched against every URL.
+const maxTagRules = 100
 
 var validBlockResources = map[string]bool{"image": true, "font": true, "media": true, "stylesheet": true}
 
@@ -104,6 +124,9 @@ func mergeSettings(rs *RunSettings, s *models.JobSettings, proxies *netx.ProxyMa
 	}
 	if s.MaxPages != nil {
 		rs.MaxPages = *s.MaxPages
+	}
+	if s.MaxPagesPerDomain != nil {
+		rs.MaxPagesPerDomain = *s.MaxPagesPerDomain
 	}
 	if s.UserAgent != nil {
 		rs.UserAgent = *s.UserAgent
@@ -279,7 +302,125 @@ func mergeSettings(rs *RunSettings, s *models.JobSettings, proxies *netx.ProxyMa
 	if s.CompareWithJobID != nil {
 		rs.CompareWithJobID = strings.TrimSpace(*s.CompareWithJobID)
 	}
+	if len(s.ScopeDomains) > 0 {
+		rs.ScopeDomains = map[string]bool{}
+		for _, d := range s.ScopeDomains {
+			domain := modules.CleanDomain(strings.TrimSpace(d))
+			if domain == "" {
+				return fmt.Errorf("invalid scope domain %q", d)
+			}
+			rs.ScopeDomains[domain] = true
+		}
+	}
+	rules, err := CompileTagRules(s.TagRules)
+	if err != nil {
+		return err
+	}
+	rs.TagRules = rules
+	if len(s.KeepTags) > 0 {
+		rs.KeepTags = map[string]bool{}
+		for _, t := range s.KeepTags {
+			if strings.TrimSpace(t) == models.KeepTagAuto {
+				added := false
+				for format := range rs.Detectors {
+					for pageType, f := range models.PageTypeDetector {
+						if f == format {
+							rs.KeepTags[pageType] = true
+							added = true
+						}
+					}
+				}
+				if !added {
+					return fmt.Errorf(`keep_tags "auto" keeps the types of the enabled detectors: enable product, article, job_posting or event`)
+				}
+				continue
+			}
+			tag := models.NormalizeTag(t)
+			if tag == "" {
+				return fmt.Errorf("invalid keep tag %q", t)
+			}
+			rs.KeepTags[tag] = true
+		}
+	}
+	if s.MaxKeptPages != nil {
+		if *s.MaxKeptPages < 0 {
+			return fmt.Errorf("max_kept_pages must be >= 0")
+		}
+		rs.MaxKeptPages = *s.MaxKeptPages
+	}
 	return nil
+}
+
+// CompileTagRules validates and compiles tag rules (case-insensitive regexes).
+func CompileTagRules(rules []models.TagRule) ([]TagRule, error) {
+	if len(rules) > maxTagRules {
+		return nil, fmt.Errorf("at most %d tag rules are allowed", maxTagRules)
+	}
+	out := make([]TagRule, 0, len(rules))
+	for i, r := range rules {
+		tag := models.NormalizeTag(r.Tag)
+		if tag == "" {
+			return nil, fmt.Errorf("tag rule %d: invalid tag %q (1-%d characters, no commas or quotes)", i+1, r.Tag, models.MaxTagLength)
+		}
+		if strings.TrimSpace(r.Pattern) == "" {
+			return nil, fmt.Errorf("tag rule %d (%s): pattern is required", i+1, tag)
+		}
+		re, err := regexp.Compile("(?i)" + strings.TrimSpace(r.Pattern))
+		if err != nil {
+			return nil, fmt.Errorf("tag rule %d (%s): invalid pattern: %v", i+1, tag, err)
+		}
+		out = append(out, TagRule{Pattern: re, Tag: tag})
+	}
+	return out, nil
+}
+
+// pageTypeTags are the tags that are also page types.
+var pageTypeTags = func() map[string]bool {
+	m := map[string]bool{}
+	for _, t := range models.AllPageTypes {
+		m[t] = true
+	}
+	return m
+}()
+
+// TagPage returns a page's effective type and tags: the first matching rule
+// whose tag is a page type overrides the detected type; the tags are the
+// type (unless "other" or unknown) plus every matching rule's tag. Both
+// rawURL and finalURL (after redirects, may be "") are matched.
+func TagPage(rules []TagRule, rawURL, finalURL, detected string) (pageType string, tags []string) {
+	pageType = detected
+	overridden := false
+	seen := map[string]bool{}
+	var ruleTags []string
+	for _, r := range rules {
+		if !r.Pattern.MatchString(rawURL) && (finalURL == "" || !r.Pattern.MatchString(finalURL)) {
+			continue
+		}
+		if pageTypeTags[r.Tag] && !overridden {
+			pageType, overridden = r.Tag, true
+		}
+		if !seen[r.Tag] {
+			seen[r.Tag] = true
+			ruleTags = append(ruleTags, r.Tag)
+		}
+	}
+	if pageType != "" && pageType != models.PageTypeOther && !seen[pageType] {
+		tags = append(tags, pageType)
+	}
+	return pageType, append(tags, ruleTags...)
+}
+
+// Keeps reports whether a page with these tags is saved in full.
+func (rs *RunSettings) Keeps(tags []string) bool {
+	if rs.KeepTags == nil {
+		return true
+	}
+	for _, t := range tags {
+		if rs.KeepTags[t] {
+			return true
+		}
+	}
+	return false
 }
 
 // withoutExtensions returns list without the given extensions, as a new slice

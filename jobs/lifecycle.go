@@ -8,9 +8,11 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
+	"github.com/resolver/crawler/content"
 	"github.com/resolver/crawler/crawler"
 	"github.com/resolver/crawler/models"
 	"github.com/resolver/crawler/modules"
@@ -111,6 +113,19 @@ func SpecFromTemplate(t models.JobTemplate) JobSpec {
 	return spec
 }
 
+// SplitTargets splits a start-URL field into individual URLs. Whitespace
+// (one URL per line is what the form asks for) is the only separator, so a
+// URL carrying commas in its query string survives intact.
+func SplitTargets(raw string) []string {
+	var out []string
+	for _, f := range strings.Fields(raw) {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // ParseTarget turns a URL or bare domain into the job's target URL and the
 // base domain links are kept within.
 func ParseTarget(target string) (fullURL, domain string, err error) {
@@ -193,6 +208,42 @@ func (m *Manager) ValidateSettings(s *models.JobSettings, limits *models.JobLimi
 	}
 	if s != nil && s.LLMPrompt != nil && *s.LLMPrompt != "" && m.engine.LLM() == nil {
 		return invalidInput("LLM extraction is not configured on this engine (llm.base_url / llm.model)")
+	}
+	if err := m.validateGroupingSettings(s); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateGroupingSettings checks the grouping half of a job's settings:
+// the fields it compares must be known product fields or one of its own
+// extract fields, and grouping must be enabled on the engine.
+func (m *Manager) validateGroupingSettings(s *models.JobSettings) error {
+	if s == nil {
+		return nil
+	}
+	grouping := s.GroupProducts != nil && *s.GroupProducts
+	if grouping && !m.config.Grouping.Enabled {
+		return invalidInput("product grouping is disabled on this engine (grouping.enabled)")
+	}
+	if s.MatchThreshold != nil && (*s.MatchThreshold < 0 || *s.MatchThreshold > 1) {
+		return invalidInput("match_threshold must be between 0 and 1")
+	}
+	if s.MatchMode != nil {
+		switch *s.MatchMode {
+		case "", models.MatchModeAuto, models.MatchModeExactOnly, models.MatchModeManual:
+		default:
+			return invalidInput("match_mode must be %q, %q or %q", models.MatchModeAuto, models.MatchModeExactOnly, models.MatchModeManual)
+		}
+	}
+	own := map[string]bool{}
+	for _, f := range s.ExtractFields {
+		own[f.Name] = true
+	}
+	for _, f := range s.CompareFields {
+		if content.FieldKindOf(f) == "" && !own[f] {
+			return invalidInput("compare_fields: %q is not a detected product field, and no extract field is named that", f)
+		}
 	}
 	return nil
 }
@@ -605,7 +656,13 @@ func (m *Manager) UpdateJobSettings(jobID string, settings *models.JobSettings) 
 		return invalidState("can only update settings for pending or paused jobs")
 	}
 	if settings == nil || settings.IsEmpty() {
-		return m.db.Model(&models.CrawlJob{}).Where("id = ?", jobID).Update("settings", nil).Error
+		if err := m.db.Model(&models.CrawlJob{}).Where("id = ?", jobID).Update("settings", nil).Error; err != nil {
+			return err
+		}
+		if job.Settings != nil && len(job.Settings.TagRules) > 0 {
+			_, err = m.retag(jobID, nil)
+		}
+		return err
 	}
 	if err := m.ValidateSettings(settings, job.Limits, true); err != nil {
 		return err
@@ -615,7 +672,18 @@ func (m *Manager) UpdateJobSettings(jobID string, settings *models.JobSettings) 
 		return fmt.Errorf("encode settings: %w", err)
 	}
 	// Write the JSON column directly; Save() does not reliably persist the custom Valuer.
-	return m.db.Model(&models.CrawlJob{}).Where("id = ?", jobID).Update("settings", string(raw)).Error
+	if err := m.db.Model(&models.CrawlJob{}).Where("id = ?", jobID).Update("settings", string(raw)).Error; err != nil {
+		return err
+	}
+	// A paused job's pages follow its new tag rules.
+	var old []models.TagRule
+	if job.Settings != nil {
+		old = job.Settings.TagRules
+	}
+	if !reflect.DeepEqual(old, settings.TagRules) {
+		_, err = m.retag(jobID, settings.TagRules)
+	}
+	return err
 }
 
 // SecretMask is shown instead of stored webhook secrets; sending it back in

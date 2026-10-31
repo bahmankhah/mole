@@ -71,6 +71,20 @@ var TemplateFuncs = template.FuncMap{
 		}
 		return *s
 	},
+	"derefF": func(f *float64) float64 {
+		if f == nil {
+			return 0
+		}
+		return *f
+	},
+	"mulf": func(a, b float64) float64 { return a * b },
+	"subf": func(a, b float64) float64 { return a - b },
+	"absf": func(a float64) float64 {
+		if a < 0 {
+			return -a
+		}
+		return a
+	},
 	"ago": func(t *time.Time) string {
 		if t == nil || t.IsZero() {
 			return "—"

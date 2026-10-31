@@ -21,6 +21,7 @@
         .badge-anchor { background:#d1fae5; color:#065f46; }
     </style>
     {{template "settingsStyles"}}
+    {{template "groupingStyles"}}
     <script>
         function showTab(t){
             document.querySelectorAll('.tab-content').forEach(function(e){e.classList.add('hidden')});
@@ -93,6 +94,7 @@
                 <div class="bg-gray-50 rounded-lg p-4">
                     <div class="text-gray-500 text-xs uppercase tracking-wide">Crawled</div>
                     <div class="text-2xl font-bold text-indigo-600"><span id="m-crawled">{{.job.CrawledURLs}}</span>{{if .runStats.Limits.MaxPages}}<span class="text-sm text-gray-400 font-medium"> / {{.runStats.Limits.MaxPages}}</span>{{end}}</div>
+                    {{if and .job.Settings .job.Settings.KeepTags}}<div class="text-xs text-gray-500 mt-1" title="Pages saved with content; the rest were fetched for their links and skipped"><span id="m-kept" class="font-semibold text-green-700">{{.job.KeptURLs}}</span> kept{{if .job.Settings.MaxKeptPages}} / {{.job.Settings.MaxKeptPages}}{{end}}</div>{{end}}
                 </div>
                 <div class="bg-gray-50 rounded-lg p-4">
                     <div class="text-gray-500 text-xs uppercase tracking-wide">Known URLs</div>
@@ -118,6 +120,23 @@
                     <div class="text-xs text-gray-400"><span id="m-llm">{{.job.Usage.LLMTokens}}</span> tokens · <span id="m-shots">{{.job.Usage.Screenshots}}</span> screenshots</div>
                 </div>
             </div>
+            {{if .showSiteStats}}
+            <div class="mt-5">
+                <div class="text-gray-500 text-xs uppercase tracking-wide mb-2">Sites in this crawl</div>
+                <div class="flex flex-wrap gap-2">
+                    {{range .siteStats}}
+                    <div class="px-3 py-2 rounded-lg border {{if gt .Errors 0}}border-amber-200 bg-amber-50{{else}}border-gray-200 bg-gray-50{{end}} text-xs">
+                        <div class="font-medium text-gray-800">{{.Domain}}</div>
+                        <div class="text-gray-500 mt-0.5">
+                            {{.Pages}} pages · {{.Kept}} kept{{if gt .Products 0}} · {{.Products}} products{{end}}
+                            {{if gt .Errors 0}}· <span class="text-amber-700">{{.Errors}} errors</span>{{end}}
+                            {{if .LastAt}}· {{ago .LastAt}}{{end}}
+                        </div>
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+            {{end}}
             <div class="mt-4 text-sm text-gray-500 flex flex-wrap gap-x-4">
                 <span>Created {{.job.CreatedAt.Format "Jan 02, 2006 15:04:05"}}</span>
                 {{if .job.StartedAt}}<span>Started {{.job.StartedAt.Format "Jan 02, 2006 15:04:05"}}</span>{{end}}
@@ -142,6 +161,9 @@
                     {{end}}
                     {{if .showPlugins}}
                     <button onclick="showTab('plugins')" class="tab-btn py-4 text-sm font-medium text-gray-500 hover:text-gray-700" data-tab="plugins">🧩 Plugins{{if gt .pluginStatus.AfterCrawlFailures 0}} <span class="ml-1 px-1.5 rounded-full bg-red-100 text-red-700 text-xs">{{.pluginStatus.AfterCrawlFailures}}</span>{{end}}</button>
+                    {{end}}
+                    {{if .showGrouping}}
+                    <button onclick="showTab('groups')" class="tab-btn py-4 text-sm font-medium text-gray-500 hover:text-gray-700" data-tab="groups" title="Products of this crawl matched into groups and compared field by field">⚖️ Groups ({{len .grouping.Rows}})</button>
                     {{end}}
                     <button onclick="showTab('settings')" class="tab-btn py-4 text-sm font-medium text-gray-500 hover:text-gray-700" data-tab="settings">⚙ Settings</button>
                 </nav>
@@ -232,16 +254,41 @@
                     </div>
                 </div>
                 <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                    <div class="flex flex-wrap items-center gap-2">
                     <div class="inline-flex rounded-md border border-gray-300 overflow-hidden text-sm" id="data-filter">
                         <button type="button" data-f="" class="px-3 py-1.5 bg-indigo-600 text-white">All</button>
                         <button type="button" data-f="successful" class="px-3 py-1.5 border-l border-gray-300 bg-white text-gray-700 hover:bg-gray-50">Successful</button>
                         <button type="button" data-f="failed" class="px-3 py-1.5 border-l border-gray-300 bg-white text-gray-700 hover:bg-gray-50">Errors</button>
+                    </div>
+                    <input type="search" id="data-search" dir="auto" autocomplete="off" placeholder="Search title or URL…" title="Pages whose title or URL contains every word" class="px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none w-64 max-w-full">
+                    <select id="data-skipped" class="px-2 py-1.5 border border-gray-300 rounded-md text-sm bg-white" title="Skipped pages were fetched for their links but not kept (see Keep only pages tagged, on the Settings tab)">
+                        <option value="">Kept pages</option>
+                        <option value="include">Kept + skipped</option>
+                        <option value="only">Skipped only</option>
+                    </select>
                     </div>
                     <div class="flex items-center gap-3 text-sm text-gray-500">
                         <span id="data-count"></span>
                         <label class="flex items-center gap-1.5 cursor-pointer" title="Reload the newest pages every 5 seconds while the crawl runs">
                             <input type="checkbox" id="data-live" class="h-4 w-4 text-indigo-600 rounded" {{if or (eq .job.Status "running") (eq .job.Status "queued")}}checked{{end}}> Live
                         </label>
+                    </div>
+                </div>
+                <div class="flex flex-wrap items-center gap-1.5 mb-4">
+                    <div id="data-tags" class="flex flex-wrap items-center gap-1.5"></div>
+                    <button type="button" id="tag-rules-btn" onclick="toggleTagRules()" class="ml-auto px-2.5 py-1 text-xs border border-gray-300 rounded-md hover:bg-gray-50">🏷 Tag rules</button>
+                </div>
+                <div id="tag-rules-panel" class="hidden mb-4 border border-indigo-200 bg-indigo-50/40 rounded-lg p-4">
+                    <div class="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+                        <h4 class="text-sm font-semibold text-gray-800">Tag rules</h4>
+                        <span class="text-xs text-gray-500">URL regex → tag · case-insensitive</span>
+                    </div>
+                    <p class="text-xs text-gray-500 mb-3">Pages whose URL matches get the tag; a page can have several. A page-type tag (product, article, job_posting…) also sets the page type. Saving re-tags this crawl's pages without fetching them again; whether a page was kept does not change.</p>
+                    <div id="tag-rules-editor"></div>
+                    <div class="flex items-center gap-3 mt-3">
+                        <button type="button" id="tag-rules-save" onclick="saveTagRules()" class="px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:opacity-50">Save and re-tag</button>
+                        <button type="button" onclick="toggleTagRules()" class="px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-50">Close</button>
+                        <span id="tag-rules-status" class="text-xs text-gray-500"></span>
                     </div>
                 </div>
                 <div id="data-list" class="space-y-3"></div>
@@ -320,6 +367,17 @@
             </div>
 
             <!-- ── Settings Tab ── -->
+            {{if .showGrouping}}
+            <!-- ── Groups Tab ── -->
+            <div id="tab-groups" class="tab-content p-6 hidden">
+                <p class="text-sm text-gray-500 mb-5">
+                    {{if eq .groupingScopeType "schedule"}}Products of this schedule's runs, matched into groups by barcode/model number where possible and by name otherwise. One column per site the crawl covers, and every run adds to each product's history, so you see what changed.
+                    {{else}}Products of this crawl, matched into groups by barcode/model number where possible and by name otherwise. One column per site the crawl covered — give the crawl several start URLs to compare sites against each other.{{end}}
+                </p>
+                {{template "groupingTable" .grouping}}
+            </div>
+            {{end}}
+
             <div id="tab-settings" class="tab-content p-6 hidden">
                 <div class="flex flex-wrap items-start justify-between gap-4 mb-6">
                     <div>
@@ -652,8 +710,10 @@
             catch(err){Mole.toast(err.message,false);}
         }
         function exportData(fmt){
+            // Exports follow the Pages & Data search and tag filter.
             var ok=document.getElementById('export-successful').checked?'&successful=1':'';
-            location.href='/api/v1/crawls/'+pagesState.jobId+'/export?format='+fmt+ok;
+            var f=(dataState.q?'&q='+encodeURIComponent(dataState.q):'')+(dataState.tag?'&tag='+encodeURIComponent(dataState.tag):'');
+            location.href='/api/v1/crawls/'+pagesState.jobId+'/export?format='+fmt+ok+f;
         }
 
         /* ── Live progress ── */
@@ -669,6 +729,7 @@
                     var u=d.usage, live=d.live;
                     var set=function(id,v){var el=document.getElementById(id);if(el)el.textContent=v;};
                     set('m-crawled', live?live.crawled:d.crawled_urls);
+                    set('m-kept', live?live.kept:d.kept_urls);
                     pagesState.total=d.crawled_urls;
                     set('m-total', d.total_urls); set('m-matches', live?live.matches:d.found_matches);
                     set('m-requests', u.requests); set('m-errors', u.errors); set('m-bytes', Mole.fmtBytes(u.bytes));
@@ -679,7 +740,8 @@
         }
 
         /* ── Pages & Data tab ── */
-        var dataState={cursor:'',done:false,filter:'',loaded:0,loading:false};
+        var dataState={cursor:'',done:false,filter:'',q:'',tag:'',skipped:'',loaded:0,loading:false,seq:0};
+        var tagSummary=null;
         function previewValue(v){
             if(v===null||v===undefined)return '<span class="text-gray-300">—</span>';
             if(typeof v==='object'&&v.amount!==undefined&&v.raw!==undefined) return Mole.esc(Number(v.amount).toLocaleString()+' '+(v.currency||''));
@@ -712,25 +774,39 @@
             var llm=c.llm_extracted?'<div class="mt-2 text-xs"><span class="text-purple-600 font-medium">LLM</span> <code dir="auto">'+Mole.esc(JSON.stringify(c.llm_extracted)).slice(0,400)+'</code></div>':'';
             var md=c.markdown?'<p dir="auto" class="text-xs text-gray-500 mt-2 line-clamp-2">'+Mole.esc(c.markdown.slice(0,280))+'</p>':'';
             var err=(p.error_message?'<p class="text-xs text-red-600 mt-2">'+Mole.esc(p.error_message)+'</p>':'')+(c.extract_error?'<p class="text-xs text-amber-700 mt-1">'+Mole.esc(c.extract_error)+'</p>':'');
+            var tagLine='';
+            if(p.page_type||(p.tags&&p.tags.length)||p.skipped){
+                var tags=(p.tags||[]).map(function(t){return '<button type="button" data-filter-tag="'+Mole.esc(t)+'" title="Show pages tagged '+Mole.esc(t)+'">'+Mole.tagPill(t,catalog,'hover:ring-1 hover:ring-indigo-300')+'</button>';}).join('');
+                var typeNote=p.page_type&&(p.tags||[]).indexOf(p.page_type)<0?'<span class="text-xs text-gray-400" title="'+Mole.esc(p.type_signals||'')+'">'+Mole.typeIcon(p.page_type)+' '+Mole.esc(p.page_type)+'</span>':'';
+                var overridden=p.detected_type&&p.page_type&&p.detected_type!==p.page_type?'<span class="text-xs text-gray-400" title="Detected as '+Mole.esc(p.detected_type)+'; a tag rule set the type">(detected: '+Mole.esc(p.detected_type)+')</span>':'';
+                tagLine='<div class="flex flex-wrap items-center gap-1.5 mt-2" title="'+Mole.esc(p.type_signals?'Detected from: '+p.type_signals:'')+'">'+
+                    (p.skipped?'<span class="px-1.5 py-0.5 rounded text-xs bg-gray-200 text-gray-700" title="Fetched for its links; not kept because none of its tags is in Keep only pages tagged">skipped</span>':'')+
+                    tags+typeNote+overridden+'</div>';
+            }
             var div=document.createElement('div');
-            div.className='border border-gray-200 rounded-lg p-4 hover:border-indigo-300 transition';
+            div.className='border rounded-lg p-4 hover:border-indigo-300 transition '+(p.skipped?'border-dashed border-gray-300 bg-gray-50/60':'border-gray-200');
             div.innerHTML='<div class="flex items-start justify-between gap-3"><div class="min-w-0 flex-1">'+
                 '<a href="'+href+'" class="font-medium text-gray-900 hover:text-indigo-700 block truncate text-left" dir="auto">'+Mole.esc(p.title||p.url)+'</a>'+
                 '<a href="'+Mole.esc(p.url)+'" target="_blank" rel="noopener" class="text-xs text-blue-600 hover:underline truncate block">'+Mole.esc(p.url)+'</a></div>'+
                 '<div class="flex-shrink-0 flex items-center gap-3 text-xs text-gray-400"><span title="'+Mole.esc(new Date(p.crawled_at).toLocaleString())+'">'+timeAgo(p.crawled_at)+'</span>'+
                 '<a href="'+href+'" class="text-indigo-600 font-medium">View →</a></div></div>'+
+                tagLine+
                 '<div class="flex flex-wrap gap-1.5 mt-2 text-xs">'+meta.join('')+'</div>'+
                 (ex?'<div class="mt-3 grid gap-1 sm:grid-cols-2 bg-gray-50 rounded-md p-2">'+ex+'</div>':'')+llm+md+err;
             return div;
         }
         async function loadData(reset){
-            if(dataState.loading)return;
+            // A reset (new filter or search) supersedes a request in flight; "Load more" waits for it.
+            if(dataState.loading&&!reset)return;
             if(reset){dataState.cursor='';dataState.done=false;dataState.loaded=0;}
             if(dataState.done)return;
             dataState.loading=true;
-            var url='/api/v1/crawls/'+pagesState.jobId+'/pages?content=1&order=desc&limit=25'+(dataState.filter?'&'+dataState.filter+'=1':'')+(dataState.cursor?'&cursor='+dataState.cursor:'');
+            var seq=++dataState.seq;
+            var url='/api/v1/crawls/'+pagesState.jobId+'/pages?content=1&order=desc&limit=25'+(dataState.filter?'&'+dataState.filter+'=1':'')+(dataState.q?'&q='+encodeURIComponent(dataState.q):'')+
+                (dataState.tag?'&tag='+encodeURIComponent(dataState.tag):'')+(dataState.skipped?'&skipped='+dataState.skipped:'')+(dataState.cursor?'&cursor='+dataState.cursor:'');
             try{
                 var res=await Mole.api('GET',url);
+                if(seq!==dataState.seq)return; // a newer search replaced this one
                 var list=document.getElementById('data-list');
                 if(reset) list.innerHTML='';
                 (res.data||[]).forEach(function(p){list.appendChild(pageCard(p));});
@@ -741,14 +817,94 @@
                 var empty=list.children.length===0;
                 document.getElementById('data-empty').classList.toggle('hidden',!empty);
                 if(empty){
-                    document.getElementById('data-empty-title').textContent=dataState.filter==='failed'?'No failed pages':dataState.filter==='successful'?'No successful pages yet':'No pages yet';
-                    document.getElementById('data-empty-hint').textContent=dataState.filter?'Try another filter.':'Start the crawl to begin fetching pages.';
+                    var filtered=dataState.q||dataState.tag||dataState.filter||dataState.skipped;
+                    document.getElementById('data-empty-title').textContent=dataState.q?'No pages match “'+dataState.q+'”':dataState.tag?'No pages tagged '+dataState.tag:dataState.skipped==='only'?'No skipped pages':dataState.filter==='failed'?'No failed pages':dataState.filter==='successful'?'No successful pages yet':'No pages yet';
+                    document.getElementById('data-empty-hint').textContent=dataState.q?'Every word must appear in the title or URL.':filtered?'Try another filter.':'Start the crawl to begin fetching pages.';
                 }
-                document.getElementById('data-count').textContent=dataState.filter?'':('Showing '+dataState.loaded+' of '+pagesState.total);
-            }catch(e){Mole.toast(e.message,false);}
-            dataState.loading=false;
+                var anyFilter=dataState.q||dataState.tag||dataState.filter||dataState.skipped;
+                document.getElementById('data-count').textContent=anyFilter?(dataState.loaded+(dataState.done?'':'+')+' matching'):('Showing '+dataState.loaded+' of '+pagesState.total);
+            }catch(e){if(seq===dataState.seq)Mole.toast(e.message,false);}
+            if(seq===dataState.seq)dataState.loading=false;
+        }
+        /* Tag filter: counts per tag; a click filters the list by that tag. */
+        async function loadTagCounts(){
+            try{
+                tagSummary=(await Mole.api('GET','/api/v1/crawls/'+pagesState.jobId+'/tags')).data;
+            }catch(e){return;}
+            renderTagBar();
+        }
+        function renderTagBar(){
+            var bar=document.getElementById('data-tags'), s=tagSummary||{tags:[]};
+            var showSkipped=dataState.skipped!=='';
+            var count=function(c){return showSkipped?(dataState.skipped==='only'?c.skipped:c.kept+c.skipped):c.kept;};
+            var chip=function(tag,label,n,title){
+                var on=dataState.tag===tag;
+                return '<button type="button" data-tag="'+Mole.esc(tag)+'" title="'+Mole.esc(title||'')+'" class="px-2.5 py-1 rounded-full border text-xs '+
+                    (on?'bg-indigo-600 border-indigo-600 text-white':'bg-white border-gray-300 text-gray-700 hover:bg-gray-50')+'" dir="auto">'+label+
+                    ' <span class="'+(on?'text-indigo-100':'text-gray-400')+'">'+n+'</span></button>';
+            };
+            var total=showSkipped?(dataState.skipped==='only'?s.skipped:s.kept+s.skipped):s.kept;
+            var html=chip('','All',total,'')+(s.tags||[]).filter(function(c){return count(c)>0||dataState.tag===c.tag;}).map(function(c){
+                var typed=Mole.isPageType(c.tag,catalog);
+                return chip(c.tag,(typed?Mole.typeIcon(c.tag)+' ':'#')+Mole.esc(c.tag),count(c),c.kept+' kept · '+c.skipped+' skipped');
+            }).join('');
+            if(s.skipped>0&&!showSkipped) html+='<span class="text-xs text-gray-400 ml-1">'+s.skipped+' skipped pages hidden</span>';
+            bar.innerHTML=html;
+        }
+        var tagRulesEditor=null;
+        function toggleTagRules(){
+            var panel=document.getElementById('tag-rules-panel');
+            panel.classList.toggle('hidden');
+            if(!panel.classList.contains('hidden')&&!tagRulesEditor){
+                tagRulesEditor=Mole.tagRulesEditor(document.getElementById('tag-rules-editor'),(currentSettings&&currentSettings.tag_rules)||[],catalog,{});
+            }
+            var running='{{.job.Status}}'==='running';
+            document.getElementById('tag-rules-save').disabled=running;
+            if(running) document.getElementById('tag-rules-status').textContent='Pause the crawl to change its tag rules.';
+        }
+        async function saveTagRules(){
+            var rules=tagRulesEditor.get(), status=document.getElementById('tag-rules-status');
+            for(var i=0;i<rules.length;i++){
+                if(!rules[i].pattern||!rules[i].tag){status.textContent='Rule '+(i+1)+' needs a pattern and a tag.';return;}
+                try{new RegExp(rules[i].pattern);}catch(e){status.textContent='Rule '+(i+1)+': invalid regex ('+e.message+')';return;}
+            }
+            var btn=document.getElementById('tag-rules-save');
+            btn.disabled=true;status.textContent='Re-tagging…';
+            try{
+                var res=await Mole.api('PUT','/api/v1/crawls/'+pagesState.jobId+'/tag-rules',{tag_rules:rules});
+                currentSettings=currentSettings||{};
+                currentSettings.tag_rules=rules;
+                status.textContent='Saved. '+res.data.retagged_pages+' page'+(res.data.retagged_pages===1?'':'s')+' re-tagged.';
+                Mole.toast('Tag rules saved',true);
+                loadTagCounts();
+                loadData(true);
+            }catch(e){status.textContent=e.message;Mole.toast(e.message,false);}
+            btn.disabled=false;
         }
         function initDataTab(){
+            var startTag=new URLSearchParams(location.search).get('tag'); // from a tag link on a page's view
+            if(startTag) dataState.tag=startTag;
+            document.getElementById('data-tags').addEventListener('click',function(e){
+                var b=e.target.closest('[data-tag]');
+                if(!b)return;
+                dataState.tag=b.getAttribute('data-tag');
+                renderTagBar();
+                loadData(true);
+            });
+            document.getElementById('data-list').addEventListener('click',function(e){
+                var b=e.target.closest('[data-filter-tag]');
+                if(!b)return;
+                dataState.tag=b.getAttribute('data-filter-tag');
+                renderTagBar();
+                loadData(true);
+                document.getElementById('data-tags').scrollIntoView({behavior:'smooth',block:'nearest'});
+            });
+            document.getElementById('data-skipped').addEventListener('change',function(e){
+                dataState.skipped=e.target.value;
+                renderTagBar();
+                loadData(true);
+            });
+            loadTagCounts();
             document.querySelectorAll('#data-filter button').forEach(function(btn){
                 btn.addEventListener('click',function(){
                     dataState.filter=btn.getAttribute('data-f');
@@ -760,12 +916,23 @@
                     loadData(true);
                 });
             });
+            var searchTimer=null, search=document.getElementById('data-search');
+            search.addEventListener('input',function(){
+                clearTimeout(searchTimer);
+                searchTimer=setTimeout(function(){
+                    var q=search.value.trim();
+                    if(q===dataState.q)return;
+                    dataState.q=q;
+                    loadData(true);
+                },300);
+            });
             loadData(true);
             // Live mode refreshes the newest pages, but never yanks away pages the user loaded with "Load more".
             setInterval(function(){
                 if(document.hidden||!document.getElementById('data-live').checked) return;
                 if(document.getElementById('tab-data').classList.contains('hidden')||dataState.loaded>25) return;
                 loadData(true);
+                loadTagCounts();
             },5000);
         }
 
@@ -867,5 +1034,13 @@
             catch(e){Mole.toast(e.message,false);}
         }
     </script>
+{{if .showGrouping}}
+<script>
+    // The shared comparison table (templates/grouping.html) reads these.
+    var cmpScope = { type: '{{.groupingScopeType}}', id: '{{.groupingScopeID}}' };
+    var cmpUnmatched = {{.groupingUnmatched}};
+</script>
+{{template "groupingScript" .}}
+{{end}}
 </body>
 </html>

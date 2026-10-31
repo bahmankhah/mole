@@ -48,7 +48,16 @@
                         <span class="px-2 py-1 rounded text-xs font-medium {{.statusClass}}">{{.page.StatusCode}}</span>
                         {{if .page.ContentType}}<span class="px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-700">{{.page.ContentType}}</span>{{end}}
                         <span class="px-2 py-1 rounded text-xs font-medium bg-indigo-50 text-indigo-700">Depth {{.page.Depth}}</span>
+                        {{if .page.Skipped}}<span class="px-2 py-1 rounded text-xs font-medium bg-gray-200 text-gray-700" title="Fetched for its links; not kept because none of its tags is in the job's keep tags">Skipped</span>{{end}}
                     </div>
+                    {{if or .page.PageType .page.Tags}}
+                    <div class="flex flex-wrap items-center gap-1.5 mb-2 text-xs">
+                        {{if .page.PageType}}<span class="px-2 py-1 rounded font-medium bg-indigo-600 text-white">Type: {{.page.PageType}}</span>{{end}}
+                        {{if and .page.DetectedType (ne .page.DetectedType .page.PageType)}}<span class="text-gray-500">detected as {{.page.DetectedType}}, set by a tag rule</span>{{end}}
+                        {{range .page.Tags}}<a href="/jobs/{{$.jobID}}?tag={{.}}#data" class="px-2 py-1 rounded bg-amber-50 text-amber-800 hover:bg-amber-100" dir="auto">#{{.}}</a>{{end}}
+                    </div>
+                    {{if .page.TypeSignals}}<p class="text-xs text-gray-400 mb-2 break-words" title="What the page type was detected from">Detected from: <span class="font-mono">{{.page.TypeSignals}}</span></p>{{end}}
+                    {{end}}
                     <h1 class="text-2xl font-bold text-gray-800 break-words">{{if .page.Title}}{{.page.Title}}{{else}}Untitled page{{end}}</h1>
                     <a href="{{.page.URL}}" target="_blank" rel="noopener noreferrer" class="mt-2 text-blue-600 hover:text-blue-800 text-sm break-all inline-block">{{.page.URL}}</a>
                     {{if .page.ErrorMessage}}

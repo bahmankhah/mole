@@ -30,6 +30,40 @@ const (
 var AllFormats = []string{FormatMarkdown, FormatHTML, FormatText, FormatLinks, FormatMetadata,
 	FormatProduct, FormatArticle, FormatBusiness, FormatJobPosting, FormatEvent, FormatFAQ}
 
+// Page types assigned to every crawled page from its HTML (see content.Classify).
+const (
+	PageTypeProduct    = "product"     // one product or classified ad
+	PageTypeListing    = "listing"     // category, search, tag or archive pages listing many items
+	PageTypeArticle    = "article"     // news story, blog post
+	PageTypeJobPosting = "job_posting" // one job ad
+	PageTypeEvent      = "event"       // one event
+	PageTypeFAQ        = "faq"         // a page of questions and answers
+	PageTypeBusiness   = "business"    // contact, about or business profile page
+	PageTypeHome       = "home"        // the site's home page
+	PageTypeDocument   = "document"    // PDF or DOCX
+	PageTypeOther      = "other"       // none of the above, or not sure
+
+	// KeepTagAuto in keep_tags stands for the types of the enabled detectors
+	// (product, article, job_posting, event).
+	KeepTagAuto = "auto"
+)
+
+// AllPageTypes lists the page types in the order UIs show them.
+var AllPageTypes = []string{PageTypeProduct, PageTypeListing, PageTypeArticle, PageTypeJobPosting, PageTypeEvent,
+	PageTypeFAQ, PageTypeBusiness, PageTypeHome, PageTypeDocument, PageTypeOther}
+
+// PageTypeDetector maps a page type to the detector that reads what the page
+// is about. Pages of other types get no main detector (business and faq
+// detectors run on every kept page).
+var PageTypeDetector = map[string]string{
+	PageTypeProduct: FormatProduct, PageTypeArticle: FormatArticle,
+	PageTypeJobPosting: FormatJobPosting, PageTypeEvent: FormatEvent,
+}
+
+// SkipReasonKeepTags marks a fetched page none of whose tags is in keep_tags
+// (crawled_pages.skip_reason).
+const SkipReasonKeepTags = "keep_tags"
+
 // DetectedData holds the detectors' results for a page as JSON, one column
 // per detector format (the column is named like the format).
 type DetectedData struct {
@@ -80,6 +114,7 @@ func (d *DetectedData) Set(format string, v JSONRaw) {
 // Stop reasons recorded when a job ends because of a limit.
 const (
 	StopReasonMaxPages    = "limit:max_pages"
+	StopReasonMaxKept     = "limit:max_kept_pages"
 	StopReasonMaxRequests = "limit:max_requests"
 	StopReasonMaxBytes    = "limit:max_bytes"
 	StopReasonMaxBrowser  = "limit:max_browser_seconds"

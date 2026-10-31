@@ -100,7 +100,9 @@ Mole never sees users or plans. Laravel identifies a tenant to Mole only by an o
   * `user`: cancelled by the user.
 
 **Show results** (always proxy through Laravel after authorization)
-* Pages: `GET /v1/crawls/{id}/pages?content=1&order=desc&cursor=…`. Store `next_cursor` for "load more"; filters are `successful=1` and `failed=1`.
+* Pages: `GET /v1/crawls/{id}/pages?content=1&order=desc&cursor=…`. Store `next_cursor` for "load more"; filters are `successful=1`, `failed=1`, `q=` (words in the title or URL), `tag=` and `skipped=include|only`.
+* Page types and tags: every page has a `page_type` (product, listing, article, job_posting, event, faq, business, home, document, other) detected from its HTML, and `tags`: its type plus the tags of the job's `tag_rules` (`[{"pattern": "<URL regex>", "tag": "…"}]`; a page-type tag also sets the type). `GET /v1/crawls/{id}/tags` counts pages per tag for filter chips; `PUT /v1/crawls/{id}/tag-rules` replaces the rules of a crawl that is not running and re-tags its pages without fetching them again.
+* Keeping: with `keep_tags` (e.g. `["product"]` or `["auto"]` for the types of the enabled detectors) every page is still fetched and its links followed, but only pages with one of those tags are kept with content; the others are listed with `skipped: true` and left out of exports and webhooks. `kept_urls` counts kept pages, `max_kept_pages` stops the crawl after that many (`stop_reason: limit:max_kept_pages`). Bill on `usage.pages` (every fetch).
 * One page: `GET /v1/crawls/{id}/pages/{pageId}`. Screenshot: `GET …/screenshot`, streamed through Laravel with `Content-Type: image/png`.
 * Exports: stream `GET /v1/crawls/{id}/export?format=csv|jsonl|json` to the browser. Use `Http::withOptions(['stream' => true])` and a `StreamedResponse`; do not buffer large exports in memory.
 * Changes: `GET /v1/crawls/{id}/changes?diff=1`.
@@ -240,11 +242,13 @@ A crawl pinned to a region with no running worker stays `queued`. Show "waiting 
 | `POST /v1/crawls/{id}/start\|pause\|resume\|cancel\|duplicate` | Control |
 | `POST /v1/crawls/{id}/after-job` `{"plugin": "…"}` | Run the job's after-job plugin again (operator only: `403 forbidden` unless `plugins.allow_in_api`). `GET /v1/crawls/{id}` reports plugin runs in `plugins` |
 | `DELETE /v1/crawls/{id}` | Delete a crawl and all its data and artifacts (running crawls are cancelled first) |
-| `GET /v1/crawls/{id}/pages?cursor=&limit=&content=1&body=1&successful=1&failed=1&order=desc` | Pages; `content=1` adds Markdown/metadata/extracted data, `failed=1` only errors, `order=desc` newest first |
+| `GET /v1/crawls/{id}/pages?cursor=&limit=&content=1&body=1&successful=1&failed=1&order=desc&q=&tag=&skipped=` | Pages; `content=1` adds Markdown/metadata/extracted data, `failed=1` only errors, `order=desc` newest first, `q` words in the title or URL, `tag` one tag, `skipped=include\|only` adds or shows only pages skipped by `keep_tags` |
+| `GET /v1/crawls/{id}/tags` | Pages per tag: `{"tags": [{"tag", "kept", "skipped"}], "kept", "skipped"}` |
+| `PUT /v1/crawls/{id}/tag-rules` | `{"tag_rules": [{"pattern", "tag"}]}`: replace the rules and re-tag the crawl's pages (not while running) |
 | `GET /v1/crawls/{id}/pages/{pageId}` | One page with body and content |
 | `GET /v1/crawls/{id}/pages/{pageId}/screenshot` | PNG |
 | `GET /v1/crawls/{id}/changes?type=new\|changed\|removed&diff=1&cursor=` | Change detection results and counts |
-| `GET /v1/crawls/{id}/export?format=csv\|json\|jsonl&successful=1` | Streamed export. CSV has a UTF-8 BOM (opens correctly in Excel) and flattens extracted fields into `extracted.<name>` columns |
+| `GET /v1/crawls/{id}/export?format=csv\|json\|jsonl&successful=1&q=&tag=` | Streamed export of kept pages, filtered like the page list. CSV has a UTF-8 BOM (opens correctly in Excel) and flattens extracted fields into `extracted.<name>` columns |
 | `GET /v1/crawls/{id}/webhooks` · `POST /v1/webhooks/{deliveryId}/redeliver` | Delivery log / redelivery |
 | `POST /v1/scrape?timeout=120` | Synchronous single-page scrape: `{"url": "…", "settings": {…}, "max_age": 0, "store_in_cache": true}`. HTML, PDF and DOCX. Answers include `cached`/`cached_at` on cache hits |
 | `POST /v1/map` | `{"url", "search", "limit", "include_subdomains", "ignore_sitemap", "settings"}` |

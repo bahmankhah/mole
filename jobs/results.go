@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -98,9 +99,18 @@ type PageQuery struct {
 	WithContent    bool
 	WithBody       bool
 	OnlySuccessful bool
-	OnlyFailed     bool // non-2xx responses and fetch errors
-	NewestFirst    bool // descending ids; the cursor then means "older than"
+	OnlyFailed     bool   // non-2xx responses and fetch errors
+	NewestFirst    bool   // descending ids; the cursor then means "older than"
+	Search         string // words that must all appear in the title or URL
+	Tag            string // only pages with this tag
+	Skipped        string // "" kept pages only, "include" kept and skipped, "only" skipped pages
 }
+
+// Values of PageQuery.Skipped.
+const (
+	SkippedInclude = "include"
+	SkippedOnly    = "only"
+)
 
 // ListPages returns pages in id order with an id cursor; next is 0 at the end.
 func (m *Manager) ListPages(q PageQuery) ([]PageResult, uint, error) {
@@ -121,6 +131,19 @@ func (m *Manager) ListPages(q PageQuery) ([]PageResult, uint, error) {
 	}
 	if q.OnlyFailed {
 		db = db.Where("(status_code NOT BETWEEN 200 AND 299 OR error_message <> '')")
+	}
+	if cond, args := pageSearchCondition(q.Search); cond != "" {
+		db = db.Where(cond, args...)
+	}
+	switch q.Skipped {
+	case SkippedInclude:
+	case SkippedOnly:
+		db = db.Where("skipped = ?", true)
+	default:
+		db = db.Where("skipped = ?", false)
+	}
+	if tag := models.NormalizeTag(q.Tag); tag != "" {
+		db = db.Where("id IN (SELECT page_id FROM page_tags WHERE crawl_job_id = ? AND tag = ?)", q.JobID, tag)
 	}
 	if !q.WithBody {
 		db = db.Omit("TextContent")
@@ -216,6 +239,38 @@ func (m *Manager) GetScreenshot(jobID string, pageID uint) ([]byte, error) {
 }
 
 // ListChanges returns change-detection results of a job with an id cursor.
+// JobSiteStat is what one crawl did on one of the sites it covered. A
+// crawl can start from several sites, so this is how the job page shows
+// that one of them was blocked or barely touched while the others went
+// fine — the per-site view the old one-job-per-site layout gave for free.
+type JobSiteStat struct {
+	Domain   string     `json:"domain"`
+	Pages    int        `json:"pages"`
+	Kept     int        `json:"kept"`
+	Products int        `json:"products"`
+	Errors   int        `json:"errors"`
+	LastAt   *time.Time `json:"last_at,omitempty"`
+}
+
+// JobSiteStats summarizes a crawl per site it fetched pages from, busiest
+// first. Pages crawled before the engine recorded a page's domain are
+// grouped under an empty domain, which the UI leaves out.
+func (m *Manager) JobSiteStats(jobID string) []JobSiteStat {
+	var out []JobSiteStat
+	err := m.db.Model(&models.CrawledPage{}).
+		Select("domain AS domain, COUNT(*) AS pages, SUM(CASE WHEN skipped = 0 THEN 1 ELSE 0 END) AS kept, "+
+			"SUM(CASE WHEN page_type = 'product' THEN 1 ELSE 0 END) AS products, "+
+			"SUM(CASE WHEN status_code >= 400 OR error_message <> '' THEN 1 ELSE 0 END) AS errors, "+
+			"MAX(crawled_at) AS last_at").
+		Where("crawl_job_id = ? AND is_archived = ? AND domain <> ?", jobID, false, "").
+		Group("domain").Order("pages DESC").Scan(&out).Error
+	if err != nil {
+		log.Printf("[JobManager] Per-site stats for job %s failed: %v", jobID, err)
+		return nil
+	}
+	return out
+}
+
 func (m *Manager) ListChanges(jobID, changeType string, afterID uint, limit int, withDiff bool) ([]models.PageChange, uint, error) {
 	limit = clampLimit(limit, 50, 500)
 	q := m.db.Where("crawl_job_id = ? AND id > ?", jobID, afterID)
@@ -266,6 +321,8 @@ type exportRecord struct {
 	FinalURL    string                 `json:"final_url,omitempty"`
 	StatusCode  int                    `json:"status_code"`
 	Title       string                 `json:"title,omitempty"`
+	PageType    string                 `json:"page_type,omitempty"`
+	Tags        []string               `json:"tags,omitempty"`
 	ContentType string                 `json:"content_type,omitempty"`
 	Depth       int                    `json:"depth"`
 	CrawledAt   time.Time              `json:"crawled_at"`
@@ -284,6 +341,12 @@ type exportRecord struct {
 // extraction results are flattened into "extracted.<field>" columns and the
 // detectors' results into "<format>.<field>" columns ("product.price.amount").
 func (m *Manager) Export(jobID, format string, onlySuccessful bool, w io.Writer) error {
+	return m.ExportFiltered(jobID, format, PageQuery{OnlySuccessful: onlySuccessful}, w)
+}
+
+// ExportFiltered is Export of the pages matching filter (its successful,
+// search and tag fields; skipped pages are never exported).
+func (m *Manager) ExportFiltered(jobID, format string, filter PageQuery, w io.Writer) error {
 	if _, err := m.GetJob(jobID); err != nil {
 		return notFound(err)
 	}
@@ -302,7 +365,8 @@ func (m *Manager) Export(jobID, format string, onlySuccessful bool, w io.Writer)
 		io.WriteString(w, "[")
 	}
 	for {
-		pages, next, err := m.ListPages(PageQuery{JobID: jobID, AfterID: after, Limit: 500, WithContent: true, OnlySuccessful: onlySuccessful})
+		pages, next, err := m.ListPages(PageQuery{JobID: jobID, AfterID: after, Limit: 500, WithContent: true,
+			OnlySuccessful: filter.OnlySuccessful, Search: filter.Search, Tag: filter.Tag})
 		if err != nil {
 			return err
 		}
@@ -341,7 +405,7 @@ func (m *Manager) Export(jobID, format string, onlySuccessful bool, w io.Writer)
 
 func toExportRecord(p PageResult) exportRecord {
 	rec := exportRecord{
-		PageID: p.ID, URL: p.URL, FinalURL: p.FinalURL, StatusCode: p.StatusCode, Title: p.Title,
+		PageID: p.ID, URL: p.URL, FinalURL: p.FinalURL, StatusCode: p.StatusCode, Title: p.Title, PageType: p.PageType, Tags: p.Tags,
 		ContentType: p.ContentType, Depth: p.Depth, CrawledAt: p.CrawledAt, Error: p.ErrorMessage,
 	}
 	if c := p.Content; c != nil {
@@ -359,14 +423,15 @@ func toExportRecord(p PageResult) exportRecord {
 }
 
 func writeCSV(w io.Writer, records []exportRecord) error {
-	base := []string{"page_id", "url", "final_url", "status_code", "title", "content_type", "depth", "crawled_at", "error"}
+	base := []string{"page_id", "url", "final_url", "status_code", "title", "page_type", "tags", "content_type", "depth", "crawled_at", "error"}
 	rows := make([]map[string]string, len(records))
 	extraCols := map[string]bool{}
 	hasMarkdown := false
 	for i, r := range records {
 		row := map[string]string{
 			"page_id": strconv.FormatUint(uint64(r.PageID), 10), "url": r.URL, "final_url": r.FinalURL,
-			"status_code": strconv.Itoa(r.StatusCode), "title": r.Title, "content_type": r.ContentType,
+			"status_code": strconv.Itoa(r.StatusCode), "title": r.Title, "page_type": r.PageType,
+			"tags": strings.Join(r.Tags, ", "), "content_type": r.ContentType,
 			"depth": strconv.Itoa(r.Depth), "crawled_at": r.CrawledAt.Format(time.RFC3339), "error": r.Error,
 		}
 		if r.Markdown != nil {

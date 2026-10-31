@@ -40,8 +40,9 @@ func (r *Run) crawl(workerID int, fu *models.FrontierURL) {
 		hasUsableBody := result.StatusCode == 200 && len(result.Body) > 1024
 		if !hasUsableBody {
 			log.Printf("[Run %s/%d] Failed to fetch %s: %v", short(r.job.ID), workerID, pageURL, result.Error)
-			_, created := r.saveCrawledPage(fu, result, 0, result.Error.Error(), startTime, nil)
-			r.countPage(created)
+			pi := r.describe(fu, result, nil, false)
+			_, created := r.saveCrawledPage(fu, result, 0, result.Error.Error(), startTime, nil, pi)
+			r.countPage(created, pi)
 			r.frontier.MarkFailed(fu.ID, fu.RetryCount, r.rs.MaxRetries)
 			return
 		}
@@ -50,8 +51,9 @@ func (r *Run) crawl(workerID int, fu *models.FrontierURL) {
 
 	// Server errors and rate limits are retriable.
 	if result.StatusCode == 429 || result.StatusCode == 502 || result.StatusCode == 503 {
-		_, created := r.saveCrawledPage(fu, result, int64(len(result.Body)), fmt.Sprintf("HTTP %d", result.StatusCode), startTime, result.Body)
-		r.countPage(created)
+		pi := r.describe(fu, result, nil, false)
+		_, created := r.saveCrawledPage(fu, result, int64(len(result.Body)), fmt.Sprintf("HTTP %d", result.StatusCode), startTime, result.Body, pi)
+		r.countPage(created, pi)
 		r.frontier.MarkFailed(fu.ID, fu.RetryCount, r.rs.MaxRetries)
 		return
 	}
@@ -59,25 +61,31 @@ func (r *Run) crawl(workerID int, fu *models.FrontierURL) {
 	contentType := result.ContentType
 	isDocument := content.DocumentKind(contentType, result.URL, result.Body) != ""
 	if !isDocument && !isProcessableContentType(contentType) {
-		_, created := r.saveCrawledPage(fu, result, 0, "", startTime, nil)
-		r.countPage(created)
+		pi := r.describe(fu, result, nil, false)
+		_, created := r.saveCrawledPage(fu, result, 0, "", startTime, nil, pi)
+		r.countPage(created, pi)
 		r.frontier.MarkCompleted(fu.ID)
 		return
 	}
 
 	body := result.Body
-	page, created := r.saveCrawledPage(fu, result, int64(len(body)), "", startTime, body)
-	r.countPage(created)
+	pi := r.describe(fu, result, body, isDocument)
+	page, created := r.saveCrawledPage(fu, result, int64(len(body)), "", startTime, body, pi)
+	r.countPage(created, pi)
 	r.frontier.MarkCompleted(fu.ID)
 
 	// Documents have no links or phrases to process; they are only converted.
+	// Skipped pages still give their links, so the crawl reaches kept pages.
 	if !isDocument {
-		r.processContent(workerID, pageURL, body, contentType, result.StatusCode, depth, page, fu.AnchorText)
+		r.processContent(workerID, pageURL, body, contentType, result.StatusCode, depth, page, fu.AnchorText, pi.skipped)
+	}
+	if pi.skipped {
+		return
 	}
 	// Analyze only when the row holds this fetch (not a content-duplicate of another URL
 	// and not an older, better copy that was kept).
 	if page != nil && page.ID > 0 && page.URLHash == fu.URLHash && page.DocHash == docHashOf(body) && r.rs.NeedsContent() {
-		r.analyzePage(page, result)
+		r.analyzePage(page, result, pi)
 	}
 
 	if created && page != nil {
@@ -87,6 +95,8 @@ func (r *Run) crawl(workerID int, fu *models.FrontierURL) {
 			"status_code": result.StatusCode,
 			"title":       page.Title,
 			"depth":       depth,
+			"page_type":   pi.pageType,
+			"tags":        pi.tags,
 		})
 	}
 
@@ -108,11 +118,67 @@ func (r *Run) crawl(workerID int, fu *models.FrontierURL) {
 }
 
 // countPage counts a newly created crawled_pages row (any status), matching
-// how the counter is seeded from the database when a job resumes.
-func (r *Run) countPage(created bool) {
+// how the counters are seeded from the database when a job resumes.
+func (r *Run) countPage(created bool, pi *pageInfo) {
 	if created {
 		atomic.AddInt64(&r.crawled, 1)
 		atomic.AddInt64(&r.uPages, 1)
+		if !pi.skipped {
+			atomic.AddInt64(&r.kept, 1)
+		}
+	}
+}
+
+// pageInfo is a fetched page's type, tags and whether it is kept.
+type pageInfo struct {
+	parsed   *content.Page // the parsed HTML of a 2xx HTML page, reused by the detectors
+	detected string        // content.Classify's type; "document" for PDF/DOCX; "" otherwise
+	signals  string
+	pageType string // detected, or overridden by a tag rule
+	tags     []string
+	skipped  bool
+}
+
+// describe classifies a fetched page, tags it and decides whether it is kept.
+// body is nil for errors and non-HTML responses: they are tagged by URL only.
+func (r *Run) describe(fu *models.FrontierURL, res *modules.FetchResult, body []byte, isDocument bool) *pageInfo {
+	pi := &pageInfo{}
+	ok2xx := res.StatusCode >= 200 && res.StatusCode < 300
+	finalURL := res.URL
+	if finalURL == fu.URL {
+		finalURL = ""
+	}
+	switch {
+	case !ok2xx || len(body) == 0:
+	case isDocument:
+		pi.detected = models.PageTypeDocument
+	case strings.Contains(strings.ToLower(res.ContentType), "html"):
+		base := fu.URL
+		if finalURL != "" {
+			base = finalURL
+		}
+		if p, err := content.ParsePage(base, body); err == nil {
+			c := p.ClassifyWith(r.templates)
+			pi.parsed, pi.detected, pi.signals = p, c.Type, c.SignalString()
+		}
+	}
+	pi.pageType, pi.tags = TagPage(r.rs.TagRules, fu.URL, finalURL, pi.detected)
+	pi.skipped = !r.rs.Keeps(pi.tags)
+	return pi
+}
+
+// saveTags replaces a page's rows in page_tags.
+func (r *Run) saveTags(pageID uint, tags []string) {
+	r.e.db.Where("page_id = ?", pageID).Delete(&models.PageTag{})
+	if len(tags) == 0 {
+		return
+	}
+	rows := make([]models.PageTag, len(tags))
+	for i, t := range tags {
+		rows[i] = models.PageTag{CrawlJobID: r.job.ID, PageID: pageID, Tag: t}
+	}
+	if err := r.e.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&rows).Error; err != nil {
+		log.Printf("[Run %s] Failed to save tags of page %d: %v", short(r.job.ID), pageID, err)
 	}
 }
 
@@ -127,9 +193,12 @@ func docHashOf(body []byte) string {
 // processContent runs phrase detection, link extraction, sitemap and
 // robots.txt handling and semantic embedding.
 // Phrase matching and embedding only run for 2xx responses so error pages are not indexed.
-func (r *Run) processContent(workerID int, pageURL string, body []byte, contentType string, statusCode int, depth int, page *models.CrawledPage, anchorText string) {
-	isSuccessful := statusCode >= 200 && statusCode < 300
-	textContent := r.linkExtractor.ExtractTextContent(body)
+func (r *Run) processContent(workerID int, pageURL string, body []byte, contentType string, statusCode int, depth int, page *models.CrawledPage, anchorText string, skipped bool) {
+	isSuccessful := statusCode >= 200 && statusCode < 300 && !skipped
+	textContent := ""
+	if isSuccessful {
+		textContent = r.linkExtractor.ExtractTextContent(body)
+	}
 
 	if isSuccessful && page != nil && page.ID > 0 {
 		if r.rs.EnableWordExtraction {
@@ -183,6 +252,18 @@ func (r *Run) processContent(workerID int, pageURL string, body []byte, contentT
 	}
 }
 
+// inScope reports whether a link may be followed: it must be on the base
+// domain of one of the job's start URLs, or on one of the extra
+// scope_domains. Giving a crawl several start URLs is what lets a single
+// crawl (or schedule) cover several shops and compare them.
+func (r *Run) inScope(rawURL string) bool {
+	domain := r.urlCleaner.ExtractBaseDomain(rawURL)
+	if domain == "" {
+		return false
+	}
+	return domain == r.job.Domain || r.seedDomains[domain] || r.rs.ScopeDomains[domain]
+}
+
 // processHTML extracts same-site links into the frontier.
 func (r *Run) processHTML(pageURL string, body []byte, depth int) {
 	links, err := r.linkExtractor.ExtractLinksWithAnchors(pageURL, body)
@@ -192,8 +273,7 @@ func (r *Run) processHTML(pageURL string, body []byte, depth int) {
 	}
 	added := 0
 	for _, la := range links {
-		linkDomain := r.urlCleaner.ExtractBaseDomain(la.URL)
-		if linkDomain == "" || linkDomain != r.job.Domain {
+		if !r.inScope(la.URL) {
 			continue
 		}
 		if err := r.frontier.AddURLWithAnchor(la.URL, depth+1, pageURL, la.AnchorText); err == nil {
@@ -327,7 +407,7 @@ func extractPathFromURL(rawURL string) string {
 }
 
 // saveCrawledPage records a fetched page. It returns the page and whether a new row was created.
-func (r *Run) saveCrawledPage(fu *models.FrontierURL, res *modules.FetchResult, contentLength int64, errorMsg string, startTime time.Time, body []byte) (*models.CrawledPage, bool) {
+func (r *Run) saveCrawledPage(fu *models.FrontierURL, res *modules.FetchResult, contentLength int64, errorMsg string, startTime time.Time, body []byte, pi *pageInfo) (*models.CrawledPage, bool) {
 	pageURL := fu.URL
 	var normalizedURL string
 	if modules.HasMeaningfulFragment(pageURL) {
@@ -366,6 +446,7 @@ func (r *Run) saveCrawledPage(fu *models.FrontierURL, res *modules.FetchResult, 
 	page := &models.CrawledPage{
 		CrawlJobID:    jobID,
 		URL:           pageURL,
+		Domain:        r.urlCleaner.ExtractBaseDomain(pageURL),
 		URLHash:       urlHash,
 		DocHash:       docHash,
 		NormalizedURL: normalizedURL,
@@ -379,11 +460,19 @@ func (r *Run) saveCrawledPage(fu *models.FrontierURL, res *modules.FetchResult, 
 		ErrorMessage:  errorMsg,
 		FetchedWith:   res.FetchedWith,
 		FinalURL:      finalURL,
+		DetectedType:  pi.detected,
+		PageType:      pi.pageType,
+		TypeSignals:   pi.signals,
+		Tags:          models.StringSlice(pi.tags),
+		Skipped:       pi.skipped,
+	}
+	if pi.skipped {
+		page.SkipReason = models.SkipReasonKeepTags
 	}
 	if len(body) > 0 && strings.Contains(res.ContentType, "text/html") {
 		page.Title = r.linkExtractor.ExtractTitle(body)
 	}
-	if r.rs.SaveTextContent && len(body) > 0 && isTextualContentType(res.ContentType) {
+	if r.rs.SaveTextContent && !pi.skipped && len(body) > 0 && isTextualContentType(res.ContentType) {
 		if r.e.cfg.Storage.OffloadBodies && r.e.store != nil {
 			key := storage.BodyKey(jobID, urlHash)
 			if err := r.e.store.Put(r.sideCtx, key, body, res.ContentType); err == nil {
@@ -407,6 +496,7 @@ func (r *Run) saveCrawledPage(fu *models.FrontierURL, res *modules.FetchResult, 
 		return page, false
 	}
 	if result.RowsAffected > 0 {
+		r.saveTags(page.ID, pi.tags)
 		return page, true
 	}
 
@@ -426,6 +516,19 @@ func (r *Run) saveCrawledPage(fu *models.FrontierURL, res *modules.FetchResult, 
 			"crawled_at":     page.CrawledAt,
 			"fetched_with":   page.FetchedWith,
 			"final_url":      page.FinalURL,
+			"detected_type":  page.DetectedType,
+			"page_type":      page.PageType,
+			"type_signals":   page.TypeSignals,
+			"tags":           page.Tags,
+			"skipped":        page.Skipped,
+			"skip_reason":    page.SkipReason,
+		}
+		// A kept page stays kept: its content row may already exist.
+		if !existing.Skipped {
+			updates["skipped"], updates["skip_reason"] = false, ""
+			page.Skipped, page.SkipReason = false, ""
+		} else if !page.Skipped {
+			atomic.AddInt64(&r.kept, 1)
 		}
 		if page.Title != "" {
 			updates["title"] = page.Title
@@ -437,8 +540,11 @@ func (r *Run) saveCrawledPage(fu *models.FrontierURL, res *modules.FetchResult, 
 			updates["body_key"] = page.BodyKey
 		}
 		r.e.db.Model(&existing).Updates(updates)
+		r.saveTags(existing.ID, pi.tags)
 		existing.DocHash = docHash
 		existing.Title = page.Title
+		existing.DetectedType, existing.PageType, existing.Tags = page.DetectedType, page.PageType, page.Tags
+		existing.Skipped, existing.SkipReason = page.Skipped, page.SkipReason
 	}
 	return &existing, false
 }
@@ -467,7 +573,7 @@ func (r *Run) savePhraseMatch(pageID uint, pageURL, phrase, matchContext string,
 
 // analyzePage produces the PageContent row: formats, extraction, screenshot
 // and change detection.
-func (r *Run) analyzePage(page *models.CrawledPage, res *modules.FetchResult) {
+func (r *Run) analyzePage(page *models.CrawledPage, res *modules.FetchResult, pi *pageInfo) {
 	pc := models.PageContent{PageID: page.ID, CrawlJobID: r.job.ID, URLHash: page.URLHash, CreatedAt: time.Now()}
 	isHTML := strings.Contains(strings.ToLower(res.ContentType), "html")
 	ok2xx := res.StatusCode >= 200 && res.StatusCode < 300
@@ -515,9 +621,15 @@ func (r *Run) analyzePage(page *models.CrawledPage, res *modules.FetchResult) {
 
 		if r.rs.ExtractsURL(page.URL) {
 			if len(r.rs.Detectors) > 0 {
-				if d, err := content.Detect(page.URL, res.Body, r.rs.Detectors); err != nil {
+				// Each page runs the detector of its type (see content.Page.Detect).
+				parsed := pi.parsed
+				var err error
+				if parsed == nil {
+					parsed, err = content.ParsePage(page.URL, res.Body)
+				}
+				if err != nil {
 					pc.ExtractError = appendErr(pc.ExtractError, "detect: "+err.Error())
-				} else if err := d.Store(&pc.DetectedData); err != nil {
+				} else if err := parsed.Detect(r.rs.Detectors, pi.pageType).Store(&pc.DetectedData); err != nil {
 					pc.ExtractError = appendErr(pc.ExtractError, "detect: "+err.Error())
 				}
 			}

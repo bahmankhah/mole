@@ -88,6 +88,15 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 	a.Engine = eng
 	if a.DB != nil {
 		a.Manager = jobs.NewManager(a.DB.DB, cfg, eng)
+		if opts.Migrate {
+			// Comparisons are now schedules with several start URLs. This
+			// needs the manager (for cron parsing), so it runs here rather
+			// than with the schema migrations. A failure leaves the old
+			// rows untouched for the next start to retry.
+			if err := a.Manager.MigrateComparisons(); err != nil {
+				log.Printf("[Migrate] Converting comparisons into schedules failed; they are unchanged and will be retried on the next start: %v", err)
+			}
+		}
 	}
 	return a, nil
 }

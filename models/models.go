@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -66,11 +67,15 @@ type HTTPHeader struct {
 // JobSettings holds per-job crawler settings that override global defaults.
 // A nil/null value means "use global defaults".
 type JobSettings struct {
-	MaxConcurrentRequests *int     `json:"max_concurrent_requests,omitempty"`
-	RequestTimeoutSec     *int     `json:"request_timeout_seconds,omitempty"`
-	PolitenessDelayMs     *int     `json:"politeness_delay_ms,omitempty"`
-	MaxDepth              *int     `json:"max_depth,omitempty"`
-	MaxPages              *int     `json:"max_pages,omitempty"` // 0 = unlimited
+	MaxConcurrentRequests *int `json:"max_concurrent_requests,omitempty"`
+	RequestTimeoutSec     *int `json:"request_timeout_seconds,omitempty"`
+	PolitenessDelayMs     *int `json:"politeness_delay_ms,omitempty"`
+	MaxDepth              *int `json:"max_depth,omitempty"`
+	MaxPages              *int `json:"max_pages,omitempty"` // 0 = unlimited
+	// MaxPagesPerDomain caps the pages taken from any one site, so a crawl
+	// covering several sites cannot spend its whole budget on the biggest
+	// of them. 0 = no per-site cap.
+	MaxPagesPerDomain     *int     `json:"max_pages_per_domain,omitempty"`
 	UserAgent             *string  `json:"user_agent,omitempty"`
 	MaxRetries            *int     `json:"max_retries,omitempty"`
 	RespectRobotsTxt      *bool    `json:"respect_robots_txt,omitempty"`
@@ -124,6 +129,53 @@ type JobSettings struct {
 	// Monitoring
 	ChangeDetection  *bool   `json:"change_detection,omitempty"`    // diff each page against the previous run
 	CompareWithJobID *string `json:"compare_with_job_id,omitempty"` // baseline job (default: previous run of the schedule)
+
+	// Tags and keeping. Every page is tagged with its detected type (product,
+	// article, …) and the tags of the rules its URL matches. With keep_tags,
+	// every page is still fetched and its links followed, but only pages
+	// with one of those tags are saved in full; the others are recorded as
+	// skipped (URL, status, type and tags only).
+	TagRules     []TagRule `json:"tag_rules,omitempty"`      // URL regex → tag; a page-type tag also sets the page type
+	KeepTags     []string  `json:"keep_tags,omitempty"`      // tags to keep; "auto" = the types of the enabled detectors
+	MaxKeptPages *int      `json:"max_kept_pages,omitempty"` // stop after this many kept pages (0 = no limit)
+
+	// Scope. A crawl follows links within the base domain of each of its
+	// start URLs, which is what lets one crawl (or one schedule) cover
+	// several shops and compare them: list them as start URLs.
+	// ScopeDomains adds further domains it may follow links into without
+	// starting from them. Per-host rate limits still apply to each.
+	ScopeDomains []string `json:"scope_domains,omitempty"`
+
+	// Grouping. With GroupProducts, the product pages of this crawl (every
+	// run of the schedule, when it has one) are matched into product groups
+	// and CompareFields are recorded per run, giving a price/field history
+	// per product per site. See models.ProductGroup.
+	GroupProducts  *bool    `json:"group_products,omitempty"`
+	CompareFields  []string `json:"compare_fields,omitempty"`   // e.g. price, regular_price, availability, rating; empty = the engine default
+	GroupByVariant *bool    `json:"group_by_variant,omitempty"` // compare each size/colour/storage variant separately
+	MatchThreshold *float64 `json:"match_threshold,omitempty"`  // fuzzy name/token similarity, 0..1
+	MatchMode      *string  `json:"match_mode,omitempty"`       // auto (exact keys then fuzzy), exact_only, or manual
+}
+
+// TagRule tags the pages whose URL matches Pattern (a case-insensitive
+// regex). When Tag is a page type (product, article, …) the page also gets
+// that type, which overrides detection and picks its detector.
+type TagRule struct {
+	Pattern string `json:"pattern"`
+	Tag     string `json:"tag"`
+}
+
+// MaxTagLength bounds a tag's length in runes.
+const MaxTagLength = 40
+
+// NormalizeTag trims a tag, lower-cases it and joins its words with "-"
+// ("Summer Sale" → "summer-sale"). It returns "" for an unusable tag.
+func NormalizeTag(tag string) string {
+	tag = strings.ToLower(strings.Join(strings.Fields(tag), "-"))
+	if tag == "" || strings.ContainsAny(tag, ",\"'<>") || utf8.RuneCountInString(tag) > MaxTagLength {
+		return ""
+	}
+	return tag
 }
 
 // BrowserAction is a step performed in the headless browser after the page renders.
@@ -226,7 +278,7 @@ func jsonScan(value interface{}, dst interface{}) error {
 func (s JobSettings) IsEmpty() bool {
 	return s.MaxConcurrentRequests == nil && s.RequestTimeoutSec == nil &&
 		s.PolitenessDelayMs == nil && s.MaxDepth == nil &&
-		s.MaxPages == nil &&
+		s.MaxPages == nil && s.MaxPagesPerDomain == nil &&
 		s.UserAgent == nil && s.MaxRetries == nil &&
 		s.RespectRobotsTxt == nil &&
 		s.SkipContentDuplicates == nil &&
@@ -246,7 +298,10 @@ func (s JobSettings) IsEmpty() bool {
 		len(s.BlockResources) == 0 && len(s.Formats) == 0 && s.OnlyMainContent == nil &&
 		len(s.ExtractFields) == 0 && s.ExtractURLMatch == nil && s.IncludeDocuments == nil &&
 		s.LLMPrompt == nil && s.LLMSchema == nil && len(s.Phrases) == 0 &&
-		s.ChangeDetection == nil && s.CompareWithJobID == nil
+		s.ChangeDetection == nil && s.CompareWithJobID == nil &&
+		len(s.TagRules) == 0 && len(s.KeepTags) == 0 && s.MaxKeptPages == nil &&
+		s.GroupProducts == nil && len(s.CompareFields) == 0 && s.GroupByVariant == nil &&
+		s.MatchThreshold == nil && s.MatchMode == nil && len(s.ScopeDomains) == 0
 }
 
 // SanitizeRequest normalizes HTTP request fields (method, headers, body vars).
@@ -522,6 +577,7 @@ type CrawlJob struct {
 	Status         JobStatus    `gorm:"type:varchar(20);index;default:'pending'" json:"status"`
 	TotalURLs      int          `gorm:"default:0" json:"total_urls"`
 	CrawledURLs    int          `gorm:"default:0" json:"crawled_urls"`
+	KeptURLs       int          `gorm:"default:0" json:"kept_urls"` // crawled pages kept (all of them without keep_tags)
 	FoundMatches   int          `gorm:"default:0" json:"found_matches"`
 	MaxDepth       int          `gorm:"default:10" json:"max_depth"`
 	Settings       *JobSettings `gorm:"type:json" json:"settings"`
@@ -591,10 +647,14 @@ type Subdomain struct {
 
 // CrawledPage represents a crawled web page
 type CrawledPage struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	CrawlJobID    string    `gorm:"type:varchar(36);uniqueIndex:idx_job_url_hash;not null" json:"crawl_job_id"`
-	URL           string    `gorm:"type:varchar(2048);index:idx_url,length:255;not null" json:"url"`
-	URLHash       string    `gorm:"type:varchar(64);uniqueIndex:idx_job_url_hash;not null" json:"url_hash"`
+	ID         uint   `gorm:"primaryKey" json:"id"`
+	CrawlJobID string `gorm:"type:varchar(36);uniqueIndex:idx_job_url_hash;index:idx_page_job_domain,priority:1;not null" json:"crawl_job_id"`
+	URL        string `gorm:"type:varchar(2048);index:idx_url,length:255;not null" json:"url"`
+	URLHash    string `gorm:"type:varchar(64);uniqueIndex:idx_job_url_hash;not null" json:"url_hash"`
+	// Domain is the page's base domain. A crawl can start from several
+	// sites, so this is what tells them apart afterwards: in the per-site
+	// status strip, and as the comparison table's columns.
+	Domain        string    `gorm:"type:varchar(255);index:idx_page_job_domain,priority:2;default:''" json:"domain,omitempty"`
 	DocHash       string    `gorm:"type:varchar(64)" json:"doc_hash"`
 	NormalizedURL string    `gorm:"type:varchar(2048)" json:"normalized_url"`
 	Title         string    `gorm:"type:varchar(512)" json:"title,omitempty"`
@@ -611,7 +671,27 @@ type CrawledPage struct {
 	FetchedWith   string    `gorm:"type:varchar(16);default:''" json:"fetched_with,omitempty"` // http, browser
 	FinalURL      string    `gorm:"type:varchar(2048)" json:"final_url,omitempty"`
 	IsArchived    bool      `gorm:"default:false;index" json:"is_archived"`
-	CrawlJob      CrawlJob  `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
+
+	// Page type and tags. DetectedType is what the HTML says (content.Classify);
+	// PageType is the effective type, which a tag rule can override.
+	DetectedType string      `gorm:"type:varchar(32);default:''" json:"detected_type,omitempty"`
+	PageType     string      `gorm:"type:varchar(32);default:''" json:"page_type,omitempty"`
+	TypeSignals  string      `gorm:"type:varchar(255);default:''" json:"type_signals,omitempty"` // evidence for DetectedType
+	Tags         StringSlice `gorm:"type:json" json:"tags,omitempty"`
+	Skipped      bool        `gorm:"default:false" json:"skipped,omitempty"` // fetched but not kept (see keep_tags)
+	SkipReason   string      `gorm:"type:varchar(32);default:''" json:"skip_reason,omitempty"`
+
+	CrawlJob CrawlJob `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
+}
+
+// PageTag is one tag of a crawled page, so pages can be filtered and counted
+// by tag (crawled_pages.tags holds the same list for display).
+type PageTag struct {
+	ID         uint        `gorm:"primaryKey"`
+	CrawlJobID string      `gorm:"type:varchar(36);not null;index:idx_page_tags_job_tag,priority:1"`
+	Tag        string      `gorm:"type:varchar(64);not null;index:idx_page_tags_job_tag,priority:2;uniqueIndex:idx_page_tags_page_tag,priority:2"`
+	PageID     uint        `gorm:"not null;index:idx_page_tags_job_tag,priority:3;uniqueIndex:idx_page_tags_page_tag,priority:1"`
+	Page       CrawledPage `gorm:"foreignKey:PageID;constraint:OnDelete:CASCADE"`
 }
 
 // FrontierURL represents a URL in the crawl frontier queue

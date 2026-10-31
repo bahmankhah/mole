@@ -135,13 +135,18 @@
                                 </div>
 
                                 <div id="sch-crawl-urls">
-                                    <label class="set-label" for="sch-url">Start URL</label>
-                                    <input type="text" id="sch-url" class="set-input" placeholder="https://shop.ir/category/phones" dir="ltr">
-                                    <details class="mt-2" id="sch-seeds-wrap">
-                                        <summary class="text-xs text-indigo-600 cursor-pointer">More start URLs <span id="sch-seed-count" class="text-gray-400"></span></summary>
-                                        <textarea id="sch-seeds" rows="4" class="set-input font-mono mt-2" placeholder="https://shop.ir/category/laptops&#10;https://shop.ir/category/tablets" dir="ltr"></textarea>
-                                        <p class="set-hint">One per line. All of them are crawled in the same run.</p>
-                                    </details>
+                                    <div class="flex items-baseline justify-between gap-2">
+                                        <label class="set-label" for="sch-start">Start URLs <span class="set-sub">(one per line)</span></label>
+                                        <span id="sch-site-count" class="text-xs font-mono text-indigo-500"></span>
+                                    </div>
+                                    <textarea id="sch-start" rows="2" class="set-input font-mono" placeholder="https://shop.ir/category/phones&#10;https://another-shop.com/phones" dir="ltr"></textarea>
+                                    <p class="set-hint">Each run starts from all of them and follows links within each one's own domain, so one schedule can cover several sites.</p>
+                                    <label id="sch-compare-wrap" class="hidden mt-3 p-3 rounded-lg border border-indigo-200 bg-indigo-50 cursor-pointer items-start gap-2">
+                                        <input type="checkbox" id="sch-compare" class="mt-0.5 h-4 w-4 text-indigo-600 border-gray-300 rounded">
+                                        <span class="text-sm text-indigo-900">Compare products across these sites
+                                            <span class="block text-xs text-indigo-700/80 mt-0.5">Matches the same product on each site and records the fields you track on every run, building a price and stock history. Tune it under <a href="#sec-grouping" class="underline">Group &amp; compare</a>.</span>
+                                        </span>
+                                    </label>
                                     <p id="sch-vars-note" class="hidden set-hint"></p>
                                 </div>
                                 <div id="sch-batch-urls" class="hidden">
@@ -250,9 +255,27 @@
             countURLs();
         }
         function countURLs() {
-            var n = lines('sch-urls').length, seeds = lines('sch-seeds').length;
+            var n = lines('sch-urls').length;
             document.getElementById('sch-url-count').textContent = n ? n.toLocaleString() + ' URL' + (n === 1 ? '' : 's') : '';
-            document.getElementById('sch-seed-count').textContent = seeds ? '(' + seeds + ')' : '';
+
+            // Start URLs: how many distinct sites, which decides whether
+            // there is anything to compare between.
+            var starts = startURLs(), domains = {};
+            starts.forEach(function (u) {
+                var d = u.replace(/^[a-z]+:\/\//i, '').split('/')[0].split('?')[0].replace(/^www\./i, '').toLowerCase();
+                if (d) { domains[d] = true; }
+            });
+            var sites = Object.keys(domains).length;
+            document.getElementById('sch-site-count').textContent = starts.length > 1 ? starts.length + ' URLs · ' + sites + ' site' + (sites === 1 ? '' : 's') : '';
+            var cmp = document.getElementById('sch-compare-wrap');
+            cmp.classList.toggle('hidden', sites < 2 || kind() === 'batch');
+            cmp.classList.toggle('flex', sites >= 2 && kind() !== 'batch');
+        }
+
+        /* Start URLs are whitespace-separated, matching jobs.SplitTargets on
+           the server: the first is the template's target, the rest are seeds. */
+        function startURLs() {
+            return document.getElementById('sch-start').value.split(/\s+/).filter(Boolean);
         }
 
         /* ── When: frequency builder ↔ cron ── */
@@ -322,8 +345,8 @@
                 var urls = lines('sch-urls');
                 if (!urls.length) return add('sch-urls', 'List at least one URL to check');
                 if (urls.length > 10000) return add('sch-urls', 'A batch may contain at most 10,000 URLs (' + urls.length.toLocaleString() + ' listed)');
-            } else if (!document.getElementById('sch-url').value.trim()) {
-                return add('sch-url', 'Enter the start URL');
+            } else if (startURLs().length === 0) {
+                return add('sch-start', 'Enter at least one start URL');
             }
             if (cronError) return add(freq() === 'custom' ? 'sch-cron' : 'sch-freq', 'When: ' + cronError);
             return '';
@@ -333,7 +356,7 @@
             if (m.indexOf('cron') >= 0) id = freq() === 'custom' ? 'sch-cron' : 'sch-freq';
             else if (m.indexOf('timezone') >= 0) id = 'sch-tz';
             else if (m.indexOf('batch') >= 0) id = 'sch-urls';
-            else if (m.indexOf('url') >= 0 && m.indexOf('webhook') < 0) id = kind() === 'batch' ? 'sch-urls' : 'sch-url';
+            else if (m.indexOf('url') >= 0 && m.indexOf('webhook') < 0) id = kind() === 'batch' ? 'sch-urls' : 'sch-start';
             if (id) { markInvalid(document.getElementById(id), true); return true; }
             return false;
         }
@@ -355,8 +378,9 @@
                 t.target_url = urls[0]; t.seed_urls = urls.slice(1);
                 delete t.template_vars;
             } else {
-                t.target_url = document.getElementById('sch-url').value.trim();
-                t.seed_urls = lines('sch-seeds');
+                var starts = startURLs().filter(function (u, i, all) { return all.indexOf(u) === i; });
+                t.target_url = starts[0] || '';
+                t.seed_urls = starts.slice(1);
             }
             return {
                 name: document.getElementById('sch-name').value.trim(),
@@ -415,9 +439,7 @@
             if (k === 'batch') {
                 document.getElementById('sch-urls').value = [tpl.target_url].concat(tpl.seed_urls || []).filter(Boolean).join('\n');
             } else {
-                document.getElementById('sch-url').value = tpl.target_url || '';
-                document.getElementById('sch-seeds').value = (tpl.seed_urls || []).join('\n');
-                document.getElementById('sch-seeds-wrap').open = (tpl.seed_urls || []).length > 0;
+                document.getElementById('sch-start').value = [tpl.target_url].concat(tpl.seed_urls || []).filter(Boolean).join('\n');
             }
             if (tpl.template_vars && Object.keys(tpl.template_vars).length) {
                 var note = document.getElementById('sch-vars-note');
@@ -437,12 +459,22 @@
             document.getElementById('sch-skip').checked = schedule.skip_if_running !== false;
 
             document.querySelectorAll('input[name="sch-kind"]').forEach(function (r) { r.addEventListener('change', syncKind); });
-            ['sch-urls', 'sch-seeds'].forEach(function (id) { document.getElementById(id).addEventListener('input', countURLs); });
+            ['sch-urls', 'sch-start'].forEach(function (id) { document.getElementById(id).addEventListener('input', countURLs); });
+            // The inline "compare products" switch and the one in the
+            // Group & compare section are the same setting; keep them in step.
+            var inlineCmp = document.getElementById('sch-compare'), sectionCmp = document.getElementById('set-group-products');
+            if (inlineCmp && sectionCmp) {
+                inlineCmp.addEventListener('change', function () {
+                    if (sectionCmp.checked !== inlineCmp.checked) { sectionCmp.checked = inlineCmp.checked; sectionCmp.dispatchEvent(new Event('change')); }
+                });
+                sectionCmp.addEventListener('change', function () { inlineCmp.checked = sectionCmp.checked; });
+            }
             document.getElementById('sch-freq').addEventListener('change', syncFreq);
             ['sch-every', 'sch-weekday', 'sch-day', 'sch-time', 'sch-minute', 'sch-tz'].forEach(function (id) { document.getElementById(id).addEventListener('change', previewSoon); });
             ['sch-cron', 'sch-minute', 'sch-time'].forEach(function (id) { document.getElementById(id).addEventListener('input', previewSoon); });
 
             populateSettings();
+            if (inlineCmp && sectionCmp) { inlineCmp.checked = sectionCmp.checked; } // after the settings section is filled in
             syncKind();
             syncFreq();
             if (!isNew) {

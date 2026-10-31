@@ -242,6 +242,7 @@ type RunStats struct {
 	OwnerRef    string           `json:"owner_ref,omitempty"`
 	StartedAt   time.Time        `json:"started_at"`
 	Crawled     int64            `json:"crawled"`
+	Kept        int64            `json:"kept"` // crawled pages not skipped by keep_tags
 	Matches     int64            `json:"matches"`
 	InFlight    int64            `json:"in_flight"`
 	Usage       models.JobUsage  `json:"usage"`

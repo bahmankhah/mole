@@ -449,9 +449,9 @@ func (m *Manager) GetCrawledPages(jobID string, limit, offset int) ([]models.Cra
 	var pages []models.CrawledPage
 	var total int64
 
-	m.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ? AND is_archived = ?", jobID, false).Count(&total)
+	m.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ? AND is_archived = ? AND skipped = ?", jobID, false, false).Count(&total)
 
-	if err := m.db.Where("crawl_job_id = ? AND is_archived = ?", jobID, false).
+	if err := m.db.Where("crawl_job_id = ? AND is_archived = ? AND skipped = ?", jobID, false, false).
 		Omit("TextContent").
 		Order("crawled_at DESC").
 		Limit(limit).

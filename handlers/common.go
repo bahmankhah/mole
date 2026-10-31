@@ -49,31 +49,34 @@ func jobIDParam(c *gin.Context) string {
 // Catalog describes what this engine supports; the UI builds its forms from it
 // and API clients can discover capabilities.
 type Catalog struct {
-	Version         string                 `json:"version"`
-	WorkerID        string                 `json:"worker_id"`
-	Region          string                 `json:"region"`
-	ProxyPools      []string               `json:"proxy_pools"`
-	ProxyRoutes     []netx.ProxyRoute      `json:"proxy_routes"`
-	Regions         []string               `json:"regions"`
-	Fingerprints    []string               `json:"fingerprints"`
-	Formats         []string               `json:"formats"`
-	FieldTypes      []string               `json:"field_types"`
-	Detectors       []content.DetectorInfo `json:"detectors"` // formats that detect structured data without selectors
-	BrowserActions  []string               `json:"browser_actions"`
-	BlockResources  []string               `json:"block_resources"`
-	WebhookEvents   []string               `json:"webhook_events"`
-	SelectorPrefix  []string               `json:"selector_prefixes"`
-	LLMEnabled      bool                   `json:"llm_enabled"`
-	LLMModel        string                 `json:"llm_model,omitempty"`
-	Documents       []string               `json:"documents"`       // document types converted on this process
-	SearchProvider  string                 `json:"search_provider"` // "" when /v1/search is disabled
-	ScrapeCache     bool                   `json:"scrape_cache"`
-	StorageDriver   string                 `json:"storage_driver"`
-	BrowserSlots    int                    `json:"browser_slots"`
-	AllowPrivate    bool                   `json:"allow_private_networks"`
-	PluginsInAPI    bool                   `json:"plugins_in_api"`
-	Plugins         []plugins.Plugin       `json:"plugins"`
-	DefaultSettings *models.JobSettings    `json:"default_settings"`
+	Version         string                    `json:"version"`
+	WorkerID        string                    `json:"worker_id"`
+	Region          string                    `json:"region"`
+	ProxyPools      []string                  `json:"proxy_pools"`
+	ProxyRoutes     []netx.ProxyRoute         `json:"proxy_routes"`
+	Regions         []string                  `json:"regions"`
+	Fingerprints    []string                  `json:"fingerprints"`
+	Formats         []string                  `json:"formats"`
+	FieldTypes      []string                  `json:"field_types"`
+	Detectors       []content.DetectorInfo    `json:"detectors"`      // formats that detect structured data without selectors
+	PageTypes       []content.PageTypeInfo    `json:"page_types"`     // types detected on every page; also default tags
+	CompareFields   []content.ComparableField `json:"compare_fields"` // product fields a product group can compare
+	Grouping        bool                      `json:"grouping"`       // product grouping is enabled on this engine
+	BrowserActions  []string                  `json:"browser_actions"`
+	BlockResources  []string                  `json:"block_resources"`
+	WebhookEvents   []string                  `json:"webhook_events"`
+	SelectorPrefix  []string                  `json:"selector_prefixes"`
+	LLMEnabled      bool                      `json:"llm_enabled"`
+	LLMModel        string                    `json:"llm_model,omitempty"`
+	Documents       []string                  `json:"documents"`       // document types converted on this process
+	SearchProvider  string                    `json:"search_provider"` // "" when /v1/search is disabled
+	ScrapeCache     bool                      `json:"scrape_cache"`
+	StorageDriver   string                    `json:"storage_driver"`
+	BrowserSlots    int                       `json:"browser_slots"`
+	AllowPrivate    bool                      `json:"allow_private_networks"`
+	PluginsInAPI    bool                      `json:"plugins_in_api"`
+	Plugins         []plugins.Plugin          `json:"plugins"`
+	DefaultSettings *models.JobSettings       `json:"default_settings"`
 }
 
 func (h *Handler) catalog() Catalog {
@@ -117,6 +120,9 @@ func (h *Handler) catalog() Catalog {
 		Formats:         models.AllFormats,
 		FieldTypes:      content.FieldTypes,
 		Detectors:       content.Detectors,
+		PageTypes:       content.PageTypes,
+		CompareFields:   content.ComparableFields,
+		Grouping:        cfg.Grouping.Enabled,
 		BrowserActions:  []string{"wait", "wait_for_selector", "click", "scroll", "type", "press", "evaluate"},
 		BlockResources:  []string{"image", "font", "media", "stylesheet"},
 		WebhookEvents:   jobs.AllEvents,

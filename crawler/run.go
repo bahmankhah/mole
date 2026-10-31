@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/resolver/crawler/content"
 	"github.com/resolver/crawler/models"
 	"github.com/resolver/crawler/modules"
 	"gorm.io/gorm"
@@ -52,11 +53,26 @@ type Run struct {
 	robotRules   map[string]*modules.RobotsResult
 	robotRulesMu sync.RWMutex
 
+	// seedDomains are the base domains of the job's start URLs. Every one
+	// of them is in scope, so a crawl given several sites covers them all
+	// without also having to list them under scope_domains.
+	seedDomains map[string]bool
+
+	// domainPages counts the pages taken from each site, for
+	// max_pages_per_domain: one site of a multi-site crawl must not be
+	// able to spend the whole page budget.
+	domainMu    sync.Mutex
+	domainPages map[string]int
+	domainFull  map[string]bool
+
 	baseJobID string
 
-	crawled  int64
-	matches  int64
-	inflight int64
+	crawled int64
+	kept    int64 // crawled pages not skipped by keep_tags
+	matches int64
+
+	templates *content.TemplateIndex // the site's page templates, learned during the run
+	inflight  int64
 
 	// usage counters (absolute values, seeded from the job row)
 	uRequests, uPages, uBytes, uBrowserMs, uLLMTokens, uErrors, uScreenshots, uProxy, uDocPages int64
@@ -95,6 +111,7 @@ func newRun(e *Engine, job *models.CrawlJob) (*Run, error) {
 		robotRules:  map[string]*modules.RobotsResult{},
 		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
 		pluginSlots: make(chan struct{}, rs.MaxConcurrentRequests),
+		templates:   content.NewTemplateIndex(),
 	}
 
 	r.urlCleaner = modules.NewURLCleaner()
@@ -102,6 +119,9 @@ func newRun(e *Engine, job *models.CrawlJob) (*Run, error) {
 	if job.Settings != nil && len(job.Settings.ExtraTrackingParams) > 0 {
 		r.urlCleaner.AddTrackingParams(job.Settings.ExtraTrackingParams)
 	}
+	r.seedDomains = seedDomainsOf(r.urlCleaner, job)
+	r.domainPages = map[string]int{}
+	r.domainFull = map[string]bool{}
 	r.linkExtractor = modules.NewHTMLLinkExtractor(r.urlCleaner)
 	r.sitemapParser = modules.NewSitemapParser(r.urlCleaner)
 	r.robotsParser = modules.NewRobotsParser(r.urlCleaner)
@@ -148,6 +168,19 @@ func (r *Run) loadPhrases() error {
 	return nil
 }
 
+// seedDomainsOf collects the base domains of a job's start URLs, which are
+// in scope alongside the target's own domain. Giving a crawl several start
+// URLs is how one run covers several sites and can compare them.
+func seedDomainsOf(cleaner *modules.URLCleaner, job *models.CrawlJob) map[string]bool {
+	out := map[string]bool{}
+	for _, seed := range job.SeedURLs {
+		if domain := cleaner.ExtractBaseDomain(seed); domain != "" && domain != job.Domain {
+			out[domain] = true
+		}
+	}
+	return out
+}
+
 // findBaseJob picks the job this run's pages are compared against.
 func (r *Run) findBaseJob() string {
 	if r.rs.CompareWithJobID != "" && r.rs.CompareWithJobID != r.job.ID {
@@ -192,8 +225,10 @@ func (r *Run) start() error {
 	r.ctx, r.cancel = ctx, cancel
 	r.sideCtx, r.sideStop = context.WithCancel(context.Background())
 
-	var crawled, matches int64
+	var crawled, kept, matches int64
 	r.e.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ? AND is_archived = ?", job.ID, false).Count(&crawled)
+	r.e.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ? AND is_archived = ? AND skipped = ?", job.ID, false, false).Count(&kept)
+	atomic.StoreInt64(&r.kept, kept)
 	r.e.db.Model(&models.PhraseMatch{}).Where("crawl_job_id = ? AND is_archived = ?", job.ID, false).Count(&matches)
 	atomic.StoreInt64(&r.crawled, crawled)
 	atomic.StoreInt64(&r.matches, matches)
@@ -280,6 +315,14 @@ func (r *Run) worker(id int) {
 			continue
 		}
 		emptyChecks = 0
+		if r.domainBudgetSpent(fu.URL) {
+			// This site has had its share of the page budget; drop the URL
+			// and carry on with the others.
+			if err := r.frontier.MarkCompleted(fu.ID); err != nil {
+				log.Printf("[Run %s] Failed to drop over-budget URL %s: %v", short(r.job.ID), fu.URL, err)
+			}
+			continue
+		}
 		atomic.AddInt64(&r.inflight, 1)
 		r.handle(id, fu)
 		atomic.AddInt64(&r.inflight, -1)
@@ -288,6 +331,31 @@ func (r *Run) worker(id int) {
 			return
 		}
 	}
+}
+
+// domainBudgetSpent counts one page against the URL's site and reports
+// whether that site is already at max_pages_per_domain. Without the cap
+// a single sprawling site can starve the others in a multi-site crawl.
+func (r *Run) domainBudgetSpent(rawURL string) bool {
+	if r.rs.MaxPagesPerDomain <= 0 {
+		return false
+	}
+	domain := r.urlCleaner.ExtractBaseDomain(rawURL)
+	if domain == "" {
+		return false
+	}
+	r.domainMu.Lock()
+	defer r.domainMu.Unlock()
+	if r.domainPages[domain] >= r.rs.MaxPagesPerDomain {
+		if !r.domainFull[domain] {
+			r.domainFull[domain] = true
+			log.Printf("[Run %s] %s reached its %d-page share; the crawl carries on with the other sites",
+				short(r.job.ID), domain, r.rs.MaxPagesPerDomain)
+		}
+		return true
+	}
+	r.domainPages[domain]++
+	return false
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {
@@ -324,6 +392,8 @@ func (r *Run) limitReached() string {
 	switch {
 	case r.rs.MaxPages > 0 && atomic.LoadInt64(&r.crawled) >= int64(r.rs.MaxPages):
 		return models.StopReasonMaxPages
+	case r.rs.MaxKeptPages > 0 && atomic.LoadInt64(&r.kept) >= int64(r.rs.MaxKeptPages):
+		return models.StopReasonMaxKept
 	case l.MaxRequests > 0 && atomic.LoadInt64(&r.uRequests) >= int64(l.MaxRequests):
 		return models.StopReasonMaxRequests
 	case l.MaxBytes > 0 && atomic.LoadInt64(&r.uBytes) >= l.MaxBytes:
@@ -476,6 +546,7 @@ func (r *Run) flush() bool {
 	lease := time.Now().Add(r.e.cfg.Worker.LeaseTTL)
 	updates := map[string]interface{}{
 		"crawled_urls":     atomic.LoadInt64(&r.crawled),
+		"kept_urls":        atomic.LoadInt64(&r.kept),
 		"found_matches":    atomic.LoadInt64(&r.matches),
 		"total_urls":       pending + processing + completed + failed,
 		"lease_expires_at": lease,
@@ -498,6 +569,7 @@ func (r *Run) flush() bool {
 	}
 	r.jobMu.Lock()
 	r.job.CrawledURLs = int(updates["crawled_urls"].(int64))
+	r.job.KeptURLs = int(updates["kept_urls"].(int64))
 	r.job.FoundMatches = int(updates["found_matches"].(int64))
 	r.job.TotalURLs = int(pending + processing + completed + failed)
 	r.job.Usage = r.usage()
@@ -536,6 +608,7 @@ func (r *Run) stats() RunStats {
 	st := RunStats{JobID: job.ID, TargetURL: job.TargetURL, OwnerRef: job.OwnerRef, StartedAt: r.startedAt, Limits: r.rs.Limits}
 	r.jobMu.Unlock()
 	st.Crawled = atomic.LoadInt64(&r.crawled)
+	st.Kept = atomic.LoadInt64(&r.kept)
 	st.Matches = atomic.LoadInt64(&r.matches)
 	st.InFlight = atomic.LoadInt64(&r.inflight)
 	st.Usage = r.usage()
@@ -596,6 +669,7 @@ func (r *Run) finalize(out *Outcome) {
 	updates := map[string]interface{}{
 		"status":           out.Status,
 		"crawled_urls":     atomic.LoadInt64(&r.crawled),
+		"kept_urls":        atomic.LoadInt64(&r.kept),
 		"found_matches":    atomic.LoadInt64(&r.matches),
 		"total_urls":       pending + processing + completed + failed,
 		"stop_reason":      out.StopReason,
@@ -632,6 +706,7 @@ func (r *Run) finalize(out *Outcome) {
 	job.Status = out.Status
 	job.StopReason = out.StopReason
 	job.CrawledURLs = int(atomic.LoadInt64(&r.crawled))
+	job.KeptURLs = int(atomic.LoadInt64(&r.kept))
 	job.FoundMatches = int(atomic.LoadInt64(&r.matches))
 	job.TotalURLs = int(pending + processing + completed + failed)
 	job.Usage = r.usage()

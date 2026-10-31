@@ -35,6 +35,9 @@ type ScrapeResult struct {
 	ContentType      string                 `json:"content_type"`
 	FetchedWith      string                 `json:"fetched_with"`
 	Title            string                 `json:"title,omitempty"`
+	PageType         string                 `json:"page_type,omitempty"`    // product, listing, article, … (see content.Classify)
+	TypeSignals      []string               `json:"type_signals,omitempty"` // evidence for the detected type
+	Tags             []string               `json:"tags,omitempty"`         // the type plus matching tag_rules
 	Markdown         string                 `json:"markdown,omitempty"`
 	HTML             string                 `json:"html,omitempty"`
 	Text             string                 `json:"text,omitempty"`
@@ -139,6 +142,7 @@ func (e *Engine) Scrape(ctx context.Context, req ScrapeRequest) (*ScrapeResult, 
 	switch {
 	case len(res.Body) == 0:
 	case docKind != "":
+		out.PageType, out.Tags = TagPage(rs.TagRules, target, out.FinalURL, models.PageTypeDocument)
 		e.scrapeDocument(ctx, out, rs, docKind, res, m)
 	case strings.Contains(ct, "html") || ct == "":
 		f := rs.Formats
@@ -165,11 +169,14 @@ func (e *Engine) Scrape(ctx context.Context, req ScrapeRequest) (*ScrapeResult, 
 			analysis.Metadata["source_url"] = target
 			out.Metadata = analysis.Metadata
 		}
-		if len(rs.Detectors) > 0 {
-			if d, err := content.Detect(out.FinalURL, res.Body, rs.Detectors); err != nil {
-				out.ExtractError = appendErr(out.ExtractError, "detect: "+err.Error())
-			} else {
-				out.Detected = *d
+		if page, err := content.ParsePage(out.FinalURL, res.Body); err != nil {
+			out.ExtractError = appendErr(out.ExtractError, "detect: "+err.Error())
+		} else {
+			c := page.Classify()
+			out.TypeSignals = c.Signals
+			out.PageType, out.Tags = TagPage(rs.TagRules, target, out.FinalURL, c.Type)
+			if len(rs.Detectors) > 0 {
+				out.Detected = *page.Detect(rs.Detectors, out.PageType)
 			}
 		}
 		if len(rs.ExtractFields) > 0 {

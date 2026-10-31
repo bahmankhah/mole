@@ -1,12 +1,9 @@
 package content
 
 import (
-	"bytes"
 	"encoding/json"
-	"net/url"
 
 	"github.com/resolver/crawler/models"
-	"golang.org/x/net/html"
 )
 
 // Detected holds what the detectors found on a page. Each detector is an
@@ -56,35 +53,77 @@ func DetectFormats(formats map[string]bool) map[string]bool {
 	return out
 }
 
-// Detect runs the detectors named in formats on an HTML page. The page is
-// parsed once for all of them.
+// Detect runs the detectors named in formats on an HTML page, routed by the
+// page's type (see Page.Detect). The page is parsed once for all of them.
 func Detect(pageURL string, body []byte, formats map[string]bool) (*Detected, error) {
-	root, err := html.Parse(bytes.NewReader(body))
+	p, err := ParsePage(pageURL, body)
 	if err != nil {
 		return nil, err
 	}
-	base, _ := url.Parse(pageURL)
-	pg := newPageData(root, base)
+	return p.Detect(formats, p.Classify().Type), nil
+}
+
+// Detect runs the requested detectors that fit the page type. A page is about
+// one thing, so only the detector of its own type runs among product,
+// article, job_posting and event: a product page whose theme also marks it up
+// as an Article yields only the product. Listings and home pages get none of
+// them. Pages of type "other" (or "") get every requested one, since the type
+// is not known. Business and FAQ detectors run on any page: contact details
+// and FAQ sections appear everywhere.
+//
+// Product and article pages without structured data are read from their
+// HTML: for a product the main heading, the price shown outside item cards
+// and the buy or notify button; for an article the headline, meta tags,
+// <time> and byline.
+func (p *Page) Detect(formats map[string]bool, pageType string) *Detected {
+	pg := p.pg
+	run := func(format string) bool {
+		if !formats[format] {
+			return false
+		}
+		own, isMain := mainDetectorTypes[format]
+		if !isMain {
+			return true
+		}
+		switch pageType {
+		case "", models.PageTypeOther, models.PageTypeFAQ, models.PageTypeBusiness:
+			return true
+		}
+		return pageType == own
+	}
 	d := &Detected{}
-	if formats[models.FormatProduct] {
+	if run(models.FormatProduct) {
 		d.Product = detectProduct(pg)
+		if d.Product == nil && pageType == models.PageTypeProduct {
+			d.Product = p.productFromHTML()
+		}
 	}
-	if formats[models.FormatArticle] {
+	if run(models.FormatArticle) {
 		d.Article = detectArticle(pg)
+		if d.Article == nil && pageType == models.PageTypeArticle {
+			d.Article = articleFromPage(pg)
+		}
 	}
-	if formats[models.FormatBusiness] {
+	if run(models.FormatBusiness) {
 		d.Business = detectBusiness(pg)
 	}
-	if formats[models.FormatJobPosting] {
+	if run(models.FormatJobPosting) {
 		d.JobPosting = detectJobPosting(pg)
 	}
-	if formats[models.FormatEvent] {
+	if run(models.FormatEvent) {
 		d.Event = detectEvent(pg)
 	}
-	if formats[models.FormatFAQ] {
+	if run(models.FormatFAQ) {
 		d.FAQ = detectFAQ(pg)
 	}
-	return d, nil
+	return d
+}
+
+// mainDetectorTypes maps the detectors that read what a page is about to the
+// page type they belong to.
+var mainDetectorTypes = map[string]string{
+	models.FormatProduct: models.PageTypeProduct, models.FormatArticle: models.PageTypeArticle,
+	models.FormatJobPosting: models.PageTypeJobPosting, models.FormatEvent: models.PageTypeEvent,
 }
 
 // IsEmpty reports whether nothing was detected.
