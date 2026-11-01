@@ -162,6 +162,7 @@ func newSchedulesCmd() *cobra.Command {
 		},
 	}
 
+	c.AddCommand(newURLsCmd("schedule", true))
 	c.AddCommand(list, get, create,
 		simple("run", "Run a schedule now", func(m *jobs.Manager, id string) (string, error) {
 			s, err := m.GetSchedule(id)

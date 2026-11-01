@@ -398,6 +398,7 @@ func newJobsCmd() *cobra.Command {
 	}
 	pages.Flags().IntVar(&limit, "limit", 100, "maximum pages")
 
+	c.AddCommand(newURLsCmd("crawl", false))
 	c.AddCommand(list, get,
 		action("start", "Queue pending or paused jobs", func(m *jobs.Manager, id string) error { return m.StartJob(id) }),
 		action("pause", "Pause running or queued jobs", func(m *jobs.Manager, id string) error { return m.PauseJob(id) }),

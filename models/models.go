@@ -696,22 +696,33 @@ type PageTag struct {
 
 // FrontierURL represents a URL in the crawl frontier queue
 type FrontierURL struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	CrawlJobID    string    `gorm:"type:varchar(36);index:idx_job_status;uniqueIndex:idx_job_url_hash;not null" json:"crawl_job_id"`
-	URL           string    `gorm:"type:varchar(2048);not null" json:"url"`
-	URLHash       string    `gorm:"type:varchar(64);uniqueIndex:idx_job_url_hash;not null" json:"url_hash"`
-	NormalizedURL string    `gorm:"type:varchar(2048)" json:"normalized_url"`
-	Depth         int       `json:"depth"`
-	Priority      int       `gorm:"index;default:0" json:"priority"`
-	Status        string    `gorm:"type:varchar(20);index:idx_job_status;default:'pending'" json:"status"` // pending, processing, failed
-	ParentURL     string    `gorm:"type:varchar(2048)" json:"parent_url,omitempty"`
-	AnchorText    string    `gorm:"type:text" json:"anchor_text,omitempty"`
-	RetryCount    int       `gorm:"default:0" json:"retry_count"`
-	RequestMethod string    `gorm:"type:varchar(10);default:''" json:"request_method,omitempty"` // GET (empty) or POST; seed requests only
-	RequestBody   string    `gorm:"type:mediumtext" json:"request_body,omitempty"`               // POST body for this frontier entry
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
-	CrawlJob      CrawlJob  `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
+	ID            uint   `gorm:"primaryKey" json:"id"`
+	CrawlJobID    string `gorm:"type:varchar(36);index:idx_job_status;index:idx_job_host_status,priority:1;uniqueIndex:idx_job_url_hash;not null" json:"crawl_job_id"`
+	URL           string `gorm:"type:varchar(2048);not null" json:"url"`
+	URLHash       string `gorm:"type:varchar(64);uniqueIndex:idx_job_url_hash;not null" json:"url_hash"`
+	NormalizedURL string `gorm:"type:varchar(2048)" json:"normalized_url"`
+	Depth         int    `json:"depth"`
+	Priority      int    `gorm:"index;default:0" json:"priority"`
+	Status        string `gorm:"type:varchar(20);index:idx_job_status;index:idx_job_host_status,priority:3;default:'pending'" json:"status"` // pending, processing, failed
+	ParentURL     string `gorm:"type:varchar(2048)" json:"parent_url,omitempty"`
+	AnchorText    string `gorm:"type:text" json:"anchor_text,omitempty"`
+	RetryCount    int    `gorm:"default:0" json:"retry_count"`
+	RequestMethod string `gorm:"type:varchar(10);default:''" json:"request_method,omitempty"` // GET (empty) or POST; seed requests only
+	RequestBody   string `gorm:"type:mediumtext" json:"request_body,omitempty"`               // POST body for this frontier entry
+	// Host is the URL's base domain, set when the entry is enqueued, so a
+	// crawl covering several sites can be counted and capped per site
+	// without parsing every URL again.
+	Host string `gorm:"type:varchar(255);index:idx_job_host_status,priority:2" json:"host,omitempty"`
+	// ClaimedBy is the worker holding this entry while it is processing.
+	// Several workers pull from one crawl's frontier, so a claim has to say
+	// whose it is: that is what lets the entries of a worker that died be
+	// told apart from those a live worker is still fetching, and put back
+	// without yanking work out of anybody's hands. UpdatedAt doubles as
+	// when the claim was taken.
+	ClaimedBy string    `gorm:"type:varchar(128);default:''" json:"claimed_by,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	CrawlJob  CrawlJob  `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
 // FrontierStatus constants
@@ -720,6 +731,32 @@ const (
 	FrontierStatusProcessing = "processing"
 	FrontierStatusCompleted  = "completed"
 	FrontierStatusFailed     = "failed"
+)
+
+// CrawlJobWorker records a worker that has joined a running crawl to pull
+// from its frontier alongside the job's owner.
+//
+// The frontier itself is the work queue: every worker claims URLs from it
+// with SELECT ... FOR UPDATE SKIP LOCKED, so no URL is ever handed to two
+// workers and work spreads over whoever is pulling — the usual competing
+// consumers arrangement. This row does not hand out work. It is how the
+// owner knows helpers are still pulling (so it must not declare the crawl
+// finished yet) and how a helper that dies is noticed and dropped.
+type CrawlJobWorker struct {
+	ID             uint       `gorm:"primaryKey" json:"id"`
+	CrawlJobID     string     `gorm:"type:varchar(36);uniqueIndex:idx_job_worker;not null" json:"crawl_job_id"`
+	WorkerID       string     `gorm:"type:varchar(128);uniqueIndex:idx_job_worker;not null" json:"worker_id"`
+	Status         string     `gorm:"type:varchar(16);index;default:'running'" json:"status"` // running, done
+	LeaseExpiresAt *time.Time `gorm:"index" json:"lease_expires_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	CrawlJob       CrawlJob   `gorm:"foreignKey:CrawlJobID;constraint:OnDelete:CASCADE" json:"-"`
+}
+
+// Crawl job worker status constants.
+const (
+	JobWorkerRunning = "running"
+	JobWorkerDone    = "done"
 )
 
 // PhraseMatch represents a detected phrase in crawled content

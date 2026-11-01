@@ -41,9 +41,14 @@ type RunSettings struct {
 	Phrases          []string
 	ChangeDetection  bool
 	CompareWithJobID string
-	TagRules         []TagRule
-	KeepTags         map[string]bool // nil = keep every page
-	MaxKeptPages     int
+	// GroupProducts says the crawl's product pages are matched into
+	// listings afterwards, which keeps a value-by-value series of its own.
+	// Change detection then leaves product fields alone rather than
+	// recording a second, URL-keyed copy of the same movement.
+	GroupProducts bool
+	TagRules      []TagRule
+	KeepTags      map[string]bool // nil = keep every page
+	MaxKeptPages  int
 	// ScopeDomains are further base domains the crawl may follow links
 	// into, besides the job's own; nil = the job's domain only.
 	ScopeDomains map[string]bool
@@ -298,6 +303,9 @@ func mergeSettings(rs *RunSettings, s *models.JobSettings, proxies *netx.ProxyMa
 	}
 	if s.ChangeDetection != nil {
 		rs.ChangeDetection = *s.ChangeDetection
+	}
+	if s.GroupProducts != nil {
+		rs.GroupProducts = *s.GroupProducts
 	}
 	if s.CompareWithJobID != nil {
 		rs.CompareWithJobID = strings.TrimSpace(*s.CompareWithJobID)

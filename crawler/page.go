@@ -261,7 +261,7 @@ func (r *Run) inScope(rawURL string) bool {
 	if domain == "" {
 		return false
 	}
-	return domain == r.job.Domain || r.seedDomains[domain] || r.rs.ScopeDomains[domain]
+	return domain == r.job.Domain || r.inSeedDomain(domain) || r.rs.ScopeDomains[domain]
 }
 
 // processHTML extracts same-site links into the frontier.
@@ -734,6 +734,15 @@ func appendErr(existing, msg string) string {
 // detectChange compares a page with the same URL in the baseline job: its
 // main text and, when both runs have them, the extracted fields and what the
 // detectors found (product, article, …).
+//
+// This is the crawl-level view of change: did this URL's page differ from
+// the baseline run. It is deliberately not the product-level view — when
+// the crawl groups its products, each shop's offer has an identity and a
+// value-by-value series of its own, and the movement of a tracked product
+// field is recorded there (as a models.ListingChange) rather than twice in
+// two shapes. So the product detector's field diffs are left out here for
+// a grouping crawl; its text and structural diffs, which no series
+// records, are kept.
 func (r *Run) detectChange(page *models.CrawledPage, pc *models.PageContent, markdown string) {
 	var prev models.PageContent
 	err := r.e.db.Select(append([]string{"content_hash", "markdown", "extracted"}, models.DetectedColumns...)).
@@ -755,6 +764,9 @@ func (r *Run) detectChange(page *models.CrawledPage, pc *models.PageContent, mar
 		fields = content.DiffExtracted(prev.Extracted, pc.Extracted)
 		cur := pc.DetectedData.Fields()
 		for i, old := range prev.DetectedData.Fields() {
+			if old.Format == models.FormatProduct && r.rs.GroupProducts {
+				continue // the listing's own series records this movement
+			}
 			fields = append(fields, content.DiffDetected(old.Format, old.Value, cur[i].Value)...)
 		}
 		textChanged := prev.ContentHash != pc.ContentHash

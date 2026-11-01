@@ -146,8 +146,12 @@ func (m *Manager) migrateComparison(g *legacyComparison) error {
 		}
 		// The comparison's own site ids become the sites' domains, which
 		// is how a multi-site crawl tells its sites apart.
+		// "listings" was product_group_members until the schema migration
+		// that runs before this one renamed it; the rows and their ids are
+		// the same. Naming the old table here would fail with a missing
+		// table and strand every comparison still waiting to be converted.
 		for siteID, domain := range siteDomains {
-			for _, table := range []string{"product_group_members", "field_observations"} {
+			for _, table := range []string{"listings", "field_observations"} {
 				if err := tx.Table(table).
 					Where("scope_type = ? AND scope_id = ? AND site_key = ?", legacyComparisonScope, g.ID, siteID).
 					Updates(map[string]interface{}{"scope_type": models.ScopeSchedule, "scope_id": schedule.ID, "site_key": domain, "site_label": domain}).
@@ -159,7 +163,7 @@ func (m *Manager) migrateComparison(g *legacyComparison) error {
 		// Anything still on the old scope (a site deleted from the list
 		// before the move) keeps its own key and moves across too, so its
 		// history is not orphaned.
-		for _, table := range []string{"product_group_members", "field_observations", "product_groups"} {
+		for _, table := range []string{"listings", "field_observations", "product_groups"} {
 			if err := tx.Table(table).
 				Where("scope_type = ? AND scope_id = ?", legacyComparisonScope, g.ID).
 				Updates(map[string]interface{}{"scope_type": models.ScopeSchedule, "scope_id": schedule.ID}).

@@ -11,7 +11,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/resolver/crawler/config"
 	"github.com/resolver/crawler/jobs"
+	"github.com/resolver/crawler/modules"
 )
+
+// startURLCleaner names the site a start URL belongs to, for the
+// start-URL card. One instance: it holds no per-request state.
+var startURLCleaner = modules.NewURLCleaner()
 
 // TemplateFuncs are the helpers available in HTML templates.
 var TemplateFuncs = template.FuncMap{
@@ -106,16 +111,42 @@ var TemplateFuncs = template.FuncMap{
 		return "in " + humanDuration(d)
 	},
 	"hasPrefix": strings.HasPrefix,
+	// domainOf is the site a start URL covers — the label the start-URL
+	// card leads with, since that is what the user is really choosing.
+	"domainOf": func(raw string) string {
+		if d := startURLCleaner.ExtractBaseDomain(raw); d != "" {
+			return d
+		}
+		return raw
+	},
 }
 
+func init() {
+	// The visualization helpers live in charts.go, beside the palette they
+	// are validated against.
+	for name, fn := range chartFuncs {
+		TemplateFuncs[name] = fn
+	}
+}
+
+// humanDuration renders an age or a wait at one unit: "45s", "20m",
+// "20h", "9d".
+//
+// It formats the number itself rather than leaning on Duration.String(),
+// which pads out every smaller unit — twenty hours came out as "20h0m0s".
+// The value is truncated, not rounded, because these read as "at least
+// this long ago": rounding would let 59m59s display as "60m".
 func humanDuration(d time.Duration) string {
+	if d < 0 {
+		d = -d
+	}
 	switch {
 	case d < time.Minute:
-		return d.Round(time.Second).String()
+		return fmt.Sprintf("%ds", int(d.Seconds()))
 	case d < time.Hour:
-		return d.Round(time.Minute).String()
+		return fmt.Sprintf("%dm", int(d.Minutes()))
 	case d < 48*time.Hour:
-		return d.Round(time.Hour).String()
+		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
@@ -168,6 +199,7 @@ func Register(router *gin.Engine, h *Handler, cfg *config.Config) {
 	ui.GET("/scrape", h.ScrapePage)
 	ui.GET("/schedules", h.SchedulesPage)
 	ui.GET("/schedules/:id", h.SchedulePage)
+	ui.GET("/listings/:id", h.ListingPage)
 	ui.GET("/system", h.SystemPage)
 	ui.GET("/jobs/:id/pages/:pageId", asHTML(h.GetCrawledPage))
 	ui.GET("/jobs/:id", asHTML(h.GetJob))

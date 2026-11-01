@@ -32,11 +32,17 @@ const (
 	EventJobChanges   = "job.changes"
 	EventPageCrawled  = "page.crawled"
 	EventPageChanged  = "page.changed"
+	// EventListingChanged is the product-level change signal: one shop's
+	// tracked value for one product moved since the previous run. Unlike
+	// page.changed it is keyed to the listing, so it survives the shop
+	// moving the offer to a new URL, and it fires only for the fields the
+	// scope actually tracks.
+	EventListingChanged = "listing.changed"
 )
 
 // AllEvents lists every webhook event.
 var AllEvents = []string{EventJobQueued, EventJobStarted, EventJobProgress, EventJobPaused, EventJobCompleted,
-	EventJobFailed, EventJobCancelled, EventJobChanges, EventPageCrawled, EventPageChanged}
+	EventJobFailed, EventJobCancelled, EventJobChanges, EventPageCrawled, EventPageChanged, EventListingChanged}
 
 // defaultEvents are sent when a webhook does not list events: lifecycle
 // changes only, not the high-volume progress and per-page events.

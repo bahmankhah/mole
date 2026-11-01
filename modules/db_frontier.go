@@ -25,10 +25,15 @@ var ErrFrontierEmpty = errors.New("no pending URLs in frontier")
 type DBFrontier struct {
 	db                  *gorm.DB
 	crawlJobID          string
+	workerID            string
 	teleportProbability float64
 	rng                 *rand.Rand
 	urlCleaner          *URLCleaner
 	skipExtensions      map[string]bool
+	hostCursor          uint             // rotates over the sites with queued URLs
+	hosts               []string         // the sites, as last read
+	hostsFor            string           // the job f.hosts was read for
+	hostsRead           time.Time        // when it was read
 	includePatterns     []*regexp.Regexp // If set, only URLs matching these are added
 	excludePatterns     []*regexp.Regexp // Ignored if includePatterns is set
 	mu                  sync.Mutex
@@ -165,6 +170,14 @@ func (f *DBFrontier) SetCrawlJob(crawlJobID string) {
 	f.crawlJobID = crawlJobID
 }
 
+// SetWorker names the worker this frontier claims URLs for, so claims left
+// behind by a worker that died can be told from those a live worker holds.
+func (f *DBFrontier) SetWorker(workerID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.workerID = workerID
+}
+
 // AddURL adds a URL to the frontier if not already exists
 func (f *DBFrontier) AddURL(rawURL string, depth int, parentURL string) error {
 	return f.addURLInternal(rawURL, depth, parentURL, "", true)
@@ -276,6 +289,7 @@ func (f *DBFrontier) enqueueFrontier(cleanedURL string, depth int, parentURL, an
 		AnchorText:    anchorText,
 		RequestMethod: method,
 		RequestBody:   body,
+		Host:          f.urlCleaner.ExtractBaseDomain(cleanedURL),
 	}
 
 	result := f.db.Clauses(clause.OnConflict{
@@ -304,9 +318,20 @@ func (f *DBFrontier) AddURLs(urls []string, depth int, parentURL string) (int, e
 	return added, nil
 }
 
-// GetNextURL retrieves the next URL to crawl using random surfer model.
-// Uses a transaction with SELECT FOR UPDATE SKIP LOCKED to prevent race
-// conditions where multiple workers could pick the same URL.
+// GetNextURL retrieves the next URL to crawl, taking the sites of a
+// multi-site crawl in turn and picking at random within the site chosen.
+//
+// Picking at random across the whole queue starves a site. The queue is
+// ordered by id, so a site whose URLs were added late, or whose start page
+// failed once and went back on the queue, sits at one end of a range that
+// the other sites' tens of thousands of URLs have stretched — and a random
+// id lands on it almost never. Taking the sites in turn is what crawlers
+// do for exactly this reason, and it keeps a big site from crowding out a
+// small one.
+//
+// Claiming uses SELECT ... FOR UPDATE SKIP LOCKED, so several workers, on
+// this machine or another, pull from one job's queue without ever being
+// handed the same URL twice.
 func (f *DBFrontier) GetNextURL() (*models.FrontierURL, error) {
 	f.mu.Lock()
 	crawlJobID := f.crawlJobID
@@ -316,46 +341,109 @@ func (f *DBFrontier) GetNextURL() (*models.FrontierURL, error) {
 		return nil, errors.New("no crawl job set")
 	}
 
-	// Use a more efficient random selection than OFFSET which is O(n) in MySQL.
-	// Strategy: get the MIN and MAX ids of pending URLs, pick a random id in that
-	// range, then atomically claim the nearest pending URL with id >= that value.
-	var minID, maxID uint
-	f.db.Model(&models.FrontierURL{}).
-		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
-		Select("COALESCE(MIN(id), 0)").Scan(&minID)
-	f.db.Model(&models.FrontierURL{}).
-		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
-		Select("COALESCE(MAX(id), 0)").Scan(&maxID)
-
-	if maxID == 0 {
+	hosts, err := f.pendingHosts(crawlJobID)
+	if err != nil {
+		return nil, err
+	}
+	if len(hosts) == 0 {
 		return nil, ErrFrontierEmpty
 	}
 
-	// Pick a random ID in the range
+	// Start where the last call left off, so successive pulls walk the
+	// sites rather than all going to whichever comes first.
+	f.mu.Lock()
+	start := f.hostCursor
+	f.hostCursor++
+	f.mu.Unlock()
+
+	for i := range hosts {
+		host := hosts[(start+uint(i))%uint(len(hosts))]
+		fu, err := f.claimFromHost(crawlJobID, host)
+		if err != nil {
+			return nil, err
+		}
+		if fu != nil {
+			return fu, nil
+		}
+		// That site's queue emptied, or another worker took its last URL
+		// between listing and claiming; try the next site.
+	}
+	return nil, ErrFrontierEmpty
+}
+
+// pendingHosts lists the sites with URLs still queued. It is asked for on
+// every pull, so the answer is held briefly: sites come and go far more
+// slowly than URLs do.
+func (f *DBFrontier) pendingHosts(crawlJobID string) ([]string, error) {
+	f.mu.Lock()
+	if crawlJobID == f.hostsFor && time.Since(f.hostsRead) < hostListTTL {
+		hosts := f.hosts
+		f.mu.Unlock()
+		return hosts, nil
+	}
+	f.mu.Unlock()
+
+	var hosts []string
+	if err := f.db.Model(&models.FrontierURL{}).
+		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending).
+		Distinct().Pluck("host", &hosts).Error; err != nil {
+		return nil, err
+	}
+
+	f.mu.Lock()
+	f.hosts, f.hostsFor, f.hostsRead = hosts, crawlJobID, time.Now()
+	f.mu.Unlock()
+	return hosts, nil
+}
+
+// hostListTTL is how long the list of sites with queued URLs is reused
+// before being read again.
+const hostListTTL = 2 * time.Second
+
+// claimFromHost claims one queued URL of a single site, chosen at random
+// among that site's URLs. It returns nil when the site has none left.
+func (f *DBFrontier) claimFromHost(crawlJobID, host string) (*models.FrontierURL, error) {
+	f.mu.Lock()
+	workerID := f.workerID
+	f.mu.Unlock()
+
+	// A fresh query every time: a *gorm.DB chain must not be reused across
+	// final calls.
+	pendingQuery := func(db *gorm.DB) *gorm.DB {
+		q := db.Model(&models.FrontierURL{}).
+			Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusPending)
+		if host == "" {
+			// Entries queued before URLs recorded their site.
+			return q.Where("host IS NULL OR host = ''")
+		}
+		return q.Where("host = ?", host)
+	}
+
+	// A cheaper random pick than OFFSET, which is O(n) in MySQL: take the
+	// lowest and highest id of this site's queued URLs, pick an id in
+	// between, and claim the nearest at or above it.
+	var minID, maxID uint
+	pendingQuery(f.db).Select("COALESCE(MIN(id), 0)").Scan(&minID)
+	pendingQuery(f.db).Select("COALESCE(MAX(id), 0)").Scan(&maxID)
+	if maxID == 0 {
+		return nil, nil
+	}
+
 	f.mu.Lock() // math/rand.Rand is not safe for concurrent workers
 	randomID := minID + uint(f.rng.Int63n(int64(maxID-minID+1)))
 	f.mu.Unlock()
 
 	var frontierURL models.FrontierURL
-
-	// Atomically claim one URL using a transaction with row-level locking.
-	// FOR UPDATE locks the selected row; SKIP LOCKED means concurrent workers
-	// will skip rows already locked by another transaction, preventing duplicates.
 	err := f.db.Transaction(func(tx *gorm.DB) error {
-		// Try from randomID upward first
-		result := tx.
-			Raw("SELECT * FROM frontier_urls WHERE crawl_job_id = ? AND status = ? AND id >= ? ORDER BY id ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
-				crawlJobID, models.FrontierStatusPending, randomID).
-			Scan(&frontierURL)
-
-		if result.Error != nil || frontierURL.ID == 0 {
-			// Wrap around — try from the beginning
-			result = tx.
-				Raw("SELECT * FROM frontier_urls WHERE crawl_job_id = ? AND status = ? ORDER BY id ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
-					crawlJobID, models.FrontierStatusPending).
-				Scan(&frontierURL)
+		locked := func() *gorm.DB {
+			return pendingQuery(tx).Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"})
 		}
 
+		result := locked().Where("id >= ?", randomID).Order("id ASC").Limit(1).Find(&frontierURL)
+		if result.Error != nil || frontierURL.ID == 0 {
+			// Wrap around — try from this site's first queued URL.
+			result = locked().Order("id ASC").Limit(1).Find(&frontierURL)
+		}
 		if result.Error != nil {
 			return result.Error
 		}
@@ -363,17 +451,19 @@ func (f *DBFrontier) GetNextURL() (*models.FrontierURL, error) {
 			return ErrFrontierEmpty
 		}
 
-		// Update status to processing within the same transaction
+		// Claim it within the same transaction, stamped with this worker.
 		return tx.Model(&frontierURL).Updates(map[string]interface{}{
 			"status":     models.FrontierStatusProcessing,
+			"claimed_by": workerID,
 			"updated_at": time.Now(),
 		}).Error
 	})
-
+	if errors.Is(err, ErrFrontierEmpty) {
+		return nil, nil // this site ran out while we were looking
+	}
 	if err != nil {
 		return nil, err
 	}
-
 	return &frontierURL, nil
 }
 
@@ -387,7 +477,7 @@ func (f *DBFrontier) MarkCompleted(urlID uint) error {
 func (f *DBFrontier) Release(urlID uint) error {
 	return f.db.Model(&models.FrontierURL{}).
 		Where("id = ?", urlID).
-		Update("status", models.FrontierStatusPending).Error
+		Updates(map[string]interface{}{"status": models.FrontierStatusPending, "claimed_by": ""}).Error
 }
 
 // MarkFailed marks a URL as failed
@@ -398,6 +488,7 @@ func (f *DBFrontier) MarkFailed(urlID uint, retryCount int, maxRetries int) erro
 			Where("id = ?", urlID).
 			Updates(map[string]interface{}{
 				"status":      models.FrontierStatusPending,
+				"claimed_by":  "",
 				"retry_count": retryCount + 1,
 			}).Error
 	}
@@ -487,15 +578,25 @@ func (f *DBFrontier) IsURLSeen(rawURL string) bool {
 	return crawledCount > 0
 }
 
-// ResetProcessingURLs resets any URLs stuck in processing state (for recovery)
-func (f *DBFrontier) ResetProcessingURLs() error {
+// ReleaseAbandonedClaims puts URLs back on the queue that a worker claimed
+// and never finished because it died. A claim counts as abandoned when the
+// worker holding it is not among liveWorkers, or when it has gone untouched
+// for staleAfter regardless — the backstop for a worker that is alive but
+// wedged, and for claims taken before claims recorded a worker at all.
+// Claims held by a live worker are left alone: pulling those back would
+// hand the same URL to two workers at once.
+func (f *DBFrontier) ReleaseAbandonedClaims(liveWorkers []string, staleAfter time.Duration) (int64, error) {
 	f.mu.Lock()
 	crawlJobID := f.crawlJobID
 	f.mu.Unlock()
 
-	return f.db.Model(&models.FrontierURL{}).
-		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusProcessing).
-		Update("status", models.FrontierStatusPending).Error
+	q := f.db.Model(&models.FrontierURL{}).
+		Where("crawl_job_id = ? AND status = ?", crawlJobID, models.FrontierStatusProcessing)
+	if len(liveWorkers) > 0 {
+		q = q.Where("(claimed_by NOT IN ? OR updated_at < ?)", liveWorkers, time.Now().Add(-staleAfter))
+	}
+	res := q.Updates(map[string]interface{}{"status": models.FrontierStatusPending, "claimed_by": ""})
+	return res.RowsAffected, res.Error
 }
 
 // RequestIdentityHash uniquely identifies a fetch.

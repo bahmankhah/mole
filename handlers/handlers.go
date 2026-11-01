@@ -222,7 +222,6 @@ func (h *Handler) GetJob(c *gin.Context) {
 		// Product groups of this crawl's scope: its schedule (so the table
 		// spans every run), or the crawl itself.
 		var grouping interface{}
-		groupingUnmatched := template.JS("[]")
 		groupingScopeType, groupingScopeID, grouped := jobs.ScopeForJob(job)
 		grouped = grouped && h.jobManager.Config().Grouping.Enabled
 		if grouped {
@@ -230,13 +229,11 @@ func (h *Handler) GetJob(c *gin.Context) {
 			if d, err := h.jobManager.GetGroupingDashboard(groupingScopeType, groupingScopeID, c.Query("field"), gpage, gper); err == nil {
 				d.BasePath, d.Anchor = "/jobs/"+job.ID, "groups"
 				grouping = d
-				if b, err := json.Marshal(d.Unmatched); err == nil {
-					groupingUnmatched = template.JS(b)
-				}
 			} else {
 				grouped = false
 			}
 		}
+		urlCardData := h.crawlURLCard(job)
 		opts := gin.H{"priority": job.Priority, "region": job.Region, "limits": job.Limits}
 		if job.Webhook != nil {
 			w := *job.Webhook
@@ -253,7 +250,7 @@ func (h *Handler) GetJob(c *gin.Context) {
 		pluginJSON, _ := json.Marshal(ps)
 		// A crawl can start from several sites; show how each of them went.
 		siteStats := h.jobManager.JobSiteStats(job.ID)
-		c.HTML(http.StatusOK, "job.html", gin.H{
+		pageData := gin.H{
 			"siteStats":           siteStats,
 			"showSiteStats":       len(siteStats) > 1,
 			"pluginStatus":        ps,
@@ -272,7 +269,6 @@ func (h *Handler) GetJob(c *gin.Context) {
 			"showGrouping":        grouped,
 			"groupingScopeType":   groupingScopeType,
 			"groupingScopeID":     groupingScopeID,
-			"groupingUnmatched":   groupingUnmatched,
 			"job":                 job,
 			"subdomains":          subdomains,
 			"matches":             matches,
@@ -284,7 +280,11 @@ func (h *Handler) GetJob(c *gin.Context) {
 			"defaultSettingsJSON": h.defaultSettingsJS(),
 			"pluginsJSON":         h.pluginsJS(),
 			"settingsEditable":    job.Status.SettingsEditable(),
-		})
+		}
+		for k, v := range urlCardData {
+			pageData[k] = v
+		}
+		c.HTML(http.StatusOK, "job.html", pageData)
 		return
 	}
 

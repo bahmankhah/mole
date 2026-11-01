@@ -96,6 +96,13 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 			if err := a.Manager.MigrateComparisons(); err != nil {
 				log.Printf("[Migrate] Converting comparisons into schedules failed; they are unchanged and will be retried on the next start: %v", err)
 			}
+			// Members became listings with an identity of their own. The
+			// schema move is done by now; this derives the identities and
+			// attaches the recorded history, which needs the manager's
+			// key derivation. Likewise safe to retry.
+			if err := a.Manager.MigrateListings(); err != nil {
+				log.Printf("[Migrate] Deriving listing identities failed; the recorded history is unchanged and will be retried on the next start: %v", err)
+			}
 		}
 	}
 	return a, nil

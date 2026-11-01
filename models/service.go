@@ -341,8 +341,9 @@ type WorkerHeartbeat struct {
 	Region      string    `gorm:"type:varchar(32)" json:"region"`
 	Version     string    `gorm:"type:varchar(64)" json:"version"`
 	MaxJobs     int       `json:"max_jobs"`
-	RunningJobs int       `json:"running_jobs"`
-	Browser     bool      `json:"browser"` // a headless browser is available on this worker
+	RunningJobs int       `json:"running_jobs"` // crawls this worker runs, including ones it only helps with
+	HelpingJobs int       `json:"helping_jobs"` // of those, crawls owned by another worker
+	Browser     bool      `json:"browser"`      // a headless browser is available on this worker
 	StartedAt   time.Time `json:"started_at"`
 	LastSeenAt  time.Time `gorm:"index" json:"last_seen_at"`
 

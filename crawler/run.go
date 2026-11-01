@@ -20,6 +20,18 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	// staleClaimTimeout is how long a frontier entry may sit claimed by a
+	// worker before it is treated as abandoned and offered again. It has to
+	// outlast the slowest legitimate fetch, since a live worker's claims
+	// must never be handed to someone else.
+	staleClaimTimeout = 15 * time.Minute
+
+	// reapInterval is how often a running crawl's owner looks for URLs left
+	// claimed by a worker that has since stopped reporting in.
+	reapInterval = time.Minute
+)
+
 // Run is one job executing on this worker.
 type Run struct {
 	e  *Engine
@@ -56,11 +68,37 @@ type Run struct {
 	// seedDomains are the base domains of the job's start URLs. Every one
 	// of them is in scope, so a crawl given several sites covers them all
 	// without also having to list them under scope_domains.
-	seedDomains map[string]bool
+	//
+	// A start URL can be added while the run is going, so this is swapped
+	// wholesale by the monitor rather than mutated: inScope reads it for
+	// every link found, on every worker goroutine.
+	seedDomains   atomic.Value // map[string]bool
+	seedURLsKnown string       // the start-URL list the map was built from
+
+	// A run is either the job's owner — the worker holding the job's lease,
+	// which reports progress and writes the final state — or a helper, an
+	// otherwise-idle worker that joined to pull from the same frontier
+	// (models.CrawlJobWorker). A helper never touches the crawl_jobs row:
+	// it renews its own participation lease and leaves quietly.
+	isHelper    bool
+	helperRowID uint
+
+	helpersMu      sync.Mutex
+	helpersActive  bool
+	helpersChecked time.Time
+
+	// inflightURLs are the frontier entries this run has claimed and not
+	// finished. They are released on the way out so a pause or a shutdown
+	// doesn't leave them to sit out the visibility timeout.
+	inflightMu  sync.Mutex
+	inflightSet map[uint]bool
 
 	// domainPages counts the pages taken from each site, for
 	// max_pages_per_domain: one site of a multi-site crawl must not be
-	// able to spend the whole page budget.
+	// able to spend the whole page budget. Several workers may be crawling
+	// the same site at once, so the counts are refreshed from the database
+	// rather than only counted locally — otherwise each worker would let
+	// the site spend the whole budget over again.
 	domainMu    sync.Mutex
 	domainPages map[string]int
 	domainFull  map[string]bool
@@ -119,7 +157,8 @@ func newRun(e *Engine, job *models.CrawlJob) (*Run, error) {
 	if job.Settings != nil && len(job.Settings.ExtraTrackingParams) > 0 {
 		r.urlCleaner.AddTrackingParams(job.Settings.ExtraTrackingParams)
 	}
-	r.seedDomains = seedDomainsOf(r.urlCleaner, job)
+	r.setSeedDomains(seedDomainsOf(r.urlCleaner, job), strings.Join(job.SeedURLs, "\n"))
+	r.inflightSet = map[uint]bool{}
 	r.domainPages = map[string]int{}
 	r.domainFull = map[string]bool{}
 	r.linkExtractor = modules.NewHTMLLinkExtractor(r.urlCleaner)
@@ -135,6 +174,7 @@ func newRun(e *Engine, job *models.CrawlJob) (*Run, error) {
 		r.frontier.SetURLFilters(nil, nil)
 	}
 	r.frontier.SetCrawlJob(job.ID)
+	r.frontier.SetWorker(e.workerID)
 
 	jar, _ := cookiejar.New(nil)
 	r.http = modules.NewHTTPFetcher(e.transports, e.guard, jar, e.cfg.Security.MaxBodyBytes)
@@ -166,6 +206,76 @@ func (r *Run) loadPhrases() error {
 		r.phraseIDMap[strings.ToLower(p.Phrase)] = p.ID
 	}
 	return nil
+}
+
+// setSeedDomains publishes a new in-scope set for the run's workers.
+func (r *Run) setSeedDomains(domains map[string]bool, from string) {
+	r.seedDomains.Store(domains)
+	r.seedURLsKnown = from // monitor-only, so it needs no lock of its own
+}
+
+// inSeedDomain reports whether a base domain is one of the run's start
+// sites. The map is replaced, never written in place, so reading it takes
+// no lock on a path walked once per discovered link.
+func (r *Run) inSeedDomain(domain string) bool {
+	m, _ := r.seedDomains.Load().(map[string]bool)
+	return m[domain]
+}
+
+// hasActiveHelpers reports whether another worker is still pulling from
+// this job's frontier, so its owner knows not to call the crawl finished
+// out from under it: a helper mid-fetch can still add links. Every idle
+// worker goroutine asks this while the queue is drained, so the answer is
+// held briefly rather than counted again for each of them.
+func (r *Run) hasActiveHelpers() bool {
+	r.helpersMu.Lock()
+	defer r.helpersMu.Unlock()
+	if time.Since(r.helpersChecked) < time.Second {
+		return r.helpersActive
+	}
+	var n int64
+	r.e.db.Model(&models.CrawlJobWorker{}).
+		Where("crawl_job_id = ? AND status = ? AND worker_id <> ? AND (lease_expires_at IS NULL OR lease_expires_at > ?)",
+			r.job.ID, models.JobWorkerRunning, r.e.workerID, time.Now()).
+		Count(&n)
+	r.helpersActive = n > 0
+	r.helpersChecked = time.Now()
+	return r.helpersActive
+}
+
+// trackInflight records a frontier entry this run has claimed, so it can be
+// released if the run stops before finishing it.
+func (r *Run) trackInflight(id uint) {
+	r.inflightMu.Lock()
+	if r.inflightSet == nil {
+		r.inflightSet = map[uint]bool{}
+	}
+	r.inflightSet[id] = true
+	r.inflightMu.Unlock()
+}
+
+func (r *Run) untrackInflight(id uint) {
+	r.inflightMu.Lock()
+	delete(r.inflightSet, id)
+	r.inflightMu.Unlock()
+}
+
+// releaseInflight puts back every entry this run claimed but never
+// finished, so a pause or shutdown doesn't strand them in processing until
+// the visibility timeout expires.
+func (r *Run) releaseInflight() {
+	r.inflightMu.Lock()
+	ids := make([]uint, 0, len(r.inflightSet))
+	for id := range r.inflightSet {
+		ids = append(ids, id)
+	}
+	r.inflightSet = map[uint]bool{}
+	r.inflightMu.Unlock()
+	for _, id := range ids {
+		if err := r.frontier.Release(id); err != nil {
+			log.Printf("[Run %s] Failed to release URL %d: %v", short(r.job.ID), id, err)
+		}
+	}
 }
 
 // seedDomainsOf collects the base domains of a job's start URLs, which are
@@ -237,20 +347,33 @@ func (r *Run) start() error {
 	r.uLLMTokens, r.uErrors, r.uScreenshots, r.uProxy, r.uDocPages = u.LLMTokens, u.Errors, u.Screenshots, u.ProxyRequests, u.DocumentPages
 	r.pluginRuns, r.pluginFailures, r.pluginLastErr = job.AfterCrawlRuns, job.AfterCrawlFailures, job.AfterCrawlError
 
-	r.frontier.ResetProcessingURLs()
-	r.e.db.Model(&models.CrawlJob{}).Where("id = ?", job.ID).Update("started_at", job.StartedAt)
+	// Only claims left behind by a worker that died go back on the queue:
+	// another worker may be pulling from this same frontier right now.
+	if n, err := r.frontier.ReleaseAbandonedClaims(r.e.liveWorkerIDs(), staleClaimTimeout); err != nil {
+		log.Printf("[Run %s] Failed to release abandoned URL claims: %v", short(job.ID), err)
+	} else if n > 0 {
+		log.Printf("[Run %s] Put %d URL(s) back that a stopped worker had claimed", short(job.ID), n)
+	}
 
-	if r.frontier.PendingCount() == 0 {
+	if r.isHelper {
+		log.Printf("[Run %s] Helping with %d pending URLs (workers=%d)", short(job.ID),
+			r.frontier.PendingCount(), r.rs.MaxConcurrentRequests)
+	} else {
+		r.e.db.Model(&models.CrawlJob{}).Where("id = ?", job.ID).Update("started_at", job.StartedAt)
+		if pending := r.frontier.PendingCount(); pending > 0 {
+			log.Printf("[Run %s] Resuming with %d pending URLs", short(job.ID), pending)
+		}
+		// Queue the start URLs every time, not only for a crawl starting
+		// from an empty frontier: a resumed crawl may have been given a
+		// start URL it never queued, and a URL already crawled or queued
+		// is skipped here anyway.
 		if err := r.addSeedURLs(); err != nil {
 			r.stop(Outcome{Status: models.JobStatusFailed, Err: err})
 		}
-	} else {
-		log.Printf("[Run %s] Resuming with %d pending URLs", short(job.ID), r.frontier.PendingCount())
+		r.e.emit(r.snapshotJob(), "job.started", map[string]interface{}{"resumed": crawled > 0})
+		log.Printf("[Run %s] Started %s (workers=%d, headless=%v, fingerprint=%s)", short(job.ID), job.TargetURL,
+			r.rs.MaxConcurrentRequests, r.rs.UseHeadlessBrowser, r.rs.Fingerprint)
 	}
-
-	r.e.emit(r.snapshotJob(), "job.started", map[string]interface{}{"resumed": crawled > 0})
-	log.Printf("[Run %s] Started %s (workers=%d, headless=%v, fingerprint=%s)", short(job.ID), job.TargetURL,
-		r.rs.MaxConcurrentRequests, r.rs.UseHeadlessBrowser, r.rs.Fingerprint)
 
 	r.wg.Add(r.rs.MaxConcurrentRequests)
 	for i := 0; i < r.rs.MaxConcurrentRequests; i++ {
@@ -296,9 +419,15 @@ func (r *Run) worker(id int) {
 		fu, err := r.frontier.GetNextURL()
 		if err != nil {
 			if errors.Is(err, modules.ErrFrontierEmpty) {
-				// Done when nothing is pending and no other worker is
-				// processing a page that could still add links.
-				if atomic.LoadInt64(&r.inflight) == 0 {
+				// Done when nothing is pending, nothing this run fetched is
+				// still in flight, and — for the job's owner — no helper on
+				// another worker is still pulling, since either could yet
+				// add links. A helper just leaves; the owner carries on.
+				idle := atomic.LoadInt64(&r.inflight) == 0
+				if idle && !r.isHelper && r.hasActiveHelpers() {
+					idle = false
+				}
+				if idle {
 					emptyChecks++
 					if emptyChecks >= 6 {
 						return
@@ -324,7 +453,9 @@ func (r *Run) worker(id int) {
 			continue
 		}
 		atomic.AddInt64(&r.inflight, 1)
+		r.trackInflight(fu.ID)
 		r.handle(id, fu)
+		r.untrackInflight(fu.ID)
 		atomic.AddInt64(&r.inflight, -1)
 
 		if d := r.randomizedDelay(); d > 0 && !sleepCtx(r.ctx, d) {
@@ -356,6 +487,36 @@ func (r *Run) domainBudgetSpent(rawURL string) bool {
 	}
 	r.domainPages[domain]++
 	return false
+}
+
+// syncDomainPages refreshes the per-site page counts from the pages
+// actually stored for this job. Several workers can be crawling the same
+// site at once, and each only counts what it fetched itself, so without
+// this each of them would let that site spend the whole
+// max_pages_per_domain budget over again. Called from the monitor tick,
+// off the path walked for every URL.
+func (r *Run) syncDomainPages() {
+	if r.rs.MaxPagesPerDomain <= 0 {
+		return
+	}
+	var rows []struct {
+		Domain string
+		N      int
+	}
+	if err := r.e.db.Model(&models.CrawledPage{}).
+		Select("domain, COUNT(*) AS n").
+		Where("crawl_job_id = ? AND is_archived = ?", r.job.ID, false).
+		Group("domain").Scan(&rows).Error; err != nil {
+		log.Printf("[Run %s] Failed to refresh per-site page counts: %v", short(r.job.ID), err)
+		return
+	}
+	r.domainMu.Lock()
+	defer r.domainMu.Unlock()
+	for _, row := range rows {
+		if row.Domain != "" && row.N > r.domainPages[row.Domain] {
+			r.domainPages[row.Domain] = row.N
+		}
+	}
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {
@@ -482,17 +643,31 @@ func (r *Run) monitor(done chan struct{}) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	lastProgress := time.Now()
+	lastReap := time.Now()
 	for {
 		select {
 		case <-r.ctx.Done():
 			return
 		case <-ticker.C:
 			if !r.flush() {
-				log.Printf("[Run %s] Lease lost; another worker owns this job now", short(r.job.ID))
+				if r.isHelper {
+					log.Printf("[Run %s] Stopping help: the crawl no longer needs this worker", short(r.job.ID))
+				} else {
+					log.Printf("[Run %s] Lease lost; another worker owns this job now", short(r.job.ID))
+				}
 				r.stop(Outcome{StopReason: "lease_lost"})
 				return
 			}
 			r.applyControl()
+			r.syncDomainPages()
+			// A helper can die mid-fetch; put what it was holding back so
+			// the crawl doesn't finish without those URLs.
+			if !r.isHelper && time.Since(lastReap) >= reapInterval {
+				lastReap = time.Now()
+				if n, err := r.frontier.ReleaseAbandonedClaims(r.e.liveWorkerIDs(), staleClaimTimeout); err == nil && n > 0 {
+					log.Printf("[Run %s] Put %d URL(s) back that a stopped worker had claimed", short(r.job.ID), n)
+				}
+			}
 			if time.Since(lastProgress) >= 30*time.Second {
 				lastProgress = time.Now()
 				r.e.emit(r.snapshotJob(), "job.progress", map[string]interface{}{
@@ -540,8 +715,13 @@ func usageColumns(u models.JobUsage, into map[string]interface{}) {
 }
 
 // flush writes counters and renews the lease. It returns false when this
-// worker no longer owns the job.
+// worker should stop: it no longer owns the job, or — for a helper — its
+// participation lease is gone.
 func (r *Run) flush() bool {
+	r.refreshCounters()
+	if r.isHelper {
+		return r.flushHelper()
+	}
 	pending, processing, completed, failed := r.frontier.GetStats()
 	lease := time.Now().Add(r.e.cfg.Worker.LeaseTTL)
 	updates := map[string]interface{}{
@@ -577,21 +757,93 @@ func (r *Run) flush() bool {
 	return true
 }
 
+// refreshCounters re-reads what the crawl has stored so far. Each worker
+// only counts the pages it fetched itself, so with several of them on one
+// crawl the owner would under-report progress and every one of them would
+// allow the page and match limits all over again. The counts here cover
+// the whole crawl, whoever fetched the page.
+func (r *Run) refreshCounters() {
+	var crawled, kept, matches int64
+	r.e.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ? AND is_archived = ?", r.job.ID, false).Count(&crawled)
+	r.e.db.Model(&models.CrawledPage{}).Where("crawl_job_id = ? AND is_archived = ? AND skipped = ?", r.job.ID, false, false).Count(&kept)
+	r.e.db.Model(&models.PhraseMatch{}).Where("crawl_job_id = ? AND is_archived = ?", r.job.ID, false).Count(&matches)
+	// Never move a counter backwards: this run may have saved pages the
+	// counts above were taken just before.
+	storeIfLarger(&r.crawled, crawled)
+	storeIfLarger(&r.kept, kept)
+	storeIfLarger(&r.matches, matches)
+}
+
+func storeIfLarger(target *int64, v int64) {
+	for {
+		cur := atomic.LoadInt64(target)
+		if v <= cur || atomic.CompareAndSwapInt64(target, cur, v) {
+			return
+		}
+	}
+}
+
+// flushHelper renews a helper's participation lease. It returns false once
+// this worker should stop pulling: its lease was reclaimed (it looked dead),
+// or the job itself is no longer running.
+func (r *Run) flushHelper() bool {
+	lease := time.Now().Add(r.e.cfg.Worker.LeaseTTL)
+	res := r.e.db.Model(&models.CrawlJobWorker{}).
+		Where("id = ? AND worker_id = ? AND status = ?", r.helperRowID, r.e.workerID, models.JobWorkerRunning).
+		Update("lease_expires_at", lease)
+	if res.Error != nil {
+		log.Printf("[Run %s] Failed to renew participation lease: %v", short(r.job.ID), res.Error)
+		return true // transient DB error: keep crawling, retry next tick
+	}
+	if res.RowsAffected == 0 {
+		return false
+	}
+	var job models.CrawlJob
+	if err := r.e.db.Select("status").First(&job, "id = ?", r.job.ID).Error; err != nil {
+		return !errors.Is(err, gorm.ErrRecordNotFound)
+	}
+	return job.Status == models.JobStatusRunning
+}
+
 // applyControl reads pause/cancel requests written by any process.
 func (r *Run) applyControl() {
 	var row models.CrawlJob
-	if err := r.e.db.Select("control").First(&row, "id = ?", r.job.ID).Error; err != nil {
+	if err := r.e.db.Select("control", "seed_urls").First(&row, "id = ?", r.job.ID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			r.stop(Outcome{Status: models.JobStatusCancelled, StopReason: "deleted"})
 		}
 		return
 	}
+	r.applyAddedStartURLs(row.SeedURLs)
 	switch row.Control {
 	case models.ControlPause:
 		r.stop(Outcome{Status: models.JobStatusPaused, StopReason: models.StopReasonUser})
 	case models.ControlCancel:
 		r.stop(Outcome{Status: models.JobStatusCancelled, StopReason: models.StopReasonUser})
 	}
+}
+
+// applyAddedStartURLs picks up start URLs added since the run began: it
+// queues them and widens the run's scope to their sites, so the crawl
+// follows links *within* a newly added site rather than fetching the one
+// page and stopping.
+func (r *Run) applyAddedStartURLs(seeds models.StringSlice) {
+	key := strings.Join(seeds, "\n")
+	if key == r.seedURLsKnown {
+		return
+	}
+	r.jobMu.Lock()
+	r.job.SeedURLs = seeds
+	job := *r.job
+	r.jobMu.Unlock()
+	domains := seedDomainsOf(r.urlCleaner, &job)
+	r.setSeedDomains(domains, key)
+	if !r.isHelper && r.e != nil {
+		if err := r.addSeedURLs(); err != nil {
+			log.Printf("[Run %s] Failed to queue added start URLs: %v", short(r.job.ID), err)
+		}
+	}
+	log.Printf("[Run %s] Start URLs changed; now covering %d extra site(s)", short(r.job.ID), len(domains))
 }
 
 // snapshotJob returns a copy of the job safe to hand to hooks.
@@ -605,7 +857,8 @@ func (r *Run) snapshotJob() *models.CrawlJob {
 func (r *Run) stats() RunStats {
 	r.jobMu.Lock()
 	job := r.job
-	st := RunStats{JobID: job.ID, TargetURL: job.TargetURL, OwnerRef: job.OwnerRef, StartedAt: r.startedAt, Limits: r.rs.Limits}
+	st := RunStats{JobID: job.ID, TargetURL: job.TargetURL, OwnerRef: job.OwnerRef,
+		StartedAt: r.startedAt, Limits: r.rs.Limits, Helping: r.isHelper}
 	r.jobMu.Unlock()
 	st.Crawled = atomic.LoadInt64(&r.crawled)
 	st.Kept = atomic.LoadInt64(&r.kept)
@@ -644,6 +897,12 @@ func (r *Run) finish() {
 	}
 	r.stopMu.Unlock()
 
+	if r.isHelper {
+		r.finishHelper()
+		close(r.finished)
+		r.e.helperRunEnded(r)
+		return
+	}
 	if out.Status != "" {
 		r.finalize(&out)
 	}
@@ -651,11 +910,22 @@ func (r *Run) finish() {
 	r.e.runEnded(r, out)
 }
 
+// finishHelper signs this worker off the job: it puts back whatever it had
+// claimed and marks its participation done, so the owner stops waiting on
+// it. It never touches the crawl_jobs row — only the owner writes that.
+func (r *Run) finishHelper() {
+	r.releaseInflight()
+	r.e.db.Model(&models.CrawlJobWorker{}).
+		Where("id = ? AND worker_id = ?", r.helperRowID, r.e.workerID).
+		Updates(map[string]interface{}{"status": models.JobWorkerDone, "lease_expires_at": nil})
+	log.Printf("[Run %s] Stopped helping: crawled %d page(s)", short(r.job.ID), atomic.LoadInt64(&r.uPages))
+}
+
 func (r *Run) finalize(out *Outcome) {
 	job := r.job
-	if out.Status == models.JobStatusPaused || out.Status == models.JobStatusQueued {
-		r.frontier.ResetProcessingURLs()
-	}
+	// Put back whatever this run still had claimed, so a resumed crawl
+	// picks them up at once instead of waiting out the visibility timeout.
+	r.releaseInflight()
 	if r.baseJobID != "" && out.Status == models.JobStatusCompleted && out.StopReason == models.StopReasonFrontier {
 		r.detectRemovedPages()
 	}
@@ -741,10 +1011,11 @@ func (r *Run) addSeedURLs() error {
 	if err != nil {
 		return err
 	}
-	seeds := job.SeedURLs
-	if len(seeds) == 0 {
-		seeds = models.StringSlice{job.TargetURL}
-	}
+	// The crawl starts from its target URL and from every start URL listed
+	// beside it. Dropping the target whenever a list exists would leave the
+	// site the job is named after uncrawled, which is how a two-site
+	// comparison ends up with only one site in it.
+	seeds := startURLsOf(job)
 	if method != "POST" {
 		for _, seed := range seeds {
 			if job.Kind == models.JobKindBatch {
@@ -767,6 +1038,22 @@ func (r *Run) addSeedURLs() error {
 		}
 	}
 	return nil
+}
+
+// startURLsOf is every URL a job starts from: its target URL and its start
+// URLs, in that order, without repeating one that appears in both.
+func startURLsOf(job *models.CrawlJob) models.StringSlice {
+	out := make(models.StringSlice, 0, len(job.SeedURLs)+1)
+	seen := map[string]bool{}
+	for _, u := range append(models.StringSlice{job.TargetURL}, job.SeedURLs...) {
+		u = strings.TrimSpace(u)
+		if u == "" || seen[u] {
+			continue
+		}
+		seen[u] = true
+		out = append(out, u)
+	}
+	return out
 }
 
 // expandSeedRequests returns the HTTP method and expanded POST bodies for seed URLs.

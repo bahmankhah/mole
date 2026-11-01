@@ -9,130 +9,124 @@ import (
 
 func num(v float64) *float64 { return &v }
 
-func obs(jobID, url string, at time.Time, value *float64, text, currency string) models.FieldObservation {
+// obsFor is one recorded value of one listing in one run.
+func obsFor(listingID uint, jobID string, at time.Time, value *float64, text, currency string) models.FieldObservation {
 	return models.FieldObservation{
-		CrawlJobID: jobID, URL: url, ObservedAt: at,
+		ListingID: listingID, CrawlJobID: jobID, ObservedAt: at,
 		NumValue: value, TextValue: text, Currency: currency,
 	}
 }
 
-// Several pages of one site in the same run are one value, not a history:
-// the table used to read two of them as "this run" and "the run before",
-// and reported the gap between two listings as a price change.
-func TestGroupObservationsByRunFoldsPagesOfOneRun(t *testing.T) {
-	at := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
-	runs := groupObservationsByRun([]models.FieldObservation{
-		obs("job-1", "https://shop.ir/a", at, num(433500000), "", "IRR"),
-		obs("job-1", "https://shop.ir/b", at, num(287010000), "", "IRR"),
-		obs("job-1", "https://shop.ir/c", at, num(300000000), "", "IRR"),
-	})
-	if len(runs) != 1 {
-		t.Fatalf("three pages of one run = %d runs, want 1", len(runs))
-	}
-	r := runs[0]
-	if r.num == nil || *r.num != 287010000 {
-		t.Errorf("value = %v, want the lowest offer 287010000", r.num)
-	}
-	if r.url != "https://shop.ir/b" {
-		t.Errorf("url = %q, want the page the value came from", r.url)
-	}
-	if r.low == nil || r.high == nil || *r.low != 287010000 || *r.high != 433500000 {
-		t.Errorf("spread = %v..%v, want 287010000..433500000", r.low, r.high)
-	}
-	if r.pages != 3 || len(r.alsoURLs) != 2 {
-		t.Errorf("pages = %d with %d other URLs, want 3 and 2", r.pages, len(r.alsoURLs))
-	}
+func listingAt(id uint, site, url string) models.Listing {
+	return models.Listing{ID: id, SiteKey: site, URL: url, KeyMethod: models.ListingBySKU, Runs: 2}
 }
 
-func TestGroupObservationsByRunOrdersRuns(t *testing.T) {
+// A shop with two offers of one product used to be folded into a single
+// number, so the gap between two different offers was reported as a price
+// change. Each offer now carries its own series, and "previous" is that
+// offer's own previous run.
+func TestBuildCellPreviousIsTheOffersOwnPreviousRun(t *testing.T) {
 	first := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
 	second := first.Add(24 * time.Hour)
-	runs := groupObservationsByRun([]models.FieldObservation{
-		obs("job-1", "https://shop.ir/a", first, num(100), "", "IRR"),
-		obs("job-2", "https://shop.ir/a", second, num(90), "", "IRR"),
-	})
-	if len(runs) != 2 {
-		t.Fatalf("two runs = %d", len(runs))
+	listings := []models.Listing{
+		listingAt(7, "shop.ir", "https://shop.ir/a"),
+		listingAt(8, "shop.ir", "https://shop.ir/b"),
 	}
-	if *runs[0].num != 100 || *runs[1].num != 90 {
-		t.Errorf("runs = %v, %v; want oldest first", *runs[0].num, *runs[1].num)
+	series := map[uint][]models.FieldObservation{
+		7: {
+			obsFor(7, "job-1", first, num(100), "", "IRR"),
+			obsFor(7, "job-2", second, num(90), "", "IRR"),
+		},
+		8: {
+			obsFor(8, "job-1", first, num(130), "", "IRR"),
+			obsFor(8, "job-2", second, num(120), "", "IRR"),
+		},
 	}
-}
-
-// A run whose currencies disagree compares only the ones in the currency
-// most of its pages used; a stray other-currency page is not "cheapest".
-func TestGroupObservationsByRunIgnoresOtherCurrencies(t *testing.T) {
-	at := time.Now()
-	runs := groupObservationsByRun([]models.FieldObservation{
-		obs("job-1", "https://shop.ir/a", at, num(400), "", "IRR"),
-		obs("job-1", "https://shop.ir/b", at, num(500), "", "IRR"),
-		obs("job-1", "https://shop.ir/c", at, num(9), "", "USD"),
-	})
-	if len(runs) != 1 {
-		t.Fatalf("runs = %d, want 1", len(runs))
-	}
-	if runs[0].currency != "IRR" {
-		t.Errorf("currency = %q, want IRR (what most pages used)", runs[0].currency)
-	}
-	if runs[0].num == nil || *runs[0].num != 400 {
-		t.Errorf("value = %v, want 400; a USD price is not comparable with rials", runs[0].num)
-	}
-}
-
-func TestBuildCellPreviousIsThePreviousRun(t *testing.T) {
-	first := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
-	second := first.Add(24 * time.Hour)
-	members := []models.ProductGroupMember{
-		{ID: 7, SiteKey: "shop.ir", URL: "https://shop.ir/a"},
-		{ID: 8, SiteKey: "shop.ir", URL: "https://shop.ir/b"},
-	}
-	cell := buildCell([]models.FieldObservation{
-		obs("job-1", "https://shop.ir/a", first, num(100), "", "IRR"),
-		obs("job-1", "https://shop.ir/b", first, num(130), "", "IRR"),
-		obs("job-2", "https://shop.ir/a", second, num(90), "", "IRR"),
-		obs("job-2", "https://shop.ir/b", second, num(120), "", "IRR"),
-	}, members)
+	cell := buildCell(listings, series)
 	if cell == nil {
 		t.Fatal("no cell")
 	}
-	if *cell.Num != 90 {
-		t.Errorf("value = %v, want 90", *cell.Num)
+	if cell.Num == nil || *cell.Num != 90 {
+		t.Errorf("headline = %v, want the cheapest live offer 90", cell.Num)
+	}
+	if cell.ListingID != 7 {
+		t.Errorf("headline listing = %d, want 7 — the offer the value came from", cell.ListingID)
 	}
 	if cell.Previous == nil || *cell.Previous != 100 {
-		t.Errorf("previous = %v, want the previous run's 100", cell.Previous)
+		t.Errorf("previous = %v, want 100 — this offer's own previous run, not the other offer's 130", cell.Previous)
 	}
 	if !cell.Changed() || cell.Delta() != -10 {
 		t.Errorf("delta = %v, want -10", cell.Delta())
 	}
-	if cell.Runs != 2 || len(cell.History) != 2 {
-		t.Errorf("runs = %d with %d history points, want 2 and 2", cell.Runs, len(cell.History))
+	if cell.Offers() != 2 {
+		t.Errorf("offers = %d, want 2", cell.Offers())
 	}
-	if cell.MemberID != 7 {
-		t.Errorf("member = %d, want 7 — the page the shown value came from", cell.MemberID)
+	if cell.Low == nil || cell.High == nil || *cell.Low != 90 || *cell.High != 120 {
+		t.Errorf("spread = %v..%v, want 90..120", cell.Low, cell.High)
+	}
+	if !cell.Disagrees() {
+		t.Error("two offers at different prices should report a spread")
+	}
+}
+
+// Each offer keeps a whole series of its own, which is what makes a
+// per-offer chart possible at all.
+func TestBuildCellOffersKeepSeparateHistories(t *testing.T) {
+	first := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+	series := map[uint][]models.FieldObservation{
+		7: {
+			obsFor(7, "job-1", first, num(100), "", "IRR"),
+			obsFor(7, "job-2", first.Add(24*time.Hour), num(90), "", "IRR"),
+			obsFor(7, "job-3", first.Add(48*time.Hour), num(95), "", "IRR"),
+		},
+		8: {obsFor(8, "job-3", first.Add(48*time.Hour), num(120), "", "IRR")},
+	}
+	cell := buildCell([]models.Listing{
+		listingAt(7, "shop.ir", "https://shop.ir/a"),
+		listingAt(8, "shop.ir", "https://shop.ir/b"),
+	}, series)
+	byID := map[uint]CellListing{}
+	for _, cl := range cell.Listings {
+		byID[cl.ListingID] = cl
+	}
+	if got := len(byID[7].History); got != 3 {
+		t.Errorf("offer 7 history = %d points, want 3", got)
+	}
+	if got := len(byID[8].History); got != 1 {
+		t.Errorf("offer 8 history = %d points, want 1", got)
+	}
+	if byID[8].Previous != nil || byID[8].Changed() {
+		t.Error("an offer seen once has nothing to compare with and must claim no change")
+	}
+	if p := byID[7].Previous; p == nil || *p != 90 {
+		t.Errorf("offer 7 previous = %v, want 90", p)
 	}
 }
 
 // One run only: there is nothing to compare with, so no change is claimed.
 func TestBuildCellFirstRunHasNoChange(t *testing.T) {
 	at := time.Now()
-	cell := buildCell([]models.FieldObservation{
-		obs("job-1", "https://shop.ir/a", at, num(433500000), "", "IRR"),
-		obs("job-1", "https://shop.ir/b", at, num(287010000), "", "IRR"),
-	}, []models.ProductGroupMember{{ID: 1, URL: "https://shop.ir/b"}})
+	cell := buildCell(
+		[]models.Listing{listingAt(1, "shop.ir", "https://shop.ir/b")},
+		map[uint][]models.FieldObservation{1: {obsFor(1, "job-1", at, num(287010000), "", "IRR")}},
+	)
 	if cell.Previous != nil || cell.Changed() {
 		t.Errorf("first run reported a change: previous = %v", cell.Previous)
 	}
-	if !cell.Disagrees() {
-		t.Error("two pages at different prices should be flagged as disagreeing")
+	if cell.Disagrees() {
+		t.Error("a single offer cannot disagree with itself")
 	}
 }
 
 func TestBuildCellTextFieldChange(t *testing.T) {
 	first := time.Now().Add(-24 * time.Hour)
-	cell := buildCell([]models.FieldObservation{
-		obs("job-1", "https://shop.ir/a", first, nil, "out_of_stock", ""),
-		obs("job-2", "https://shop.ir/a", time.Now(), nil, "in_stock", ""),
-	}, []models.ProductGroupMember{{ID: 3, URL: "https://shop.ir/a"}})
+	cell := buildCell(
+		[]models.Listing{listingAt(3, "shop.ir", "https://shop.ir/a")},
+		map[uint][]models.FieldObservation{3: {
+			obsFor(3, "job-1", first, nil, "out_of_stock", ""),
+			obsFor(3, "job-2", time.Now(), nil, "in_stock", ""),
+		}},
+	)
 	if cell.Text != "in_stock" || cell.PreviousText != "out_of_stock" {
 		t.Fatalf("text = %q, previous = %q", cell.Text, cell.PreviousText)
 	}
@@ -141,18 +135,77 @@ func TestBuildCellTextFieldChange(t *testing.T) {
 	}
 }
 
-func TestModalCurrency(t *testing.T) {
+// A delisted offer still shows what it last cost, marked so it is not read
+// as a live price.
+func TestBuildCellEveryOfferGoneIsStale(t *testing.T) {
 	at := time.Now()
-	got := modalCurrency([]models.FieldObservation{
-		obs("j", "u1", at, num(1), "", "USD"),
-		obs("j", "u2", at, num(2), "", "IRR"),
-		obs("j", "u3", at, num(3), "", "IRR"),
-		obs("j", "u4", at, num(4), "", ""),
-	})
-	if got != "IRR" {
+	gone := listingAt(5, "shop.ir", "https://shop.ir/a")
+	gone.Stale = true
+	cell := buildCell(
+		[]models.Listing{gone},
+		map[uint][]models.FieldObservation{5: {obsFor(5, "job-1", at, num(500), "", "IRR")}},
+	)
+	if !cell.Stale {
+		t.Error("a cell whose every offer is gone should be stale")
+	}
+	if cell.Num == nil || *cell.Num != 500 {
+		t.Errorf("value = %v, want the last known 500", cell.Num)
+	}
+}
+
+// A live offer outranks a delisted one even when the delisted one is cheaper:
+// a price you can no longer pay is not the cheapest offer.
+func TestBuildCellPrefersLiveOfferOverCheaperStaleOne(t *testing.T) {
+	at := time.Now()
+	stale := listingAt(9, "shop.ir", "https://shop.ir/old")
+	stale.Stale = true
+	cell := buildCell(
+		[]models.Listing{stale, listingAt(10, "shop.ir", "https://shop.ir/new")},
+		map[uint][]models.FieldObservation{
+			9:  {obsFor(9, "job-1", at, num(100), "", "IRR")},
+			10: {obsFor(10, "job-1", at, num(140), "", "IRR")},
+		},
+	)
+	if cell.Stale {
+		t.Error("the shop still has a live offer, so the cell is not stale")
+	}
+	if cell.ListingID != 10 || cell.Num == nil || *cell.Num != 140 {
+		t.Errorf("headline = offer %d at %v, want offer 10 at 140", cell.ListingID, cell.Num)
+	}
+}
+
+// A shop quoting a stray other currency is not thereby the cheapest.
+func TestPromoteHeadlineIgnoresForeignCurrency(t *testing.T) {
+	at := time.Now()
+	cell := buildCell(
+		[]models.Listing{
+			listingAt(1, "shop.ir", "https://shop.ir/a"),
+			listingAt(2, "shop.ir", "https://shop.ir/b"),
+			listingAt(3, "shop.ir", "https://shop.ir/c"),
+		},
+		map[uint][]models.FieldObservation{
+			1: {obsFor(1, "job-1", at, num(400), "", "IRR")},
+			2: {obsFor(2, "job-1", at, num(500), "", "IRR")},
+			3: {obsFor(3, "job-1", at, num(9), "", "USD")},
+		},
+	)
+	if cell.Currency != "IRR" {
+		t.Errorf("currency = %q, want IRR (what most offers quote)", cell.Currency)
+	}
+	if cell.Num == nil || *cell.Num != 400 {
+		t.Errorf("headline = %v, want 400; 9 USD is not comparable with rials", cell.Num)
+	}
+}
+
+func TestModalCurrency(t *testing.T) {
+	if got := modalCurrency([]string{"USD", "IRR", "IRR", ""}); got != "IRR" {
 		t.Errorf("modal currency = %q, want IRR", got)
 	}
 	if modalCurrency(nil) != "" {
-		t.Error("no observations should give no currency")
+		t.Error("no currencies should give no currency")
+	}
+	// A tie breaks alphabetically, so the choice does not flap between runs.
+	if got := modalCurrency([]string{"USD", "EUR"}); got != "EUR" {
+		t.Errorf("tie = %q, want EUR", got)
 	}
 }

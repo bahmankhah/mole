@@ -95,6 +95,12 @@ func (d *Database) AutoMigrate() error {
 func (d *Database) migrate() error {
 	log.Println("Running database migrations...")
 
+	// Must run before AutoMigrate: it renames product_group_members to
+	// listings and seeds the identity column the new unique index covers,
+	// neither of which AutoMigrate can work out for itself.
+	d.prepareListings()
+	d.dropNarrowFrontierHostIndex()
+
 	err := d.DB.AutoMigrate(
 		&models.DiscoveryJob{},
 		&models.PortScanJob{},
@@ -103,6 +109,7 @@ func (d *Database) migrate() error {
 		&models.Subdomain{},
 		&models.CrawledPage{},
 		&models.FrontierURL{},
+		&models.CrawlJobWorker{},
 		&models.SearchPhrase{},
 		&models.PhraseMatch{},
 		&models.PageEmbedding{},
@@ -118,14 +125,17 @@ func (d *Database) migrate() error {
 		&models.OwnerLimit{},
 		&models.ScrapeCacheEntry{},
 		&models.ProductGroup{},
-		&models.ProductGroupMember{},
+		&models.Listing{},
 		&models.FieldObservation{},
+		&models.FieldObservationDay{},
+		&models.ListingChange{},
 	)
 	if err != nil {
 		return err
 	}
 
 	d.dropObsoleteGroupingColumns()
+	d.fixListingIdentityIndex()
 
 	// Create additional composite index for search performance (ignore if exists)
 	if !d.indexExists("phrase_matches", "idx_phrase_match_phrase_url") {
@@ -157,7 +167,98 @@ func (d *Database) migrate() error {
 	return nil
 }
 
+// dropNarrowFrontierHostIndex removes an earlier idx_job_host_status that
+// covered host alone. Taking a crawl's sites in turn asks for the queued
+// hosts of one job and then the id range of one of them, which wants
+// (crawl_job_id, host, status); over host alone both fall back to a scan.
+// AutoMigrate creates an index it cannot find but never reshapes one, so
+// the narrow version has to go first.
+func (d *Database) dropNarrowFrontierHostIndex() {
+	if !d.tableExists("frontier_urls") || !d.indexExists("frontier_urls", "idx_job_host_status") {
+		return
+	}
+	var columns int64
+	d.DB.Raw(`SELECT COUNT(*) FROM information_schema.statistics
+		WHERE table_schema = DATABASE() AND table_name = 'frontier_urls' AND index_name = 'idx_job_host_status'`).
+		Scan(&columns)
+	if columns >= 3 {
+		return // already the composite one
+	}
+	if err := d.DB.Exec("ALTER TABLE `frontier_urls` DROP INDEX `idx_job_host_status`").Error; err != nil {
+		log.Printf("[Migrate] Could not drop the narrow idx_job_host_status: %v", err)
+		return
+	}
+	log.Println("[Migrate] Dropped idx_job_host_status over host alone; it is recreated over (crawl_job_id, host, status)")
+}
+
 // indexExists checks whether an index exists on a given table in the current database.
+// prepareListings moves the grouping schema onto listings: a product
+// group's members become listings with an identity of their own, which is
+// what lets a shop's offer keep its history when the shop moves it to a
+// new URL.
+//
+// It runs before AutoMigrate because of an ordering trap. Listing's unique
+// index covers listing_hash, and AutoMigrate would try to create it over a
+// table where every row's hash is still the empty string — which fails as
+// a duplicate key the moment a scope holds two listings. So the column is
+// added and seeded with a provisional per-row value here; the real keys are
+// derived afterwards by jobs.MigrateListings, which has the page data the
+// derivation needs.
+func (d *Database) prepareListings() {
+	if d.tableExists("product_group_members") && !d.tableExists("listings") {
+		if err := d.DB.Exec("RENAME TABLE `product_group_members` TO `listings`").Error; err != nil {
+			log.Printf("[Migrate] Could not rename product_group_members to listings: %v", err)
+			return
+		}
+		// The ids are preserved by the rename, so links already handed out
+		// to a member keep resolving to the same listing.
+		log.Println("[Migrate] Renamed product_group_members to listings (ids preserved)")
+	}
+	if !d.tableExists("listings") {
+		return // a fresh install: AutoMigrate creates it complete
+	}
+	if !d.columnExists("listings", "listing_hash") {
+		if err := d.DB.Exec("ALTER TABLE `listings` ADD COLUMN `listing_hash` VARCHAR(40) NOT NULL DEFAULT ''").Error; err != nil {
+			log.Printf("[Migrate] Could not add listings.listing_hash: %v", err)
+			return
+		}
+	}
+	// A provisional identity, unique by construction, so the unique index
+	// can be created. MigrateListings replaces these with real keys.
+	res := d.DB.Exec("UPDATE `listings` SET `listing_hash` = SHA1(CONCAT('legacy:', `id`)) WHERE `listing_hash` = '' OR `listing_hash` IS NULL")
+	if res.Error != nil {
+		log.Printf("[Migrate] Could not seed listings.listing_hash: %v", res.Error)
+	} else if res.RowsAffected > 0 {
+		log.Printf("[Migrate] Seeded a provisional identity for %d listings", res.RowsAffected)
+	}
+	// A listing may legitimately belong to no group yet; the column came
+	// over from members, where it was NOT NULL without a default.
+	if err := d.DB.Exec("ALTER TABLE `listings` MODIFY `product_group_id` VARCHAR(36) NOT NULL DEFAULT ''").Error; err != nil {
+		log.Printf("[Migrate] Could not relax listings.product_group_id: %v", err)
+	}
+}
+
+// fixListingIdentityIndex removes a unique constraint on listing_hash
+// alone. AutoMigrate can add one as a column constraint while widening the
+// column that prepareListings created, and it is wrong: a listing's
+// identity is unique *within its scope*, never across the whole table. The
+// same shop's offer of the same product is legitimately tracked by two
+// schedules at once, and each needs its own row and its own history. The
+// composite idx_listing_identity is the one that matters.
+func (d *Database) fixListingIdentityIndex() {
+	if !d.tableExists("listings") {
+		return
+	}
+	if !d.indexExists("listings", "listing_hash") {
+		return
+	}
+	if err := d.DB.Exec("ALTER TABLE `listings` DROP INDEX `listing_hash`").Error; err != nil {
+		log.Printf("[Migrate] Could not drop the global unique index on listings.listing_hash: %v", err)
+		return
+	}
+	log.Println("[Migrate] Dropped the global unique index on listings.listing_hash; identity is unique per scope")
+}
+
 // dropObsoleteGroupingColumns removes the columns left by the first shape
 // of product grouping, where a group belonged to a job group rather than to
 // a scope (a crawl, a schedule or a comparison). AutoMigrate adds columns
@@ -168,6 +269,13 @@ func (d *Database) dropObsoleteGroupingColumns() {
 		{"product_groups", "job_group_id"},
 		{"product_groups", "lowest_price"},
 		{"product_groups", "highest_price"},
+		// These came over with the rename, so they are on listings now.
+		// They are NOT NULL without a default, so an install old enough to
+		// still carry them cannot insert a listing until they are gone.
+		// The old names are kept too: columnExists simply returns false
+		// when the table is already renamed away.
+		{"listings", "job_group_id"},
+		{"listings", "group_site_id"},
 		{"product_group_members", "job_group_id"},
 		{"product_group_members", "group_site_id"},
 	}

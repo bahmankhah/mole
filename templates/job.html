@@ -22,6 +22,7 @@
     </style>
     {{template "settingsStyles"}}
     {{template "groupingStyles"}}
+    {{template "urlManagerStyles"}}
     <script>
         function showTab(t){
             document.querySelectorAll('.tab-content').forEach(function(e){e.classList.add('hidden')});
@@ -261,6 +262,9 @@
                         <button type="button" data-f="failed" class="px-3 py-1.5 border-l border-gray-300 bg-white text-gray-700 hover:bg-gray-50">Errors</button>
                     </div>
                     <input type="search" id="data-search" dir="auto" autocomplete="off" placeholder="Search title or URL…" title="Pages whose title or URL contains every word" class="px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none w-64 max-w-full">
+                    <select id="data-site" class="hidden px-2 py-1.5 border border-gray-300 rounded-md text-sm bg-white" title="This crawl covered more than one site; show the pages of just one of them">
+                        <option value="">All sites</option>
+                    </select>
                     <select id="data-skipped" class="px-2 py-1.5 border border-gray-300 rounded-md text-sm bg-white" title="Skipped pages were fetched for their links but not kept (see Keep only pages tagged, on the Settings tab)">
                         <option value="">Kept pages</option>
                         <option value="include">Kept + skipped</option>
@@ -379,6 +383,7 @@
             {{end}}
 
             <div id="tab-settings" class="tab-content p-6 hidden">
+                {{if .urlScope}}<div class="mb-6">{{template "urlManager" .}}</div>{{end}}
                 <div class="flex flex-wrap items-start justify-between gap-4 mb-6">
                     <div>
                         <h3 class="text-lg font-semibold text-gray-800">Job settings</h3>
@@ -710,9 +715,10 @@
             catch(err){Mole.toast(err.message,false);}
         }
         function exportData(fmt){
-            // Exports follow the Pages & Data search and tag filter.
+            // Exports follow the Pages & Data search, tag and site filters.
             var ok=document.getElementById('export-successful').checked?'&successful=1':'';
-            var f=(dataState.q?'&q='+encodeURIComponent(dataState.q):'')+(dataState.tag?'&tag='+encodeURIComponent(dataState.tag):'');
+            var f=(dataState.q?'&q='+encodeURIComponent(dataState.q):'')+(dataState.tag?'&tag='+encodeURIComponent(dataState.tag):'')+
+                (dataState.site?'&site='+encodeURIComponent(dataState.site):'');
             location.href='/api/v1/crawls/'+pagesState.jobId+'/export?format='+fmt+ok+f;
         }
 
@@ -740,7 +746,7 @@
         }
 
         /* ── Pages & Data tab ── */
-        var dataState={cursor:'',done:false,filter:'',q:'',tag:'',skipped:'',loaded:0,loading:false,seq:0};
+        var dataState={cursor:'',done:false,filter:'',q:'',tag:'',site:'',skipped:'',loaded:0,loading:false,seq:0};
         var tagSummary=null;
         function previewValue(v){
             if(v===null||v===undefined)return '<span class="text-gray-300">—</span>';
@@ -803,7 +809,8 @@
             dataState.loading=true;
             var seq=++dataState.seq;
             var url='/api/v1/crawls/'+pagesState.jobId+'/pages?content=1&order=desc&limit=25'+(dataState.filter?'&'+dataState.filter+'=1':'')+(dataState.q?'&q='+encodeURIComponent(dataState.q):'')+
-                (dataState.tag?'&tag='+encodeURIComponent(dataState.tag):'')+(dataState.skipped?'&skipped='+dataState.skipped:'')+(dataState.cursor?'&cursor='+dataState.cursor:'');
+                (dataState.tag?'&tag='+encodeURIComponent(dataState.tag):'')+(dataState.site?'&site='+encodeURIComponent(dataState.site):'')+
+                (dataState.skipped?'&skipped='+dataState.skipped:'')+(dataState.cursor?'&cursor='+dataState.cursor:'');
             try{
                 var res=await Mole.api('GET',url);
                 if(seq!==dataState.seq)return; // a newer search replaced this one
@@ -817,16 +824,33 @@
                 var empty=list.children.length===0;
                 document.getElementById('data-empty').classList.toggle('hidden',!empty);
                 if(empty){
-                    var filtered=dataState.q||dataState.tag||dataState.filter||dataState.skipped;
-                    document.getElementById('data-empty-title').textContent=dataState.q?'No pages match “'+dataState.q+'”':dataState.tag?'No pages tagged '+dataState.tag:dataState.skipped==='only'?'No skipped pages':dataState.filter==='failed'?'No failed pages':dataState.filter==='successful'?'No successful pages yet':'No pages yet';
+                    var filtered=dataState.q||dataState.tag||dataState.site||dataState.filter||dataState.skipped;
+                    document.getElementById('data-empty-title').textContent=dataState.q?'No pages match “'+dataState.q+'”':dataState.tag?'No pages tagged '+dataState.tag:dataState.site?'No pages from '+dataState.site:dataState.skipped==='only'?'No skipped pages':dataState.filter==='failed'?'No failed pages':dataState.filter==='successful'?'No successful pages yet':'No pages yet';
                     document.getElementById('data-empty-hint').textContent=dataState.q?'Every word must appear in the title or URL.':filtered?'Try another filter.':'Start the crawl to begin fetching pages.';
                 }
-                var anyFilter=dataState.q||dataState.tag||dataState.filter||dataState.skipped;
+                var anyFilter=dataState.q||dataState.tag||dataState.site||dataState.filter||dataState.skipped;
                 document.getElementById('data-count').textContent=anyFilter?(dataState.loaded+(dataState.done?'':'+')+' matching'):('Showing '+dataState.loaded+' of '+pagesState.total);
             }catch(e){if(seq===dataState.seq)Mole.toast(e.message,false);}
             if(seq===dataState.seq)dataState.loading=false;
         }
         /* Tag filter: counts per tag; a click filters the list by that tag. */
+        // The site filter only earns its place when the crawl covered more
+        // than one site, which is the case a start URL list creates.
+        async function loadSiteCounts(){
+            var sel=document.getElementById('data-site');
+            var sites=[];
+            try{ sites=((await Mole.api('GET','/api/v1/crawls/'+pagesState.jobId+'/sites')).data||{}).sites||[]; }
+            catch(e){ return; }
+            if(sites.length<2){ sel.classList.add('hidden'); return; }
+            var keep=dataState.site;
+            sel.innerHTML='<option value="">All sites</option>'+sites.map(function(s){
+                var n=s.kept+(dataState.skipped?s.skipped:0);
+                return '<option value="'+Mole.esc(s.domain)+'">'+Mole.esc(s.domain)+' ('+n+')</option>';
+            }).join('');
+            sel.value=keep;
+            if(sel.value!==keep){ dataState.site=''; sel.value=''; } // the site went away
+            sel.classList.remove('hidden');
+        }
         async function loadTagCounts(){
             try{
                 tagSummary=(await Mole.api('GET','/api/v1/crawls/'+pagesState.jobId+'/tags')).data;
@@ -902,9 +926,15 @@
             document.getElementById('data-skipped').addEventListener('change',function(e){
                 dataState.skipped=e.target.value;
                 renderTagBar();
+                loadSiteCounts();
+                loadData(true);
+            });
+            document.getElementById('data-site').addEventListener('change',function(e){
+                dataState.site=e.target.value;
                 loadData(true);
             });
             loadTagCounts();
+            loadSiteCounts();
             document.querySelectorAll('#data-filter button').forEach(function(btn){
                 btn.addEventListener('click',function(){
                     dataState.filter=btn.getAttribute('data-f');
@@ -933,6 +963,7 @@
                 if(document.getElementById('tab-data').classList.contains('hidden')||dataState.loaded>25) return;
                 loadData(true);
                 loadTagCounts();
+                loadSiteCounts();
             },5000);
         }
 
@@ -1038,9 +1069,15 @@
 <script>
     // The shared comparison table (templates/grouping.html) reads these.
     var cmpScope = { type: '{{.groupingScopeType}}', id: '{{.groupingScopeID}}' };
-    var cmpUnmatched = {{.groupingUnmatched}};
 </script>
 {{template "groupingScript" .}}
+{{end}}
+{{if .urlScope}}
+<script>
+    // The shared start-URL card (templates/urls.html) reads this.
+    var urlScope = { kind: '{{.urlScope}}', id: '{{.urlScopeID}}' };
+</script>
+{{template "urlManagerScript" .}}
 {{end}}
 </body>
 </html>

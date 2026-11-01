@@ -19,6 +19,7 @@ import (
 	"github.com/resolver/crawler/models"
 	"github.com/resolver/crawler/modules"
 	"github.com/resolver/crawler/plugins"
+	"gorm.io/gorm/clause"
 )
 
 // Version is reported in worker heartbeats; set by the cmd package.
@@ -36,6 +37,7 @@ func (m *Manager) schedulerLoop(ctx context.Context) {
 	var lastHeartbeat, lastCleanup, lastLiveRegroup time.Time
 	for {
 		m.reclaimExpiredLeases()
+		m.reclaimExpiredHelperLeases()
 		if m.applyWorkerState() {
 			m.claimJobs()
 		}
@@ -119,11 +121,35 @@ func (m *Manager) reclaimExpiredLeases() {
 	}
 }
 
+// reclaimExpiredHelperLeases signs off helpers that stopped renewing their
+// participation lease, so the job's owner stops waiting on a worker that
+// has died and can finish the crawl.
+func (m *Manager) reclaimExpiredHelperLeases() {
+	now := time.Now()
+	var stale []models.CrawlJobWorker
+	if err := m.db.Select("id", "crawl_job_id", "worker_id").
+		Where("status = ? AND (lease_expires_at IS NULL OR lease_expires_at < ?)", models.JobWorkerRunning, now).
+		Limit(100).Find(&stale).Error; err != nil {
+		return
+	}
+	for _, h := range stale {
+		if h.WorkerID == m.workerID && m.engine.IsHelping(h.CrawlJobID) {
+			continue // ours and alive; the next flush renews the lease
+		}
+		res := m.db.Model(&models.CrawlJobWorker{}).
+			Where("id = ? AND status = ? AND (lease_expires_at IS NULL OR lease_expires_at < ?)", h.ID, models.JobWorkerRunning, now).
+			Update("status", models.JobWorkerDone)
+		if res.RowsAffected > 0 {
+			log.Printf("[Scheduler] Worker %q stopped helping job %s: its lease expired", h.WorkerID, h.CrawlJobID)
+		}
+	}
+}
+
 // claimJobs starts queued jobs while this worker has free slots. Jobs pinned
 // to another region, and jobs that need a browser when this worker has none,
 // are left to other workers.
 func (m *Manager) claimJobs() {
-	free := m.config.Worker.MaxRunningJobs - m.engine.RunningCount()
+	free := m.config.Worker.MaxRunningJobs - m.engine.RunningCount() - m.engine.HelpingCount()
 	if free <= 0 {
 		return
 	}
@@ -171,6 +197,112 @@ func (m *Manager) claimJobs() {
 			free--
 		}
 	}
+	if free > 0 && !m.config.Worker.DisableJobHelp {
+		m.helpWithRunningJobs(free, hasBrowser)
+	}
+}
+
+// helpWithRunningJobs joins up to `free` crawls that other workers are
+// already running, so this worker's capacity goes to work instead of
+// sitting idle. It runs only after the queued-job loop above found nothing
+// left to claim, so a worker always prefers a crawl of its own.
+//
+// Joining means pulling from that job's frontier alongside its owner. The
+// frontier hands out URLs with SELECT ... FOR UPDATE SKIP LOCKED, so the
+// two never get the same URL and the work simply spreads over whoever is
+// pulling — no partitioning, and it works just as well on a crawl of one
+// site as on a crawl of twenty.
+func (m *Manager) helpWithRunningJobs(free int, hasBrowser bool) {
+	limit := m.config.Worker.MaxHelpersPerJob
+	q := m.db.Select("id", "settings", "region").
+		Where("status = ? AND worker_id <> ?", models.JobStatusRunning, m.workerID)
+	if region := m.config.Worker.Region; region != "" {
+		q = q.Where("region IN ?", []string{"", region})
+	} else {
+		q = q.Where("region = ''")
+	}
+	var candidates []models.CrawlJob
+	if err := q.Order("queued_at ASC").Limit(max(free*4, 20)).Find(&candidates).Error; err != nil {
+		log.Printf("[Scheduler] Failed to list running jobs to help with: %v", err)
+		return
+	}
+	for _, c := range candidates {
+		if free <= 0 {
+			return
+		}
+		if !hasBrowser && m.engine.NeedsBrowser(c.Settings) {
+			continue
+		}
+		if m.engine.IsHelping(c.ID) {
+			continue
+		}
+		// Only worth joining if there is enough queued up to keep another
+		// worker busy; otherwise helpers would churn in and out of crawls
+		// that are about to finish anyway.
+		var pending int64
+		m.db.Model(&models.FrontierURL{}).
+			Where("crawl_job_id = ? AND status = ?", c.ID, models.FrontierStatusPending).
+			Count(&pending)
+		if pending < int64(m.config.Worker.MinPendingToHelp) {
+			continue
+		}
+		if limit > 0 {
+			var helpers int64
+			m.db.Model(&models.CrawlJobWorker{}).
+				Where("crawl_job_id = ? AND status = ?", c.ID, models.JobWorkerRunning).
+				Count(&helpers)
+			if helpers >= int64(limit) {
+				continue
+			}
+		}
+		row, err := m.joinJob(c.ID)
+		if err != nil || row == nil {
+			if err != nil {
+				log.Printf("[Scheduler] Failed to join job %s: %v", c.ID, err)
+			}
+			continue
+		}
+		job, err := m.GetJob(c.ID)
+		if err != nil {
+			log.Printf("[Scheduler] Failed to load job %s after joining it: %v", c.ID, err)
+			m.db.Model(&models.CrawlJobWorker{}).Where("id = ?", row.ID).Update("status", models.JobWorkerDone)
+			continue
+		}
+		if err := m.engine.StartHelping(job, row.ID); err != nil {
+			log.Printf("[Scheduler] Failed to start helping job %s: %v", c.ID, err)
+			m.db.Model(&models.CrawlJobWorker{}).Where("id = ?", row.ID).Update("status", models.JobWorkerDone)
+			continue
+		}
+		log.Printf("[Scheduler] Helping job %s crawl its %d pending URL(s)", c.ID, pending)
+		free--
+	}
+}
+
+// joinJob registers this worker on a job it does not own. The unique index
+// on (crawl_job_id, worker_id) means a worker only ever holds one
+// participation row per job: rejoining later reuses it.
+func (m *Manager) joinJob(jobID string) (*models.CrawlJobWorker, error) {
+	lease := time.Now().Add(m.config.Worker.LeaseTTL)
+	row := models.CrawlJobWorker{
+		CrawlJobID: jobID, WorkerID: m.workerID,
+		Status: models.JobWorkerRunning, LeaseExpiresAt: &lease,
+	}
+	err := m.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "crawl_job_id"}, {Name: "worker_id"}},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"status": models.JobWorkerRunning, "lease_expires_at": lease,
+		}),
+	}).Create(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	if row.ID == 0 {
+		// An upsert of an existing row does not always return its id.
+		if err := m.db.Where("crawl_job_id = ? AND worker_id = ?", jobID, m.workerID).First(&row).Error; err != nil {
+			return nil, err
+		}
+	}
+	return &row, nil
 }
 
 // ownerLimitsFor loads the per-owner overrides of worker.max_running_per_owner
@@ -508,7 +640,8 @@ func (m *Manager) heartbeat() {
 		Region:      m.config.Worker.Region,
 		Version:     Version,
 		MaxJobs:     m.config.Worker.MaxRunningJobs,
-		RunningJobs: m.engine.RunningCount(),
+		RunningJobs: m.engine.RunningCount() + m.engine.HelpingCount(),
+		HelpingJobs: m.engine.HelpingCount(),
 		Browser:     m.browser.Load(),
 		StartedAt:   m.startedAt,
 		LastSeenAt:  time.Now(),
@@ -523,6 +656,21 @@ func (m *Manager) cleanup() {
 	m.db.Where("last_seen_at < ?", time.Now().Add(-24*time.Hour)).Delete(&models.WorkerHeartbeat{})
 	m.db.Where("status = ? AND delivered_at < ?", models.DeliveryDelivered, time.Now().Add(-30*24*time.Hour)).Delete(&models.WebhookDelivery{})
 	m.cleanupScrapeCache()
+	// Fold tracked history older than the raw-retention window into one
+	// row per listing per day. One worker doing this is enough, and two
+	// doing it at once would duplicate the work, so it takes a lock.
+	if m.config.Grouping.Enabled {
+		acquired, err := database.WithLock(m.db, "mole:compact-observations", 0, func() error {
+			rolled, deleted, err := m.CompactObservations()
+			if err == nil && deleted > 0 {
+				log.Printf("[Grouping] Compacted %d raw observations into %d listing-days", deleted, rolled)
+			}
+			return err
+		})
+		if err != nil && acquired {
+			log.Printf("[Grouping] Compacting tracked history failed: %v", err)
+		}
+	}
 }
 
 // Workers lists workers seen in the last two minutes with their operator-set

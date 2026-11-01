@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -21,6 +22,10 @@ import (
 	"github.com/resolver/crawler/storage"
 	"gorm.io/gorm"
 )
+
+// workerLivenessWindow is how long since its last heartbeat a worker is
+// still assumed to be alive, matching what the job manager reports.
+const workerLivenessWindow = 2 * time.Minute
 
 // Outcome is how a run ended.
 type Outcome struct {
@@ -67,8 +72,9 @@ type Engine struct {
 
 	hooks Hooks
 
-	mu   sync.RWMutex
-	runs map[string]*Run
+	mu         sync.RWMutex
+	runs       map[string]*Run
+	helperRuns map[string]*Run // jobs owned by another worker that this one is helping crawl
 }
 
 // Deps are the engine's external dependencies.
@@ -119,6 +125,7 @@ func NewEngine(d Deps) (*Engine, error) {
 		semanticSearcher: modules.NewSemanticSearcher(cfg.Crawler, d.DB),
 		cookieDir:        filepath.Join(filepath.Dir(script), ".cookies"),
 		runs:             map[string]*Run{},
+		helperRuns:       map[string]*Run{},
 	}
 	return e, nil
 }
@@ -169,6 +176,14 @@ func (e *Engine) StartRun(job *models.CrawlJob) error {
 		e.mu.Unlock()
 		return fmt.Errorf("job %s is already running on this worker", job.ID)
 	}
+	// This worker may have been helping with the job before it took it
+	// over — a crawl whose owner died is one any idle worker joins, and
+	// then one of them claims. Its own helper run is now redundant, so it
+	// is told to wind down; no need to wait for it, since the frontier
+	// hands the two of them different URLs either way.
+	if helper := e.helperRuns[job.ID]; helper != nil {
+		helper.stop(Outcome{StopReason: "took over the crawl"})
+	}
 	r, err := newRun(e, job)
 	if err != nil {
 		e.mu.Unlock()
@@ -193,6 +208,69 @@ func (e *Engine) runEnded(r *Run, outcome Outcome) {
 	if e.hooks.RunEnded != nil {
 		e.hooks.RunEnded(r.job, outcome)
 	}
+}
+
+// StartHelping starts pulling from a running job's frontier alongside the
+// worker that owns it. The frontier hands every worker different URLs, so
+// this simply adds this machine's capacity to that crawl. participantID is
+// the models.CrawlJobWorker row registering this worker on the job.
+func (e *Engine) StartHelping(job *models.CrawlJob, participantID uint) error {
+	e.mu.Lock()
+	if _, exists := e.helperRuns[job.ID]; exists {
+		e.mu.Unlock()
+		return fmt.Errorf("job %s is already being helped by this worker", job.ID)
+	}
+	if _, owned := e.runs[job.ID]; owned {
+		e.mu.Unlock()
+		return fmt.Errorf("job %s already runs on this worker", job.ID)
+	}
+	r, err := newRun(e, job)
+	if err != nil {
+		e.mu.Unlock()
+		return err
+	}
+	r.isHelper = true
+	r.helperRowID = participantID
+	e.helperRuns[job.ID] = r
+	e.mu.Unlock()
+
+	if err := r.start(); err != nil {
+		e.mu.Lock()
+		delete(e.helperRuns, job.ID)
+		e.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// liveWorkerIDs lists the workers that have reported in recently. A claim
+// held by anyone else has been abandoned and may be handed out again.
+func (e *Engine) liveWorkerIDs() []string {
+	var ids []string
+	if err := e.db.Model(&models.WorkerHeartbeat{}).
+		Where("last_seen_at > ?", time.Now().Add(-workerLivenessWindow)).
+		Pluck("id", &ids).Error; err != nil {
+		log.Printf("[Engine] Failed to list live workers: %v", err)
+		return nil
+	}
+	if !slices.Contains(ids, e.workerID) {
+		ids = append(ids, e.workerID) // this process is alive whatever the heartbeat table says
+	}
+	return ids
+}
+
+func (e *Engine) helperRunEnded(r *Run) {
+	e.mu.Lock()
+	delete(e.helperRuns, r.job.ID)
+	e.mu.Unlock()
+}
+
+// HelpingCount returns the number of other workers' jobs this process is
+// currently helping crawl.
+func (e *Engine) HelpingCount() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.helperRuns)
 }
 
 func (e *Engine) emit(job *models.CrawlJob, event string, data map[string]interface{}) {
@@ -228,6 +306,15 @@ func (e *Engine) IsRunning(jobID string) bool {
 	return ok
 }
 
+// IsHelping reports whether this process is currently pulling from jobID's
+// frontier as a helper for the worker that owns it.
+func (e *Engine) IsHelping(jobID string) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	_, ok := e.helperRuns[jobID]
+	return ok
+}
+
 // RunningCount returns the number of runs in this process.
 func (e *Engine) RunningCount() int {
 	e.mu.RLock()
@@ -245,16 +332,23 @@ type RunStats struct {
 	Kept        int64            `json:"kept"` // crawled pages not skipped by keep_tags
 	Matches     int64            `json:"matches"`
 	InFlight    int64            `json:"in_flight"`
+	Helping     bool             `json:"helping"` // this worker is helping with a crawl another worker owns
 	Usage       models.JobUsage  `json:"usage"`
 	Limits      models.JobLimits `json:"limits"`
 	PagesPerMin float64          `json:"pages_per_minute"`
 }
 
-// Runs returns snapshots of every run in this process, newest first.
+// Runs returns snapshots of every run in this process, newest first,
+// including crawls this worker only helps with — they are as much work as
+// the ones it owns, and a worker that showed none of them would look idle
+// while fetching flat out.
 func (e *Engine) Runs() []RunStats {
 	e.mu.RLock()
-	runs := make([]*Run, 0, len(e.runs))
+	runs := make([]*Run, 0, len(e.runs)+len(e.helperRuns))
 	for _, r := range e.runs {
+		runs = append(runs, r)
+	}
+	for _, r := range e.helperRuns {
 		runs = append(runs, r)
 	}
 	e.mu.RUnlock()
@@ -281,8 +375,11 @@ func (e *Engine) RunStatsFor(jobID string) (RunStats, bool) {
 // waiting for the runs to finish. It returns how many runs it stopped.
 func (e *Engine) RequeueAll(reason string) int {
 	e.mu.RLock()
-	runs := make([]*Run, 0, len(e.runs))
+	runs := make([]*Run, 0, len(e.runs)+len(e.helperRuns))
 	for _, r := range e.runs {
+		runs = append(runs, r)
+	}
+	for _, r := range e.helperRuns {
 		runs = append(runs, r)
 	}
 	e.mu.RUnlock()
@@ -307,8 +404,11 @@ func (e *Engine) NeedsBrowser(settings *models.JobSettings) bool {
 // worker (or this one after a restart) continues it.
 func (e *Engine) Shutdown(ctx context.Context) {
 	e.mu.RLock()
-	runs := make([]*Run, 0, len(e.runs))
+	runs := make([]*Run, 0, len(e.runs)+len(e.helperRuns))
 	for _, r := range e.runs {
+		runs = append(runs, r)
+	}
+	for _, r := range e.helperRuns {
 		runs = append(runs, r)
 	}
 	e.mu.RUnlock()

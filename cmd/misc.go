@@ -113,18 +113,16 @@ func newMigrateCmd() *cobra.Command {
 		Short: "Create or update the database schema",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
+			// Through the app, not database.New alone: some migrations
+			// move data rather than schema and need the manager (cron
+			// parsing, listing-key derivation). Running only the schema
+			// half here would leave an operator who migrates deliberately,
+			// before starting the worker, with a half-migrated database.
+			a, err := openApp(true)
 			if err != nil {
 				return err
 			}
-			db, err := database.New(cfg.Database)
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-			if err := db.AutoMigrate(); err != nil {
-				return err
-			}
+			defer a.Close()
 			fmt.Println("Database schema is up to date")
 			return nil
 		},

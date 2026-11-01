@@ -103,6 +103,7 @@ type PageQuery struct {
 	NewestFirst    bool   // descending ids; the cursor then means "older than"
 	Search         string // words that must all appear in the title or URL
 	Tag            string // only pages with this tag
+	Site           string // only pages from this base domain; a crawl can cover several
 	Skipped        string // "" kept pages only, "include" kept and skipped, "only" skipped pages
 }
 
@@ -144,6 +145,9 @@ func (m *Manager) ListPages(q PageQuery) ([]PageResult, uint, error) {
 	}
 	if tag := models.NormalizeTag(q.Tag); tag != "" {
 		db = db.Where("id IN (SELECT page_id FROM page_tags WHERE crawl_job_id = ? AND tag = ?)", q.JobID, tag)
+	}
+	if site := strings.TrimSpace(q.Site); site != "" {
+		db = db.Where("domain = ?", site)
 	}
 	if !q.WithBody {
 		db = db.Omit("TextContent")
@@ -522,4 +526,58 @@ func flatten(prefix string, v interface{}, row map[string]string, cols map[strin
 		row[prefix] = fmt.Sprint(t)
 	}
 	cols[prefix] = true
+}
+
+// SiteCount is how many of a crawl's pages came from one site.
+type SiteCount struct {
+	Domain  string `json:"domain"`
+	Kept    int64  `json:"kept"`
+	Skipped int64  `json:"skipped"`
+}
+
+// SiteCounts counts a crawl's pages per site, most pages first. A crawl
+// given several start URLs covers several sites, and its pages are only
+// worth telling apart when it does, so a single-site crawl returns one
+// entry (or none) and the UI leaves the filter out.
+func (m *Manager) SiteCounts(jobID string) ([]SiteCount, error) {
+	if _, err := m.GetJob(jobID); err != nil {
+		return nil, notFound(err)
+	}
+	type row struct {
+		Domain  string
+		Skipped bool
+		N       int64
+	}
+	var rows []row
+	err := m.db.Model(&models.CrawledPage{}).
+		Select("domain, skipped, COUNT(*) AS n").
+		Where("crawl_job_id = ? AND is_archived = ? AND domain <> ''", jobID, false).
+		Group("domain, skipped").Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	byDomain := map[string]*SiteCount{}
+	for _, r := range rows {
+		c := byDomain[r.Domain]
+		if c == nil {
+			c = &SiteCount{Domain: r.Domain}
+			byDomain[r.Domain] = c
+		}
+		if r.Skipped {
+			c.Skipped += r.N
+		} else {
+			c.Kept += r.N
+		}
+	}
+	out := make([]SiteCount, 0, len(byDomain))
+	for _, c := range byDomain {
+		out = append(out, *c)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Kept != out[j].Kept {
+			return out[i].Kept > out[j].Kept
+		}
+		return out[i].Domain < out[j].Domain
+	})
+	return out, nil
 }

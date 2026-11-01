@@ -1,0 +1,369 @@
+{{/*
+  One listing's tracking view: what a single shop has asked for one product
+  over time. The comparison table answers "who sells this, and for how
+  much"; this page answers "what has this shop done with the price". Both
+  read the same series — comparison slices it across shops at the latest
+  run, tracking slices it along time for one shop.
+*/}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="icon" href="/static/favicon-32.png" type="image/png">
+    <title>{{with .hist.Listing.Title}}{{.}}{{else}}Listing{{end}} at {{.hist.Listing.SiteLabel}} - Mole</title>
+    <script src="/static/js/tailwind.js"></script>
+    <style>
+        .lst-chart { display: block; width: 100%; height: auto; }
+        .lst-hit { cursor: crosshair; }
+        .lst-hit:focus { outline: none; }
+        .lst-up { color: #b91c1c; }
+        .lst-down { color: #047857; }
+        .lst-tip {
+            position: absolute; pointer-events: none; z-index: 20; display: none;
+            background: #fff; border: 1px solid #e5e7eb; border-radius: .375rem;
+            box-shadow: 0 4px 12px rgba(0,0,0,.08); padding: .375rem .5rem;
+            font-size: 11px; line-height: 1.35; white-space: nowrap;
+        }
+        .lst-tip b { font-size: 13px; color: #0b0b0b; display: block; }
+        .lst-tip span { color: #6b7280; }
+        .lst-key { display: inline-block; width: 10px; height: 2px; background: #4f46e5; vertical-align: middle; margin-right: 4px; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    {{template "nav" .}}
+    {{template "statusStyles"}}
+
+    {{$l := .hist.Listing}}
+    {{$h := .hist}}
+    <div class="max-w-5xl mx-auto px-4 py-8">
+        <a href="{{.backPath}}" class="text-sm text-indigo-600 hover:underline">← Back to {{.backLabel}}</a>
+
+        <!-- ── who and where ─────────────────────────────────────────── -->
+        <div class="bg-white rounded-lg shadow-sm p-6 mt-4">
+            <div class="flex flex-wrap items-start justify-between gap-4">
+                <div class="min-w-0">
+                    <div class="flex items-center gap-2 mb-1">
+                        <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-700 font-medium">{{$l.SiteLabel}}</span>
+                        {{if $l.Stale}}<span class="text-xs px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ no longer listed</span>{{end}}
+                        {{if $l.Pinned}}<span class="text-xs px-2 py-0.5 rounded bg-indigo-50 text-indigo-700">📌 confirmed by hand</span>{{end}}
+                        {{if $l.Excluded}}<span class="text-xs px-2 py-0.5 rounded bg-gray-200 text-gray-700">excluded from matching</span>{{end}}
+                    </div>
+                    <h1 class="text-xl font-semibold text-gray-900 break-words">
+                        {{if $l.Title}}{{$l.Title}}{{else}}<span class="text-gray-400">untitled offer</span>{{end}}
+                    </h1>
+                    <a href="{{$l.URL}}" target="_blank" rel="noopener"
+                       class="text-xs text-indigo-600 hover:underline break-all">{{$l.URL}} ↗</a>
+                </div>
+                <div class="text-right text-xs text-gray-500 shrink-0">
+                    <div>first seen {{since $l.FirstSeenAt}}</div>
+                    <div>last seen {{since $l.LastSeenAt}}</div>
+                    <div class="mt-1"><b class="text-gray-700">{{$h.Runs}}</b> run{{if ne $h.Runs 1}}s{{end}} recorded</div>
+                </div>
+            </div>
+
+            {{if $h.Group}}
+            <p class="mt-4 text-xs text-gray-600 border-t border-gray-100 pt-3">
+                Compared as <a href="{{$.backPath}}" class="text-indigo-600 hover:underline font-medium">{{if $h.Group.Label}}{{$h.Group.Label}}{{else}}untitled product{{end}}</a>{{if $h.Group.VariantLabel}} ({{$h.Group.VariantLabel}}){{end}}
+                — matched {{$l.MatchMethod}}{{if $l.Confidence}} at {{printf "%.0f" (mulf $l.Confidence 100)}}% confidence{{end}}.
+                That match is a guess about which shops sell the same thing; this history is not affected by it.
+            </p>
+            {{else}}
+            <p class="mt-4 text-xs rounded-md bg-indigo-50 border border-indigo-200 text-indigo-900 p-3">
+                This offer is not matched to a product yet, so it has no column in the comparison table — but it is
+                tracked all the same, and the history below is already being kept. Assign it to a product from the
+                comparison's <b>Not yet matched</b> list and this history moves across with it.
+            </p>
+            {{end}}
+        </div>
+
+        <!-- ── the headline numbers ──────────────────────────────────── -->
+        {{if $h.Current}}
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
+            <div class="bg-white rounded-lg shadow-sm p-4">
+                <div class="text-xs text-gray-500">Now</div>
+                <div class="text-xl font-semibold text-gray-900 mt-1">{{money $h.Current $h.Currency}}</div>
+                {{if and $h.First $h.Current (ne (derefF $h.First) (derefF $h.Current))}}
+                {{$d := deltaAbs $h.First $h.Current}}
+                <div class="text-xs mt-1 {{if gt $d 0.0}}lst-up{{else}}lst-down{{end}}">
+                    {{if gt $d 0.0}}▲{{else}}▼{{end}} {{compactNum (absf $d)}} ({{deltaPct $h.First $h.Current}}) since first seen
+                </div>
+                {{else}}
+                <div class="text-xs text-gray-400 mt-1">unchanged since first seen</div>
+                {{end}}
+            </div>
+            <div class="bg-white rounded-lg shadow-sm p-4">
+                <div class="text-xs text-gray-500">Lowest recorded</div>
+                <div class="text-xl font-semibold text-gray-900 mt-1">{{money $h.Low $h.Currency}}</div>
+            </div>
+            <div class="bg-white rounded-lg shadow-sm p-4">
+                <div class="text-xs text-gray-500">Highest recorded</div>
+                <div class="text-xl font-semibold text-gray-900 mt-1">{{money $h.High $h.Currency}}</div>
+            </div>
+            <div class="bg-white rounded-lg shadow-sm p-4">
+                <div class="text-xs text-gray-500">When it first appeared</div>
+                <div class="text-xl font-semibold text-gray-900 mt-1">{{money $h.First $h.Currency}}</div>
+            </div>
+        </div>
+        {{end}}
+
+        <!-- ── the series ────────────────────────────────────────────── -->
+        <div class="bg-white rounded-lg shadow-sm p-6 mt-6">
+            <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                <div>
+                    <h2 class="text-sm font-semibold text-gray-800">
+                        <span class="lst-key"></span>{{$h.Field}} at {{$l.SiteLabel}}, over time
+                    </h2>
+                    <p class="text-xs text-gray-500 mt-0.5">One point per run of the schedule.</p>
+                </div>
+                {{if gt (len $h.Fields) 1}}
+                <div class="flex items-center gap-2">
+                    <label for="lst-field" class="text-xs text-gray-500">Track</label>
+                    <select id="lst-field" class="border border-gray-300 rounded px-2 py-1 text-sm bg-white">
+                        {{range $h.Fields}}<option value="{{.}}" {{if eq . $h.Field}}selected{{end}}>{{.}}</option>{{end}}
+                    </select>
+                </div>
+                {{end}}
+            </div>
+
+            {{if not $h.Tracks}}
+            <p class="text-xs rounded-md bg-amber-50 border border-amber-200 text-amber-900 p-3">
+                This offer belongs to a <b>one-off crawl</b>, which ran once. There is a value but no history —
+                nothing to compare it against. Run the same crawl <b>on a schedule</b> and every run adds a point here.
+            </p>
+            {{else if lt (len $h.Points) 2}}
+            <p class="text-xs rounded-md bg-gray-50 border border-gray-200 text-gray-700 p-3">
+                Only one run has recorded this offer so far, so there is nothing to draw yet.
+                The next run of the schedule adds the second point and the chart appears.
+            </p>
+            {{else if eq $h.FieldKind "number"}}
+            <div class="relative" id="lst-chart-wrap">
+                {{listingChart $h 880 240}}
+                <div class="lst-tip" id="lst-tip"></div>
+            </div>
+            <p class="text-xs text-gray-400 mt-2">
+                Hover or tab through the chart for a value. A shaded band marks a day whose individual runs have been
+                compacted into one point — the band is what the value ranged between inside that day.
+            </p>
+            {{else}}
+            <p class="text-xs rounded-md bg-gray-50 border border-gray-200 text-gray-700 p-3">
+                <b>{{$h.Field}}</b> is a text value, so it is not plotted — the table below lists every reading, and
+                the changes above call out each time it moved.
+            </p>
+            {{end}}
+        </div>
+
+        <!-- ── what moved ───────────────────────────────────────────── -->
+        <div class="bg-white rounded-lg shadow-sm p-6 mt-6">
+            <h2 class="text-sm font-semibold text-gray-800 mb-1">Changes{{if $h.Changes}} ({{len $h.Changes}}){{end}}</h2>
+            <p class="text-xs text-gray-500 mb-4">
+                Every run where this offer's {{$h.Field}} actually moved. Runs that found the same value again are in
+                the readings table below, not here.
+            </p>
+            {{if $h.Changes}}
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">When</th>
+                            <th class="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">From</th>
+                            <th class="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">To</th>
+                            <th class="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Move</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-100">
+                        {{range $h.Changes}}
+                        <tr>
+                            <td class="px-3 py-2 text-gray-600 whitespace-nowrap">{{day .DetectedAt}}</td>
+                            <td class="px-3 py-2 text-right text-gray-500">
+                                {{if .OldNum}}{{money .OldNum .Currency}}{{else}}{{if .OldText}}{{.OldText}}{{else}}—{{end}}{{end}}
+                            </td>
+                            <td class="px-3 py-2 text-right font-medium text-gray-900">
+                                {{if .NewNum}}{{money .NewNum .Currency}}{{else}}{{if .NewText}}{{.NewText}}{{else}}—{{end}}{{end}}
+                            </td>
+                            <td class="px-3 py-2 text-right whitespace-nowrap">
+                                {{if eq .Direction 1}}<span class="lst-up">▲ {{compactNum (absf .Delta)}} dearer</span>
+                                {{else if eq .Direction -1}}<span class="lst-down">▼ {{compactNum (absf .Delta)}} cheaper</span>
+                                {{else}}<span class="text-indigo-700">changed</span>{{end}}
+                            </td>
+                        </tr>
+                        {{end}}
+                    </tbody>
+                </table>
+            </div>
+            {{else}}
+            <p class="text-sm text-gray-500 py-4 text-center">Nothing has moved yet.</p>
+            {{end}}
+        </div>
+
+        <!-- ── every reading: the table view the chart must not gate ── -->
+        {{if $h.Points}}
+        <details class="bg-white rounded-lg shadow-sm p-6 mt-6">
+            <summary class="text-sm font-semibold text-gray-800 cursor-pointer">
+                Every recorded value ({{len $h.Points}})
+            </summary>
+            <p class="text-xs text-gray-500 mt-1 mb-4">The same numbers the chart draws, as a table.</p>
+            <div class="overflow-x-auto max-h-96 overflow-y-auto">
+                <table class="w-full text-sm">
+                    <thead class="bg-gray-50 sticky top-0">
+                        <tr>
+                            <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">When</th>
+                            <th class="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Value</th>
+                            <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Note</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-100">
+                        {{range $h.Points}}
+                        <tr>
+                            <td class="px-3 py-2 text-gray-600 whitespace-nowrap">{{day .At}}</td>
+                            <td class="px-3 py-2 text-right font-medium text-gray-900">
+                                {{if .Num}}{{money .Num .Currency}}{{else}}{{if .Text}}{{.Text}}{{else}}—{{end}}{{end}}
+                            </td>
+                            <td class="px-3 py-2 text-xs text-gray-500">
+                                {{if .Rolled}}
+                                    day's close, from {{.Samples}} run{{if ne .Samples 1}}s{{end}}
+                                    {{if and .Low .High (gt (derefF .High) (derefF .Low))}}
+                                    · ranged {{compactNum (derefF .Low)}}–{{compactNum (derefF .High)}}
+                                    {{end}}
+                                {{else}}one run{{end}}
+                            </td>
+                        </tr>
+                        {{end}}
+                    </tbody>
+                </table>
+            </div>
+        </details>
+        {{end}}
+
+        <!-- ── how this offer is recognised again ────────────────────── -->
+        <div class="bg-white rounded-lg shadow-sm p-6 mt-6">
+            <h2 class="text-sm font-semibold text-gray-800 mb-1">How this offer is recognised</h2>
+            <p class="text-xs text-gray-500 mb-3">
+                Every run creates fresh page records, so this history only holds together because the offer itself has
+                an identity. This is what that identity rests on.
+            </p>
+            <div class="flex items-start gap-2 text-sm">
+                {{if $h.KeyStable}}
+                <span class="text-emerald-700 shrink-0" aria-hidden="true">✓</span>
+                <span class="text-gray-700"><b>Stable.</b> {{$h.KeyNote}}</span>
+                {{else}}
+                <span class="text-amber-700 shrink-0" aria-hidden="true">⚠</span>
+                <span class="text-gray-700"><b>Fragile.</b> {{$h.KeyNote}}</span>
+                {{end}}
+            </div>
+            {{if $l.PreviousURLs}}
+            <div class="mt-4 border-t border-gray-100 pt-3">
+                <div class="text-xs font-medium text-gray-700">
+                    This offer has moved {{len $l.PreviousURLs}} time{{if ne (len $l.PreviousURLs) 1}}s{{end}} and kept its history
+                </div>
+                <ul class="mt-1 space-y-0.5">
+                    {{range $l.PreviousURLs}}<li class="text-xs text-gray-400 break-all">{{.}}</li>{{end}}
+                    <li class="text-xs text-gray-700 break-all">{{$l.URL}} <span class="text-gray-400">(now)</span></li>
+                </ul>
+            </div>
+            {{end}}
+        </div>
+
+        <!-- ── decisions ────────────────────────────────────────────── -->
+        <div class="bg-white rounded-lg shadow-sm p-6 mt-6">
+            <h2 class="text-sm font-semibold text-gray-800 mb-1">Matching</h2>
+            <p class="text-xs text-gray-500 mb-4">
+                These change which product this offer is compared as. None of them touch the history above.
+            </p>
+            <div class="flex flex-wrap gap-2">
+                <button onclick="lstAction('{{if $l.Pinned}}unpin{{else}}pin{{end}}')"
+                        class="px-3 py-1.5 text-xs font-medium rounded bg-indigo-50 text-indigo-700 hover:bg-indigo-100">
+                    {{if $l.Pinned}}📌 Unpin — let matching place it again{{else}}📍 Confirm this match{{end}}
+                </button>
+                <button onclick="lstAction('{{if $l.Excluded}}unexclude{{else}}exclude{{end}}')"
+                        class="px-3 py-1.5 text-xs font-medium rounded bg-gray-100 text-gray-700 hover:bg-gray-200">
+                    {{if $l.Excluded}}Allow matching again{{else}}✕ Not this product{{end}}
+                </button>
+            </div>
+        </div>
+    </div>
+
+<script>
+    var lstListingID = {{$l.ID}};
+
+    /* The crosshair and readout over the series. Values are also in the
+       table above, so this enhances and never gates. */
+    (function () {
+        var wrap = document.getElementById('lst-chart-wrap');
+        if (!wrap) { return; }
+        var svg = wrap.querySelector('svg'), tip = document.getElementById('lst-tip');
+        var cross = svg && svg.querySelector('.lst-cross');
+        if (!svg || !tip) { return; }
+
+        function show(rect) {
+            /* Data from the crawl is untrusted: build the readout as text
+               nodes, never by concatenating HTML. */
+            tip.textContent = '';
+            var value = document.createElement('b');
+            var unit = rect.getAttribute('data-unit');
+            value.textContent = rect.getAttribute('data-value') + (unit ? ' ' + unit : '');
+            tip.appendChild(value);
+            var when = document.createElement('span');
+            when.textContent = rect.getAttribute('data-at');
+            tip.appendChild(when);
+            var note = rect.getAttribute('data-note');
+            if (note) {
+                tip.appendChild(document.createElement('br'));
+                var n = document.createElement('span');
+                n.textContent = note;
+                tip.appendChild(n);
+            }
+            /* Place it against the mark, in the wrapper's own pixels. */
+            var box = svg.getBoundingClientRect();
+            var vb = svg.viewBox.baseVal;
+            var scale = box.width / vb.width;
+            var cx = parseFloat(rect.getAttribute('data-x')) * scale;
+            tip.style.display = 'block';
+            var left = cx - tip.offsetWidth / 2;
+            left = Math.max(2, Math.min(left, box.width - tip.offsetWidth - 2));
+            tip.style.left = left + 'px';
+            tip.style.top = '4px';
+            if (cross) {
+                cross.setAttribute('x1', rect.getAttribute('data-x'));
+                cross.setAttribute('x2', rect.getAttribute('data-x'));
+                cross.style.display = 'block';
+            }
+        }
+        function hide() {
+            tip.style.display = 'none';
+            if (cross) { cross.style.display = 'none'; }
+        }
+        svg.querySelectorAll('.lst-hit').forEach(function (rect) {
+            /* Keyboard focus gets the same readout as the pointer. */
+            rect.addEventListener('pointerenter', function () { show(rect); });
+            rect.addEventListener('focus', function () { show(rect); });
+            rect.addEventListener('blur', hide);
+        });
+        svg.addEventListener('pointerleave', hide);
+    })();
+
+    (function () {
+        var sel = document.getElementById('lst-field');
+        if (!sel) { return; }
+        sel.addEventListener('change', function () {
+            var url = new URL(location.href);
+            url.searchParams.set('field', this.value);
+            location.href = url.toString();
+        });
+    })();
+
+    async function lstAction(action) {
+        if (action === 'exclude' &&
+            !confirm('Mark this offer as not that product? It leaves the comparison and is never matched there again. Its history is kept.')) {
+            return;
+        }
+        try {
+            await Mole.api('POST', '/api/v1/grouping/listings/' + lstListingID + '/' + action);
+            Mole.toast('Saved');
+            setTimeout(function () { location.reload(); }, 400);
+        } catch (err) { Mole.toast(err.message, false); }
+    }
+</script>
+</body>
+</html>

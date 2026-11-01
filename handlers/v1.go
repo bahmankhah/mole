@@ -149,6 +149,7 @@ func (h *Handler) RegisterV1(g *gin.RouterGroup) {
 	g.POST("/crawls/:id/after-job", h.V1RunAfterJob)
 	g.GET("/crawls/:id/pages", h.V1ListPages)
 	g.GET("/crawls/:id/tags", h.V1TagCounts)
+	g.GET("/crawls/:id/sites", h.V1SiteCounts)
 	g.PUT("/crawls/:id/tag-rules", h.V1SetTagRules)
 	g.GET("/crawls/:id/pages/:pageId", h.V1GetPage)
 	g.GET("/crawls/:id/pages/:pageId/screenshot", h.V1Screenshot)
@@ -172,6 +173,15 @@ func (h *Handler) RegisterV1(g *gin.RouterGroup) {
 	g.POST("/schedules/:id/enable", h.v1ScheduleEnabled(true))
 	g.POST("/schedules/:id/disable", h.v1ScheduleEnabled(false))
 
+	// Start URLs. A crawl or schedule covers one site per start URL, and
+	// which sites those are is the thing most likely to change after it
+	// exists, so they are editable without replacing the definition.
+	g.GET("/crawls/:id/urls", h.V1CrawlURLs)
+	g.POST("/crawls/:id/urls", h.V1AddCrawlURLs)
+	g.GET("/schedules/:id/urls", h.V1ScheduleURLs)
+	g.POST("/schedules/:id/urls", h.V1AddScheduleURLs)
+	g.DELETE("/schedules/:id/urls", h.V1RemoveScheduleURLs)
+
 	// Grouping within a crawl or a schedule — which is how several sites
 	// are compared: give the crawl several start URLs — and the actions
 	// that work in either scope.
@@ -181,12 +191,24 @@ func (h *Handler) RegisterV1(g *gin.RouterGroup) {
 	g.POST("/schedules/:id/regroup", h.V1RegroupSchedule)
 	g.GET("/grouping/fields", h.V1GroupingFields)
 	g.POST("/grouping/product-groups", h.V1CreateProductGroup)
-	g.POST("/grouping/assign", h.V1AssignUnmatched)
-	g.POST("/grouping/members/:memberId/pin", h.v1MemberAction(h.jobManager.PinGroupMember, gin.H{"pinned": true}))
-	g.POST("/grouping/members/:memberId/unpin", h.v1MemberAction(h.jobManager.UnpinGroupMember, gin.H{"pinned": false}))
-	g.POST("/grouping/members/:memberId/exclude", h.v1MemberAction(h.jobManager.ExcludeGroupMember, gin.H{"excluded": true}))
-	g.POST("/grouping/members/:memberId/unexclude", h.v1MemberAction(h.jobManager.UnexcludeGroupMember, gin.H{"excluded": false}))
-	g.POST("/grouping/members/:memberId/move", h.V1MoveGroupMember)
+
+	// A listing is one shop's offer of one product: the cell of the
+	// comparison table and the thing a price history belongs to. These act
+	// on it — including assigning an unmatched offer, which is a move.
+	g.GET("/grouping/listings/:listingId/history", h.V1ListingHistory)
+	g.POST("/grouping/listings/:listingId/pin", h.v1ListingAction(h.jobManager.PinListing, gin.H{"pinned": true}))
+	g.POST("/grouping/listings/:listingId/unpin", h.v1ListingAction(h.jobManager.UnpinListing, gin.H{"pinned": false}))
+	g.POST("/grouping/listings/:listingId/exclude", h.v1ListingAction(h.jobManager.ExcludeListing, gin.H{"excluded": true}))
+	g.POST("/grouping/listings/:listingId/unexclude", h.v1ListingAction(h.jobManager.UnexcludeListing, gin.H{"excluded": false}))
+	g.POST("/grouping/listings/:listingId/move", h.V1MoveListing)
+
+	// The same rows under their former name, for callers that already hold
+	// these URLs. The ids are unchanged, so they still resolve.
+	g.POST("/grouping/members/:memberId/pin", h.v1ListingAction(h.jobManager.PinListing, gin.H{"pinned": true}))
+	g.POST("/grouping/members/:memberId/unpin", h.v1ListingAction(h.jobManager.UnpinListing, gin.H{"pinned": false}))
+	g.POST("/grouping/members/:memberId/exclude", h.v1ListingAction(h.jobManager.ExcludeListing, gin.H{"excluded": true}))
+	g.POST("/grouping/members/:memberId/unexclude", h.v1ListingAction(h.jobManager.UnexcludeListing, gin.H{"excluded": false}))
+	g.POST("/grouping/members/:memberId/move", h.V1MoveListing)
 
 	g.GET("/owners/:ref/usage", h.V1OwnerUsage)
 	g.GET("/owners/:ref/limits", h.V1GetOwnerLimits)
@@ -523,7 +545,7 @@ func (h *Handler) V1ListPages(c *gin.Context) {
 		JobID: job.ID, AfterID: queryUint(c, "cursor"), Limit: queryInt(c, "limit", 50),
 		WithContent: queryBool(c, "content"), WithBody: queryBool(c, "body"), OnlySuccessful: queryBool(c, "successful"),
 		OnlyFailed: queryBool(c, "failed"), NewestFirst: c.Query("order") == "desc",
-		Search: c.Query("q"), Tag: c.Query("tag"), Skipped: c.Query("skipped"),
+		Search: c.Query("q"), Tag: c.Query("tag"), Site: c.Query("site"), Skipped: c.Query("skipped"),
 	})
 	if err != nil {
 		v1Error(c, err)
@@ -548,6 +570,21 @@ func (h *Handler) V1TagCounts(c *gin.Context) {
 		return
 	}
 	ok(c, http.StatusOK, counts)
+}
+
+// V1SiteCounts counts a crawl's pages per site, for crawls covering more
+// than one.
+func (h *Handler) V1SiteCounts(c *gin.Context) {
+	job, okj := h.loadJob(c)
+	if !okj {
+		return
+	}
+	sites, err := h.jobManager.SiteCounts(job.ID)
+	if err != nil {
+		v1Error(c, err)
+		return
+	}
+	ok(c, http.StatusOK, gin.H{"sites": sites})
 }
 
 // V1SetTagRules replaces a crawl's tag rules and re-tags its pages.
@@ -653,7 +690,8 @@ func (h *Handler) V1Export(c *gin.Context) {
 	c.Header("Content-Type", ctype)
 	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="crawl-%s.%s"`, job.ID[:8], format))
 	c.Status(http.StatusOK)
-	filter := jobs.PageQuery{OnlySuccessful: queryBool(c, "successful"), Search: c.Query("q"), Tag: c.Query("tag")}
+	filter := jobs.PageQuery{OnlySuccessful: queryBool(c, "successful"), Search: c.Query("q"),
+		Tag: c.Query("tag"), Site: c.Query("site")}
 	if err := h.jobManager.ExportFiltered(job.ID, format, filter, c.Writer); err != nil {
 		// Headers are already sent; report the problem in the stream.
 		fmt.Fprintf(c.Writer, "\nexport error: %v\n", err)

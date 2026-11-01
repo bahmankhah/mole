@@ -1,22 +1,41 @@
 {{/*
   The comparison table of one grouping scope, shared by the crawl page (its
-  "Groups" tab) and the comparison page. Expects a *jobs.GroupingDashboard
-  as "." and renders the site columns, one row per matched product, and the
-  pages nothing matched yet. The page including it must also include
-  "groupingScript" once, which wires the field switcher and the member
-  actions against /api/v1/grouping/*.
+  "Groups" tab) and the schedule page (its "Compare & track" tab). Expects a
+  *jobs.GroupingDashboard as "." .
+
+  Two different questions are answered on this one screen, and the layout
+  keeps them apart on purpose:
+
+    across  — one row per product, one column per shop: who sells this, and
+              for how much. This is the comparison, and the product it hangs
+              on is a *guess* the buttons here let you correct.
+    along   — each cell's sparkline and its link through to the listing page:
+              what one shop has done with its price over time. This is the
+              tracking, and it is a *fact* that nothing on this page can
+              disturb.
+
+  A one-off crawl has a single run, so it can only answer the first; the
+  tracking affordances are hidden for it rather than shown empty.
+
+  The page including this must also include "groupingScript" once, which
+  wires the field switcher and the listing actions against
+  /api/v1/grouping/*, and define cmpScope = {type, id} before it.
 */}}
 {{define "groupingStyles"}}
 <style>
     .cmp-cell { padding: .5rem .75rem; vertical-align: top; }
     .cmp-best { background: #ecfdf5; }
     .cmp-best .cmp-val { color: #047857; font-weight: 700; }
+    /* Direction never rests on colour alone: every use of these is paired
+       with a ▲/▼ glyph and words, because the two steps sit in the CVD
+       floor band where a second encoding is required. */
     .cmp-up { color: #b91c1c; }
     .cmp-down { color: #047857; }
-    .cmp-spark { display: block; margin-top: .25rem; }
+    .cmp-spark { display: block; margin-top: .25rem; overflow: visible; }
     .cmp-stale { color: #9ca3af; text-decoration: line-through; }
-    .cmp-pin { opacity: 0; transition: opacity .12s; }
-    tr:hover .cmp-pin { opacity: 1; }
+    .cmp-act { opacity: 0; transition: opacity .12s; }
+    tr:hover .cmp-act, .cmp-act:focus-within { opacity: 1; }
+    .cmp-offer { border-top: 1px dashed #e5e7eb; padding-top: .35rem; margin-top: .35rem; }
 </style>
 {{end}}
 
@@ -29,12 +48,15 @@
         </select>
         <span class="text-xs text-gray-500">
             <b>{{.TotalGroups}}</b> product{{if ne .TotalGroups 1}}s{{end}}
+            · <b>{{.TotalListings}}</b> offer{{if ne .TotalListings 1}}s{{end}}
             {{if gt .TotalPages 1}}· page {{.Page}} of {{.TotalPages}}{{end}}
         </span>
         {{if .LastObservedAt}}<span class="text-xs text-gray-400">last recorded {{ago .LastObservedAt}}</span>{{end}}
     </div>
     <div class="flex flex-wrap items-center gap-2">
-        <button onclick="cmpRegroup()" class="px-3 py-1.5 text-xs font-medium rounded bg-indigo-50 text-indigo-700 hover:bg-indigo-100" title="Recompute matching from the pages already crawled">↻ Re-match</button>
+        <button id="cmp-regroup" onclick="cmpRegroup()" class="px-3 py-1.5 text-xs font-medium rounded bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-60 disabled:cursor-wait inline-flex items-center gap-1.5" title="Recompute matching from the pages already crawled. Prices already recorded are not affected.">
+            <span id="cmp-regroup-icon">↻</span><span id="cmp-regroup-label">Re-match</span>
+        </button>
     </div>
 </div>
 
@@ -42,18 +64,25 @@
     {{range .Sites}}
     <div class="px-3 py-2 rounded-lg border {{if eq .Status "running"}}border-indigo-200 bg-indigo-50{{else if eq .Status "failed"}}border-red-200 bg-red-50{{else}}border-gray-200 bg-gray-50{{end}} text-xs">
         <div class="font-medium text-gray-800">{{.Label}}{{if .Disabled}} <span class="text-gray-400">(disabled)</span>{{end}}</div>
-        <div class="text-gray-500 mt-0.5">{{if .Status}}{{template "statusBadge" .Status}}{{else}}<span class="text-gray-400">not run yet</span>{{end}} · {{.ProductCount}} matched{{if .CompletedAt}} · {{ago .CompletedAt}}{{end}}</div>
+        <div class="text-gray-500 mt-0.5">{{if .Status}}{{template "statusBadge" .Status}}{{else}}<span class="text-gray-400">not run yet</span>{{end}} · {{.ListingCount}} offer{{if ne .ListingCount 1}}s{{end}}{{if .CompletedAt}} · {{ago .CompletedAt}}{{end}}</div>
         {{if .LatestJobID}}<a href="/jobs/{{.LatestJobID}}" class="text-indigo-600 hover:underline">view crawl →</a>{{end}}
     </div>
     {{end}}
 </div>
 
-{{if eq (len .Sites) 1}}
+{{/* What this scope can and cannot tell you. */}}
+{{if not .Tracks}}
+<p class="mb-4 text-xs rounded-md bg-amber-50 border border-amber-200 text-amber-900 p-3">
+    This is a <b>one-off crawl</b>: it compares the shops at one moment, and that is all it can do — there is no
+    earlier run to compare against, so no price history and no movement.
+    Run the same crawl <b>on a schedule</b> and every run adds a point to each offer's history, which is what turns
+    this table into price tracking.
+</p>
+{{else if eq (len .Sites) 1}}
 <p class="mb-4 text-xs rounded-md bg-indigo-50 border border-indigo-200 text-indigo-900 p-3">
-    This crawl covers <b>one site</b>, so there is nothing to compare prices <i>against</i> — what you see is each product once,
-    with the pages that were merged into it. To compare sites against each other, start a crawl with
-    <b>one start URL per site</b>; every start URL's own domain is crawled and each becomes a column here.
-    Run it on a schedule and each product keeps a history, so changes show up between runs.
+    This schedule covers <b>one shop</b>, so there is nothing to compare prices <i>against</i> — but each offer is
+    still tracked, and you can open any of them to see what that shop has done with its price.
+    To compare shops with each other, add <b>one start URL per shop</b>; each start URL's own domain becomes a column here.
 </p>
 {{end}}
 
@@ -71,11 +100,11 @@
                     <div class="font-medium text-gray-800 truncate" title="{{$row.Label}}">{{if $row.Label}}{{$row.Label}}{{else}}<span class="text-gray-400">untitled</span>{{end}}</div>
                     <div class="text-xs text-gray-400">
                         {{if $row.Brand}}{{$row.Brand}} · {{end}}{{if $row.VariantLabel}}{{$row.VariantLabel}} · {{end}}{{$row.MatchMethod}}{{if $row.Confidence}} {{printf "%.0f" (mulf $row.Confidence 100)}}%{{end}}
-                        {{if gt (len $row.Members) 1}}
-                        · <span class="text-indigo-600">{{len $row.Members}} pages merged</span>
+                        {{if gt (len $row.Listings) 1}}
+                        · <span class="text-indigo-600">{{len $row.Listings}} offers</span>
                         {{end}}
                         {{if and $row.LowestValue $row.HighestValue (gt (derefF $row.HighestValue) (derefF $row.LowestValue))}}
-                        · spread {{printf "%.0f" (subf (derefF $row.HighestValue) (derefF $row.LowestValue))}} {{$row.Currency}}
+                        · spread {{compactNum (subf (derefF $row.HighestValue) (derefF $row.LowestValue))}} {{$row.Currency}}
                         {{end}}
                     </div>
                 </td>
@@ -83,36 +112,74 @@
                 {{$cell := index $row.Cells $site.SiteKey}}
                 <td class="cmp-cell {{if and $cell (not $cell.Stale) $cell.Num $row.LowestValue (eq (derefF $cell.Num) (derefF $row.LowestValue))}}cmp-best{{end}}">
                     {{if $cell}}
+                    {{/* The headline: this shop's cheapest live offer. */}}
                     <a href="{{$cell.URL}}" target="_blank" rel="noopener" class="cmp-val {{if $cell.Stale}}cmp-stale{{else}}text-gray-800{{end}} hover:underline">
-                        {{if $cell.Num}}{{printf "%.0f" (derefF $cell.Num)}} {{$cell.Currency}}{{else}}{{$cell.Text}}{{end}}
+                        {{if $cell.Num}}{{compactNum (derefF $cell.Num)}} {{$cell.Currency}}{{else}}{{$cell.Text}}{{end}}
                     </a>
                     {{if $cell.Stale}}
-                    <div class="text-xs text-amber-700" title="This site's latest run no longer found this product. The value above is what it last cost there.">⚠ not in the latest run</div>
-                    {{else if $cell.Changed}}
+                    <div class="text-xs text-amber-700" title="This shop's latest run no longer found this product. The value above is what it last cost there.">⚠ not in the latest run</div>
+                    {{else if and $.Tracks $cell.Changed}}
                     <div class="text-xs {{if gt $cell.Delta 0.0}}cmp-up{{else}}cmp-down{{end}}">
-                        {{if gt $cell.Delta 0.0}}▲{{else}}▼{{end}} {{printf "%.0f" (absf $cell.Delta)}} since the previous run
+                        {{if gt $cell.Delta 0.0}}▲{{else}}▼{{end}} {{compactNum (absf $cell.Delta)}} since the previous run
                     </div>
-                    {{else if $cell.TextChanged}}
+                    {{else if and $.Tracks $cell.TextChanged}}
                     <div class="text-xs text-indigo-700">was {{$cell.PreviousText}}</div>
                     {{end}}
-                    {{if gt $cell.Pages 1}}
+
+                    {{/* Along the other axis: where this offer has been. */}}
+                    {{if $.Tracks}}
+                    {{if $cell.ListingID}}
+                    <a href="/listings/{{$cell.ListingID}}?field={{$.Field}}"
+                       class="block hover:opacity-80"
+                       title="Open this shop's price history for this product">
+                        {{sparkline $cell.History 84 20}}
+                    </a>
+                    {{end}}
+                    {{end}}
+
+                    {{/* Every offer this shop has, when it has more than one. */}}
+                    {{if gt $cell.Offers 1}}
                     <details class="text-xs text-gray-500 mt-0.5">
                         <summary class="cursor-pointer {{if $cell.Disagrees}}text-amber-700{{else}}text-indigo-600{{end}}">
-                            merged from {{$cell.Pages}} pages{{if $cell.Disagrees}} · {{printf "%.0f" (derefF $cell.Low)}}–{{printf "%.0f" (derefF $cell.High)}}{{end}}
+                            {{$cell.Offers}} offers at this shop{{if $cell.Disagrees}} · {{spread $cell.Low $cell.High}}{{end}}
                         </summary>
-                        <div class="mt-1 space-y-0.5">
-                            {{if $cell.Disagrees}}<div class="text-amber-700">These pages do not agree on the value — they may not all be the same product. Use ✕ on the ones that do not belong.</div>{{end}}
-                            <div class="truncate" title="{{$cell.URL}}">{{$cell.URL}}</div>
-                            {{range $cell.AlsoURLs}}<div class="truncate text-gray-400" title="{{.}}">{{.}}</div>{{end}}
+                        <div class="mt-1">
+                            {{if $cell.Disagrees}}
+                            <div class="text-amber-700 mb-1">
+                                These offers do not agree on the value. That is normal where a shop lists several
+                                sellers or bundles — but it can also mean one of them is not this product. Each is
+                                tracked separately; use ✕ on any that do not belong.
+                            </div>
+                            {{end}}
+                            {{range $cell.Listings}}
+                            <div class="cmp-offer">
+                                <div class="flex items-center justify-between gap-2">
+                                    <a href="/listings/{{.ListingID}}?field={{$.Field}}" class="text-indigo-600 hover:underline truncate" title="{{.URL}}">
+                                        {{if .Num}}{{compactNum (derefF .Num)}} {{.Currency}}{{else}}{{if .Text}}{{.Text}}{{else}}—{{end}}{{end}}
+                                    </a>
+                                    <span class="cmp-act shrink-0">
+                                        <button onclick="cmpPin({{.ListingID}}, {{.Pinned}})" title="{{if .Pinned}}Pinned here — click to unpin{{else}}Confirm this match{{end}}">{{if .Pinned}}📌{{else}}📍{{end}}</button>
+                                        <button onclick="cmpExclude({{.ListingID}})" title="Not this product — never match it here again">✕</button>
+                                    </span>
+                                </div>
+                                <div class="text-gray-400 truncate" title="{{.URL}}">{{.URL}}</div>
+                                {{if .Stale}}<div class="text-amber-700">⚠ not in the latest run</div>{{end}}
+                                {{if not .KeyStable}}<div class="text-amber-700" title="{{.KeyNote}}">⚠ no product id — a URL change restarts this history</div>{{end}}
+                            </div>
+                            {{end}}
                         </div>
                     </details>
                     {{end}}
+
                     <div class="text-xs text-gray-400">
-                        {{ago $cell.ObservedAt}}{{if gt $cell.Runs 1}} · {{$cell.Runs}} runs{{end}}
-                        {{if $cell.MemberID}}
-                        <span class="cmp-pin ml-1">
-                            <button onclick="cmpPin({{$cell.MemberID}}, {{$cell.Pinned}})" title="{{if $cell.Pinned}}Pinned here — click to unpin{{else}}Confirm this match{{end}}">{{if $cell.Pinned}}📌{{else}}📍{{end}}</button>
-                            <button onclick="cmpExclude({{$cell.MemberID}})" title="Not this product — never match it here again">✕</button>
+                        {{ago_t $cell.ObservedAt}}{{if and $.Tracks (gt $cell.Runs 1)}} · {{$cell.Runs}} runs{{end}}
+                        {{if and (eq $cell.Offers 1) (not $cell.KeyStable)}}
+                        <span class="text-amber-700" title="This page carries no product id, so this offer is recognised by its URL alone. If the shop changes the URL, its history restarts.">⚠</span>
+                        {{end}}
+                        {{if $cell.ListingID}}
+                        <span class="cmp-act ml-1">
+                            <button onclick="cmpPin({{$cell.ListingID}}, {{$cell.Pinned}})" title="{{if $cell.Pinned}}Pinned here — click to unpin{{else}}Confirm this match{{end}}">{{if $cell.Pinned}}📌{{else}}📍{{end}}</button>
+                            <button onclick="cmpExclude({{$cell.ListingID}})" title="Not this product — never match it here again">✕</button>
                         </span>
                         {{end}}
                     </div>
@@ -146,14 +213,20 @@
 {{if .Unmatched}}
 <div class="mt-8 border-t border-gray-100 pt-6">
     <h3 class="text-sm font-semibold text-gray-700 mb-1">Not yet matched ({{len .Unmatched}})</h3>
-    <p class="text-xs text-gray-500 mb-3">Found on one site with no confident match elsewhere. Assign it to a product, or leave it — it is retried on the next match.</p>
+    <p class="text-xs text-gray-500 mb-3">
+        Found at one shop with no confident match elsewhere, so they have no column above.
+        {{if .Tracks}}They are tracked all the same — each already has a history. Assigning one to a product moves
+        that history across with it.{{else}}Assign one to a product, or leave it — it is retried on the next match.{{end}}
+    </p>
     <div class="space-y-2">
-        {{range $i, $u := .Unmatched}}
+        {{range $u := .Unmatched}}
         <div class="flex flex-wrap items-center gap-3 p-3 border border-gray-200 rounded-lg text-sm">
             <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600">{{$u.SiteLabel}}</span>
-            <a href="{{$u.URL}}" target="_blank" rel="noopener" class="flex-1 min-w-0 truncate text-indigo-600 hover:underline">{{if $u.Title}}{{$u.Title}}{{else}}{{$u.URL}}{{end}}</a>
-            <span class="text-gray-700 font-medium">{{if $u.Num}}{{printf "%.0f" (derefF $u.Num)}} {{$u.Currency}}{{else}}{{$u.Text}}{{end}}</span>
-            <select class="set-input bg-white w-auto text-xs" data-cmp-assign="{{$i}}">
+            <a href="/listings/{{$u.ID}}?field={{$.Field}}" class="flex-1 min-w-0 truncate text-indigo-600 hover:underline"
+               title="Open this offer's history">{{if $u.Title}}{{$u.Title}}{{else}}{{$u.URL}}{{end}}</a>
+            <span class="text-gray-700 font-medium">{{if $u.Num}}{{compactNum (derefF $u.Num)}} {{$u.Currency}}{{else}}{{$u.Text}}{{end}}</span>
+            {{if and $.Tracks (gt $u.Runs 1)}}<span class="text-xs text-gray-400">{{$u.Runs}} runs</span>{{end}}
+            <select class="set-input bg-white w-auto text-xs" data-cmp-assign="{{$u.ID}}">
                 <option value="">Assign to…</option>
                 {{range $.Rows}}<option value="{{.ID}}">{{if .Label}}{{.Label}}{{else}}untitled{{end}}{{if .VariantLabel}} ({{.VariantLabel}}){{end}}</option>{{end}}
             </select>
@@ -167,8 +240,7 @@
 {{define "groupingScript"}}
 <script>
     /* Wires the shared comparison table. The page defines, before this:
-         cmpScope     {type, id}   the grouping scope shown (schedule or crawl)
-         cmpUnmatched [...]        the dashboard's unmatched rows, in render order  */
+         cmpScope {type, id}   the grouping scope shown (schedule or crawl)  */
     function cmpReload(params) {
         var url = new URL(location.href);
         Object.keys(params || {}).forEach(function (k) { url.searchParams.set(k, params[k]); });
@@ -177,46 +249,87 @@
     (function () {
         var sel = document.getElementById('cmp-field');
         if (sel) sel.addEventListener('change', function () { cmpReload({ field: this.value, page: 1 }); });
+        // A re-match reloads the page, which would throw away its own
+        // result toast; it is handed over here instead.
+        try {
+            var done = sessionStorage.getItem('cmpRegroupResult');
+            if (done) { sessionStorage.removeItem('cmpRegroupResult'); Mole.toast(done); }
+        } catch (e) {}
     })();
+    // Matching compares every offer against every other one in its brand,
+    // so on a large crawl it runs for a good few seconds. The button says
+    // so while it waits, rather than looking dead and then reloading the
+    // page out of nowhere.
+    var cmpRegroupBusy = false;
+    function cmpRegroupBusyState(on, seconds) {
+        var btn = document.getElementById('cmp-regroup');
+        var icon = document.getElementById('cmp-regroup-icon');
+        var label = document.getElementById('cmp-regroup-label');
+        if (!btn) return;
+        btn.disabled = on;
+        icon.className = on ? 'inline-block animate-spin' : '';
+        label.textContent = on ? (seconds > 2 ? 'Matching… ' + seconds + 's' : 'Matching…') : 'Re-match';
+    }
     async function cmpRegroup() {
+        if (cmpRegroupBusy) return; // a second press would queue behind the first and tell the user nothing
+        cmpRegroupBusy = true;
+        var started = Date.now();
+        cmpRegroupBusyState(true, 0);
+        var tick = setInterval(function () {
+            cmpRegroupBusyState(true, Math.round((Date.now() - started) / 1000));
+        }, 1000);
         var path = cmpScope.type === 'schedule' ? '/api/v1/schedules/' + cmpScope.id + '/regroup'
             : '/api/v1/crawls/' + cmpScope.id + '/regroup';
         try {
             var r = (await Mole.api('POST', path)).data.result || {};
             if (r.reason) { Mole.toast('Nothing grouped: ' + r.reason, false); return; }
-            Mole.toast(r.candidates + ' products in ' + r.groups + ' groups (' + r.created + ' new) from ' +
+            var summary = r.candidates + ' offers in ' + r.groups + ' products (' + r.created + ' new) from ' +
                 r.product_pages + ' pages · ' + r.observations + ' values recorded' +
-                (r.merged ? ' · ' + r.merged + ' duplicate groups merged' : '') +
-                (r.retired ? ' · ' + r.retired + ' no longer listed' : ''));
-            setTimeout(function () { location.reload(); }, 900);
-        } catch (err) { Mole.toast(err.message, false); }
+                (r.changes ? ' · ' + r.changes + ' changed' : '') +
+                (r.new_listings ? ' · ' + r.new_listings + ' new offers' : '') +
+                (r.url_changes ? ' · ' + r.url_changes + ' moved to a new URL' : '') +
+                (r.merged ? ' · ' + r.merged + ' duplicate products merged' : '') +
+                (r.retired ? ' · ' + r.retired + ' no longer listed' : '');
+            // The reload wipes the toast, so hand the result to the page
+            // that comes back instead of flashing it for a moment here.
+            try { sessionStorage.setItem('cmpRegroupResult', summary); } catch (e) {}
+            cmpRegroupBusyState(true, 0);
+            document.getElementById('cmp-regroup-label').textContent = 'Updating…';
+            location.reload();
+            return;
+        } catch (err) {
+            Mole.toast(err.message, false);
+        } finally {
+            clearInterval(tick);
+            cmpRegroupBusy = false;
+            cmpRegroupBusyState(false, 0);
+        }
     }
-    async function cmpPin(memberID, pinned) {
+    async function cmpPin(listingID, pinned) {
         try {
-            await Mole.api('POST', '/api/v1/grouping/members/' + memberID + '/' + (pinned ? 'unpin' : 'pin'));
+            await Mole.api('POST', '/api/v1/grouping/listings/' + listingID + '/' + (pinned ? 'unpin' : 'pin'));
             Mole.toast(pinned ? 'Unpinned' : 'Pinned');
             setTimeout(function () { location.reload(); }, 400);
         } catch (err) { Mole.toast(err.message, false); }
     }
-    async function cmpExclude(memberID) {
-        if (!confirm('Mark this page as not that product? It will be kept out of every group here from now on.')) return;
+    async function cmpExclude(listingID) {
+        if (!confirm('Mark this offer as not that product? It leaves the comparison and is never matched here again. Its recorded history is kept.')) return;
         try {
-            await Mole.api('POST', '/api/v1/grouping/members/' + memberID + '/exclude');
+            await Mole.api('POST', '/api/v1/grouping/listings/' + listingID + '/exclude');
             Mole.toast('Excluded');
             setTimeout(function () { location.reload(); }, 400);
         } catch (err) { Mole.toast(err.message, false); }
     }
+    /* Assigning an unmatched offer is a move: the listing already exists and
+       already has a history, so this only changes which product it is
+       compared as. */
     document.querySelectorAll('[data-cmp-assign]').forEach(function (sel) {
         sel.addEventListener('change', async function () {
-            var u = cmpUnmatched[+this.getAttribute('data-cmp-assign')], target = this.value;
-            if (!target || !u) { return; }
+            var listingID = this.getAttribute('data-cmp-assign'), target = this.value;
+            if (!target) { return; }
             try {
-                await Mole.api('POST', '/api/v1/grouping/assign', {
-                    scope_type: cmpScope.type, scope_id: cmpScope.id, product_group_id: target,
-                    crawl_job_id: u.crawl_job_id, page_id: u.page_id, site_key: u.site_key,
-                    site_label: u.site_label, url: u.url, variant_key: u.variant_key
-                });
-                Mole.toast('Assigned');
+                await Mole.api('POST', '/api/v1/grouping/listings/' + listingID + '/move', { product_group_id: target });
+                Mole.toast('Assigned, with its history');
                 setTimeout(function () { location.reload(); }, 400);
             } catch (err) { Mole.toast(err.message, false); this.value = ''; }
         });

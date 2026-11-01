@@ -51,7 +51,7 @@ func TestSeedDomainsAreInScope(t *testing.T) {
 		},
 	}
 	r := &Run{job: job, urlCleaner: cleaner, rs: &RunSettings{}}
-	r.seedDomains = seedDomainsOf(cleaner, job)
+	r.setSeedDomains(seedDomainsOf(cleaner, job), "")
 
 	for _, link := range []string{"https://shop-a.ir/p/9", "https://shop-b.com/p/3", "https://m.shop-c.ir/p/2"} {
 		if !r.inScope(link) {
@@ -61,7 +61,7 @@ func TestSeedDomainsAreInScope(t *testing.T) {
 	if r.inScope("https://unrelated.com/p/1") {
 		t.Error("a site that is not a start URL should stay out of scope")
 	}
-	if r.seedDomains["shop-a.ir"] {
+	if r.inSeedDomain("shop-a.ir") {
 		t.Error("the job's own domain does not need to be repeated in seedDomains")
 	}
 }

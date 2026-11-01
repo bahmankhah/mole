@@ -47,6 +47,15 @@ type GroupingConfig struct {
 	MaxProductGroupsPerJobGroup int      `yaml:"max_product_groups_per_job_group"` // distinct products/variants tracked per crawl or schedule, a safety cap
 	DefaultCompareFields        []string `yaml:"default_compare_fields,omitempty"` // fields recorded per run when a group names none; empty = price, regular_price, availability
 	ExtraStopWords              []string `yaml:"extra_stop_words,omitempty"`       // marketing words stripped before fuzzy name matching, beyond the built-in list
+
+	// Tracking history. A schedule records a value per listing per field
+	// per run, so a daily crawl over a large catalogue grows without
+	// bound. Raw rows older than ObservationRetentionDays are folded into
+	// one open/close/low/high row per day, which is what a long-range
+	// chart draws anyway; those are kept for HistoryRetentionDays. Zero
+	// turns the respective step off and keeps everything.
+	ObservationRetentionDays int `yaml:"observation_retention_days"` // raw per-run rows; 0 = never compact
+	HistoryRetentionDays     int `yaml:"history_retention_days"`     // rolled-up days and change events; 0 = keep for good
 }
 
 // DocumentsConfig controls how PDF and DOCX responses are converted to text.
@@ -94,6 +103,17 @@ type WorkerConfig struct {
 	LeaseTTL           time.Duration `yaml:"lease_ttl"`             // a running job whose lease expires is requeued
 	PollInterval       time.Duration `yaml:"poll_interval"`
 	Browser            *bool         `yaml:"browser,omitempty"` // headless browser on this worker; empty = detect at start
+	// DisableJobHelp stops this worker from joining crawls another worker is
+	// already running, even when it has nothing else to do.
+	DisableJobHelp bool `yaml:"disable_job_help,omitempty"`
+	// MaxHelpersPerJob caps how many extra workers may pull from one crawl's
+	// frontier at the same time, so a single crawl cannot occupy the whole
+	// cluster. 0 = no cap.
+	MaxHelpersPerJob int `yaml:"max_helpers_per_job"`
+	// MinPendingToHelp is how many URLs must be queued on a crawl before an
+	// idle worker joins it. Below this the crawl is close enough to done
+	// that another worker would only churn.
+	MinPendingToHelp int `yaml:"min_pending_to_help"`
 }
 
 // ClusterConfig controls how other machines join this engine as workers
@@ -529,6 +549,8 @@ func DefaultConfig() *Config {
 			MaxRunningPerOwner: 2,
 			LeaseTTL:           60 * time.Second,
 			PollInterval:       2 * time.Second,
+			MaxHelpersPerJob:   3,
+			MinPendingToHelp:   50,
 		},
 		Security: SecurityConfig{
 			MaxBodyBytes: 10 * 1024 * 1024,
@@ -572,6 +594,8 @@ func DefaultConfig() *Config {
 			DefaultThreshold:            0.72,
 			DefaultGroupByVariant:       true,
 			MaxProductGroupsPerJobGroup: 5000,
+			ObservationRetentionDays:    90,
+			HistoryRetentionDays:        0,
 		},
 	}
 }

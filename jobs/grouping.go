@@ -163,10 +163,31 @@ type pageSource struct {
 type candidate struct {
 	jobID, siteKey, siteLabel, url string
 	pageID                         uint
-	name, brand, gtin, mpn         string
+	name, brand, gtin, mpn, sku    string
 	variantKey, variantLabel       string
 	fields                         map[string]content.FieldValue
 	tokens                         []string
+	// Listing identity: which offer at this shop this row is, independent
+	// of the URL it was found at. fallbackHashes are the weaker identities
+	// the same offer would have been filed under before this page carried
+	// a strong id, so an existing listing can be adopted and upgraded.
+	listingKey, listingHash, keyMethod string
+	fallbackHashes                     []string
+}
+
+// listingIdentity derives this row's listing key and hash. Called once per
+// row per pass, before matching, because a listing's stored pinned /
+// excluded decision and its current group are inputs to matching.
+func (c *candidate) listingIdentity() {
+	primary := listingKeyFor(c.siteKey, c.url, c.sku, c.gtin, c.brand, c.mpn, c.variantKey)
+	c.listingKey, c.keyMethod = primary.key, primary.method
+	c.listingHash = listingHash(primary.key)
+	c.fallbackHashes = nil
+	for _, alt := range listingFallbackKeys(c.siteKey, c.url, c.variantKey) {
+		if h := listingHash(alt.key); h != c.listingHash {
+			c.fallbackHashes = append(c.fallbackHashes, h)
+		}
+	}
 }
 
 // exactKey is the strongest stable identity a candidate carries: a GTIN
@@ -193,7 +214,7 @@ func (c *candidate) title() string {
 func candidatesFromProduct(src pageSource, p *content.Product, extracted []byte, plan groupPlan) []candidate {
 	base := candidate{
 		jobID: src.jobID, siteKey: src.siteKey, siteLabel: src.siteLabel, url: src.url, pageID: src.pageID,
-		name: p.Name, brand: p.Brand, gtin: p.GTIN, mpn: p.MPN,
+		name: p.Name, brand: p.Brand, gtin: p.GTIN, mpn: p.MPN, sku: p.SKU,
 	}
 	if !plan.byVariant || len(p.Variants) == 0 {
 		base.tokens = nameTokens(base.name, base.brand, plan.extraStop)
@@ -215,6 +236,12 @@ func candidatesFromProduct(src pageSource, p *content.Product, extracted []byte,
 			c.gtin, c.mpn = v.GTIN, "" // the variant's own barcode identifies it precisely
 		case v.MPN != "":
 			c.mpn = v.MPN
+		}
+		// A variant's own SKU identifies that variant's listing; without
+		// one, the page's SKU plus the variant key still does, since the
+		// key is suffixed with the variant.
+		if v.SKU != "" {
+			c.sku = v.SKU
 		}
 		c.tokens = nameTokens(strings.TrimSpace(base.name+" "+v.Name), base.brand, plan.extraStop)
 		c.fields = compareValues(p, v, extracted, plan.compareFields)
@@ -349,6 +376,35 @@ func ScopeForJob(job *models.CrawlJob) (scopeType, scopeID string, grouped bool)
 	return models.ScopeCrawl, job.ID, true
 }
 
+// ResolveGroupingScope accepts either a schedule id or a crawl id and
+// returns the grouping scope it belongs to, so a caller can name whichever
+// it has to hand. A scheduled crawl resolves to its schedule, whose table
+// spans every run.
+//
+// The lookups use Find rather than First: an id that is not a schedule is
+// the ordinary case here, and First would log every one as an error.
+func (m *Manager) ResolveGroupingScope(id string) (scopeType, scopeID string, err error) {
+	var schedules []models.Schedule
+	if err := m.db.Select("id").Where("id = ?", id).Limit(1).Find(&schedules).Error; err != nil {
+		return "", "", err
+	}
+	if len(schedules) > 0 {
+		return models.ScopeSchedule, id, nil
+	}
+	var crawls []models.CrawlJob
+	if err := m.db.Select("id", "settings", "schedule_id").Where("id = ?", id).Limit(1).Find(&crawls).Error; err != nil {
+		return "", "", err
+	}
+	if len(crawls) == 0 {
+		return "", "", fmt.Errorf("%w: no schedule or crawl with id %s", ErrNotFound, id)
+	}
+	st, sid, grouped := ScopeForJob(&crawls[0])
+	if !grouped {
+		return "", "", invalidState(`this crawl does not group its products; set "group_products" in its settings`)
+	}
+	return st, sid, nil
+}
+
 // Regroup matches a scope's latest finished crawl(s) into ProductGroups and
 // records a FieldObservation per compared field. Safe to call repeatedly:
 // existing groups are found again by CanonicalKey and reused, not
@@ -362,8 +418,7 @@ func (m *Manager) Regroup(scopeType, scopeID string, opts RegroupOptions) (Regro
 	// the same instant, or a re-match pressed while the automatic pass is
 	// running, would otherwise each see no existing group and create their
 	// own copy of it.
-	sum := sha1.Sum([]byte(scopeType + "/" + scopeID))
-	acquired, err := database.WithLock(m.db, "mole:regroup:"+hex.EncodeToString(sum[:8]), regroupLockWait, func() error {
+	acquired, err := database.WithLock(m.db, scopeLockName(scopeType, scopeID), regroupLockWait, func() error {
 		var err error
 		res, err = m.regroupLocked(scopeType, scopeID, opts)
 		return err
@@ -408,10 +463,29 @@ func (m *Manager) regroupLocked(scopeType, scopeID string, opts RegroupOptions) 
 		res.Reason = noCandidateReason(stats)
 		return res, nil
 	}
-	overrides, err := m.loadMemberOverrides(scope)
+	// Listing identity comes first: which offer at which shop each row is.
+	// A listing carries the human decisions made on it and the group it is
+	// currently believed to belong to, and both are inputs to matching, so
+	// it has to be resolved before matching rather than written after it.
+	sortCandidates(rows)
+	known, err := m.loadListings(scope)
 	if err != nil {
 		return res, err
 	}
+	rowListing := make([]*models.Listing, len(rows))
+	fresh, moved := map[string]bool{}, map[uint]bool{}
+	for i := range rows {
+		rows[i].listingIdentity()
+		rowListing[i] = resolveKnownListing(known, rows[i])
+		switch {
+		case rowListing[i] == nil:
+			fresh[rows[i].listingHash] = true
+		case rowListing[i].URL != rows[i].url && !moved[rowListing[i].ID]:
+			moved[rowListing[i].ID] = true
+		}
+	}
+	res.NewListings, res.URLChanges = len(fresh), len(moved)
+
 	byKey, fuzzyExisting, err := m.loadExistingGroups(plan)
 	if err != nil {
 		return res, err
@@ -423,21 +497,56 @@ func (m *Manager) regroupLocked(scopeType, scopeID string, opts RegroupOptions) 
 		live[i] = true
 	}
 
-	// Pinned/excluded overrides, keyed by (site, url, variant) since page
-	// ids are not stable across reruns.
-	for i, r := range rows {
-		ov, ok := overrides[overrideKey(r.siteKey, r.url, r.variantKey)]
-		if !ok {
+	// Human decisions, read off the listing. Keyed this way they survive a
+	// URL change, which is exactly what used to lose them.
+	//
+	// seenExcluded are offers the crawl did find but a human has excluded.
+	// They take no further part in matching, but the sweep below must not
+	// read their absence from it as the shop having delisted them.
+	var seenExcluded []uint
+	for i := range rows {
+		l := rowListing[i]
+		if l == nil {
 			continue
 		}
-		if ov.Excluded {
+		if l.Excluded {
 			live[i] = false
+			seenExcluded = append(seenExcluded, l.ID)
 			continue
 		}
-		if ov.Pinned {
-			if _, exists := byKey.byID[ov.ProductGroupID]; exists {
-				ms.union(rowNode(i), existingNode(ov.ProductGroupID))
+		if l.Pinned && l.ProductGroupID != "" {
+			if _, exists := byKey.byID[l.ProductGroupID]; exists {
+				ms.union(rowNode(i), existingNode(l.ProductGroupID))
 				ms.note(i, models.MatchByManual, 1)
+			}
+		}
+	}
+
+	// A listing already placed in a group stays there when nothing stronger
+	// decides otherwise. Without this, a listing whose title drifted below
+	// the fuzzy threshold would be torn out of its group on the next run
+	// and start a second history for the same offer. Rows carrying an exact
+	// key are left out: exact matching places them, and is more reliable
+	// than this continuity.
+	if plan.matchMode != models.MatchModeManual {
+		for i := range rows {
+			l := rowListing[i]
+			if l == nil || !live[i] || l.ProductGroupID == "" {
+				continue
+			}
+			if key, _ := rows[i].exactKey(); key != "" {
+				continue
+			}
+			if _, exists := byKey.byID[l.ProductGroupID]; !exists {
+				continue
+			}
+			ms.union(rowNode(i), existingNode(l.ProductGroupID))
+			if _, noted := ms.info[i]; !noted {
+				method := l.MatchMethod
+				if method == "" {
+					method = models.MatchByFuzzy
+				}
+				ms.note(i, method, l.Confidence)
 			}
 		}
 	}
@@ -524,12 +633,12 @@ func (m *Manager) regroupLocked(scopeType, scopeID string, opts RegroupOptions) 
 
 	// A complete pass re-read every site of the scope, so whatever it did
 	// not find again is gone and can be retired.
-	saved, err := m.saveRegroupResult(plan, rows, live, ms, sweep{run: !opts.Partial})
+	saved, err := m.saveRegroupResult(plan, rows, live, ms, sweep{run: !opts.Partial}, seenExcluded)
 	if err != nil {
 		return res, err
 	}
 	res.Created, res.Groups, res.Observations = saved.created, saved.groups, saved.observations
-	res.Merged, res.Retired = saved.merged, saved.retired
+	res.Merged, res.Retired, res.Changes = saved.merged, saved.retired, saved.changes
 	for _, alive := range live {
 		if !alive {
 			res.Excluded++
@@ -561,7 +670,10 @@ type RegroupResult struct {
 	Observations int      `json:"observations"`  // field values recorded
 	Excluded     int      `json:"excluded"`      // candidates you excluded by hand
 	Merged       int      `json:"merged"`        // groups folded into another, found to be the same product
-	Retired      int      `json:"retired"`       // members no longer found, now marked stale
+	Retired      int      `json:"retired"`       // listings no longer found, now marked stale
+	NewListings  int      `json:"new_listings"`  // offers seen here for the first time
+	URLChanges   int      `json:"url_changes"`   // listings whose shop moved them to a new URL
+	Changes      int      `json:"changes"`       // tracked values that moved since the previous run
 	Fields       []string `json:"fields"`
 	Reason       string   `json:"reason,omitempty"` // why nothing came of it
 	Locked       bool     `json:"locked,omitempty"` // another pass on this scope was already running
@@ -586,10 +698,6 @@ func scopedCanonicalKey(key, variantKey string) string {
 		return key
 	}
 	return key + "#" + variantKey
-}
-
-func overrideKey(siteKey, url, variantKey string) string {
-	return siteKey + "\x00" + url + "\x00" + variantKey
 }
 
 // siteJob is one finished crawl whose pages a scope compares. When
@@ -693,26 +801,57 @@ func (m *Manager) loadCandidates(plan groupPlan, sources []siteJob) ([]candidate
 	return out, stats, nil
 }
 
-// memberOverride is the human decision carried forward from a page's
-// previous ProductGroupMember row, found by (site, url, variant) since page
-// ids are not stable across reruns.
-type memberOverride struct {
-	ProductGroupID string
-	Pinned         bool
-	Excluded       bool
-}
-
-func (m *Manager) loadMemberOverrides(scope groupScope) (map[string]memberOverride, error) {
-	var members []models.ProductGroupMember
-	if err := m.db.Where("scope_type = ? AND scope_id = ? AND (pinned = ? OR excluded = ?)",
-		scope.Type, scope.ID, true, true).Find(&members).Error; err != nil {
+// loadListings indexes every listing a scope already knows by its
+// identity hash, so this pass can recognise each row as an offer it has
+// seen before — with its history, its group and the decisions made on it —
+// rather than as a new page at a new URL.
+func (m *Manager) loadListings(scope groupScope) (map[string]*models.Listing, error) {
+	var listings []models.Listing
+	if err := m.db.Where("scope_type = ? AND scope_id = ?", scope.Type, scope.ID).Find(&listings).Error; err != nil {
 		return nil, err
 	}
-	out := make(map[string]memberOverride, len(members))
-	for _, mem := range members {
-		out[overrideKey(mem.SiteKey, mem.URL, mem.VariantKey)] = memberOverride{mem.ProductGroupID, mem.Pinned, mem.Excluded}
+	out := make(map[string]*models.Listing, len(listings))
+	for i := range listings {
+		out[listings[i].ListingHash] = &listings[i]
 	}
 	return out, nil
+}
+
+// resolveKnownListing finds the listing a row belongs to among the ones
+// this scope already knows, trying the row's strong identity first and
+// then the weaker ones it would have been filed under before — the same
+// order findListing uses when writing, so matching and saving agree on
+// which offer a row is.
+func resolveKnownListing(known map[string]*models.Listing, r candidate) *models.Listing {
+	if l := known[r.listingHash]; l != nil {
+		return l
+	}
+	for _, hash := range r.fallbackHashes {
+		if l := known[hash]; l != nil {
+			return l
+		}
+	}
+	return nil
+}
+
+// sortCandidates puts a pass's rows in a stable order, so that a rerun
+// over the same pages makes the same decisions: which row represents a
+// new group, and which page's URL a listing reached by several URLs
+// records. Without it both followed whatever order the database returned.
+func sortCandidates(rows []candidate) {
+	sort.Slice(rows, func(a, b int) bool {
+		x, y := rows[a], rows[b]
+		if x.siteKey != y.siteKey {
+			return x.siteKey < y.siteKey
+		}
+		if x.variantKey != y.variantKey {
+			return x.variantKey < y.variantKey
+		}
+		if x.url != y.url {
+			return x.url < y.url
+		}
+		return x.pageID < y.pageID
+	})
 }
 
 // existingIndex is a scope's ProductGroups, indexed for matching.
@@ -750,7 +889,7 @@ func (m *Manager) loadExistingGroups(plan groupPlan) (existingIndex, []fuzzyGrou
 // saveRegroupResult writes the matched ProductGroups, their members and a
 // FieldObservation per compared field, from the union-find components.
 // saveCounts is what one save pass wrote.
-type saveCounts struct{ created, groups, observations, merged, retired int }
+type saveCounts struct{ created, groups, observations, merged, retired, changes int }
 
 // sweep says whether this pass may retire the members it did not find
 // again. Only a complete pass may: a partial one (made while the crawl is
@@ -760,7 +899,7 @@ type sweep struct {
 	run bool
 }
 
-func (m *Manager) saveRegroupResult(plan groupPlan, rows []candidate, live []bool, ms *matchSet, sw sweep) (saveCounts, error) {
+func (m *Manager) saveRegroupResult(plan groupPlan, rows []candidate, live []bool, ms *matchSet, sw sweep, seenExcluded []uint) (saveCounts, error) {
 	var counts saveCounts
 	components := map[string][]int{}
 	for i := range rows {
@@ -794,14 +933,13 @@ func (m *Manager) saveRegroupResult(plan groupPlan, rows []candidate, live []boo
 			case strings.HasPrefix(root, "existing:"):
 				productGroupID = strings.TrimPrefix(root, "existing:")
 			case len(idxs) == 1 && !singletonsAllowed:
-				// exact_only/manual: nothing was matched for it, but its
-				// values are still recorded (with no group) so the
-				// dashboard can offer it for assignment by hand.
-				n, err := m.recordObservations(tx, plan, "", rows, idxs, now)
-				if err != nil {
+				// exact_only/manual: nothing was matched for it. It is
+				// still a listing, and still tracked — it just has no
+				// group yet, so the dashboard can offer it for
+				// assignment by hand with its history already attached.
+				if err := m.saveRows(tx, plan, "", rows, idxs, ms, now, &counts); err != nil {
 					return err
 				}
-				counts.observations += n
 				continue
 			default:
 				if created >= maxGroups {
@@ -816,20 +954,24 @@ func (m *Manager) saveRegroupResult(plan groupPlan, rows []candidate, live []boo
 				}
 				productGroupID = pg.ID
 			}
-			if err := m.replaceMembers(tx, plan, productGroupID, rows, idxs, ms, now); err != nil {
+			if err := m.saveRows(tx, plan, productGroupID, rows, idxs, ms, now, &counts); err != nil {
 				return err
 			}
-			n, err := m.recordObservations(tx, plan, productGroupID, rows, idxs, now)
-			if err != nil {
-				return err
-			}
-			counts.observations += n
 			counts.groups++
 			if err := m.refreshProductGroupStats(tx, productGroupID, plan.primaryField()); err != nil {
 				return err
 			}
 		}
-		retired, err := m.retireUnseenMembers(tx, plan, sw, now)
+		// An excluded offer the crawl still found is present, just not
+		// compared. Touching it here keeps the sweep from reporting it as
+		// delisted on the strength of a decision the user made.
+		if len(seenExcluded) > 0 {
+			if err := tx.Model(&models.Listing{}).Where("id IN ?", seenExcluded).
+				Updates(map[string]interface{}{"last_seen_at": now, "stale": false}).Error; err != nil {
+				return err
+			}
+		}
+		retired, err := m.retireUnseenListings(tx, plan, sw, now)
 		if err != nil {
 			return err
 		}
@@ -862,7 +1004,13 @@ func (m *Manager) mergeAbsorbedGroups(tx *gorm.DB, plan groupPlan, ms *matchSet)
 	for root, absorbed := range byRoot {
 		sort.Strings(absorbed) // deterministic order, so a retry does the same thing
 		for _, id := range absorbed {
-			for _, model := range []interface{}{&models.ProductGroupMember{}, &models.FieldObservation{}} {
+			// Everything that names the absorbed group follows the fold,
+			// so a merge never splits a listing's series or leaves a
+			// rolled-up day or a change event pointing at a dead group.
+			for _, model := range []interface{}{
+				&models.Listing{}, &models.FieldObservation{},
+				&models.FieldObservationDay{}, &models.ListingChange{},
+			} {
 				if err := tx.Model(model).Where("product_group_id = ?", id).Update("product_group_id", root).Error; err != nil {
 					return folded, err
 				}
@@ -873,66 +1021,20 @@ func (m *Manager) mergeAbsorbedGroups(tx *gorm.DB, plan groupPlan, ms *matchSet)
 			}
 			folded++
 		}
-		if err := dedupeMembers(tx, root); err != nil {
-			return folded, err
-		}
 	}
 	return folded, nil
 }
 
-// dedupeMembers collapses members of one group that describe the same page
-// of the same site — which a merge can produce, when both groups held it —
-// keeping the oldest row and the decisions made on any of them.
-func dedupeMembers(tx *gorm.DB, productGroupID string) error {
-	var members []models.ProductGroupMember
-	if err := tx.Where("product_group_id = ?", productGroupID).Order("id ASC").Find(&members).Error; err != nil {
-		return err
-	}
-	keep := map[string]*models.ProductGroupMember{}
-	var drop []uint
-	for i := range members {
-		mem := members[i]
-		k := overrideKey(mem.SiteKey, mem.URL, mem.VariantKey)
-		first, seen := keep[k]
-		if !seen {
-			keep[k] = &members[i]
-			continue
-		}
-		drop = append(drop, mem.ID)
-		updates := map[string]interface{}{}
-		if mem.Pinned && !first.Pinned {
-			first.Pinned, updates["pinned"] = true, true
-		}
-		if mem.Excluded && !first.Excluded {
-			first.Excluded, updates["excluded"] = true, true
-		}
-		if !mem.Stale && first.Stale {
-			first.Stale, updates["stale"] = false, false
-		}
-		if mem.LastSeenAt.After(first.LastSeenAt) {
-			first.LastSeenAt, updates["last_seen_at"] = mem.LastSeenAt, mem.LastSeenAt
-		}
-		if len(updates) > 0 {
-			if err := tx.Model(&models.ProductGroupMember{}).Where("id = ?", first.ID).Updates(updates).Error; err != nil {
-				return err
-			}
-		}
-	}
-	if len(drop) == 0 {
-		return nil
-	}
-	return tx.Where("id IN ?", drop).Delete(&models.ProductGroupMember{}).Error
-}
-
-// retireUnseenMembers marks the members a complete pass did not find again
-// as stale and refreshes the summary of every group that lost one, so a
-// delisted product stops being quoted as a live offer. Their rows, history
-// and pinned/excluded decisions are kept.
-func (m *Manager) retireUnseenMembers(tx *gorm.DB, plan groupPlan, sw sweep, now time.Time) (int, error) {
+// retireUnseenListings marks the listings a complete pass did not find
+// again as stale and refreshes the summary of every group that lost one,
+// so a delisted product stops being quoted as a live offer. The rows,
+// their history and their pinned/excluded decisions are all kept: a
+// listing that comes back is the same listing, with its series intact.
+func (m *Manager) retireUnseenListings(tx *gorm.DB, plan groupPlan, sw sweep, now time.Time) (int, error) {
 	if !sw.run {
 		return 0, nil
 	}
-	var unseen []models.ProductGroupMember
+	var unseen []models.Listing
 	if err := tx.Where("scope_type = ? AND scope_id = ? AND stale = ? AND last_seen_at < ?",
 		plan.scope.Type, plan.scope.ID, false, now).Find(&unseen).Error; err != nil {
 		return 0, err
@@ -942,14 +1044,17 @@ func (m *Manager) retireUnseenMembers(tx *gorm.DB, plan groupPlan, sw sweep, now
 	}
 	ids := make([]uint, 0, len(unseen))
 	groups := map[string]bool{}
-	for _, mem := range unseen {
-		ids = append(ids, mem.ID)
-		groups[mem.ProductGroupID] = true
+	for _, l := range unseen {
+		ids = append(ids, l.ID)
+		groups[l.ProductGroupID] = true
 	}
-	if err := tx.Model(&models.ProductGroupMember{}).Where("id IN ?", ids).Update("stale", true).Error; err != nil {
+	if err := tx.Model(&models.Listing{}).Where("id IN ?", ids).Update("stale", true).Error; err != nil {
 		return 0, err
 	}
 	for id := range groups {
+		if id == "" {
+			continue // an ungrouped listing has no summary to refresh
+		}
 		if err := m.refreshProductGroupStats(tx, id, plan.primaryField()); err != nil {
 			return 0, err
 		}
@@ -974,6 +1079,12 @@ func (m *Manager) createProductGroup(tx *gorm.DB, plan groupPlan, rows []candida
 	if key == "" {
 		key = "fuzzy:" + fuzzyDigest(rep.tokens)
 	}
+	// Distinct listings, which is what the group will hold — not rows,
+	// since two pages of one shop can be one listing.
+	hashes := map[string]bool{}
+	for _, i := range idxs {
+		hashes[rows[i].listingHash] = true
+	}
 	if bestMethod == "" {
 		bestMethod = models.MatchByFuzzy
 	}
@@ -987,6 +1098,7 @@ func (m *Manager) createProductGroup(tx *gorm.DB, plan groupPlan, rows []candida
 		CanonicalKey: scopedCanonicalKey(key, rep.variantKey),
 		MatchMethod:  bestMethod,
 		Confidence:   bestConf,
+		ListingCount: len(hashes),
 	}
 	if err := tx.Create(pg).Error; err != nil {
 		return nil, err
@@ -1016,168 +1128,261 @@ func fuzzyDigest(tokens []string) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// replaceMembers rewrites the membership of the sites in idxs, keeping one
-// current row per (site, url, variant). Pages the user excluded never
-// reach here: they are dropped before components are formed, so their
-// override row survives untouched.
-func (m *Manager) replaceMembers(tx *gorm.DB, plan groupPlan, productGroupID string, rows []candidate, idxs []int, ms *matchSet, now time.Time) error {
+// saveRows writes one component's listings and their observations. The
+// listing is upserted by identity, so an offer the shop moved to a new URL
+// keeps its row, its whole history and the decisions made on it; then this
+// run's value of every compared field is recorded against it.
+func (m *Manager) saveRows(tx *gorm.DB, plan groupPlan, productGroupID string, rows []candidate, idxs []int, ms *matchSet, now time.Time, counts *saveCounts) error {
+	// Several pages of one shop can resolve to one listing (the same offer
+	// reached by two URLs). The first in sorted order is the one whose URL
+	// and page the listing records; the rest only confirm it is still there.
+	seen := map[string]bool{}
 	for _, i := range idxs {
 		r := rows[i]
-		info := ms.info[i]
-
-		// This variant moved group: drop its stale row elsewhere in the
-		// scope. Other variants of the same page keep their own rows,
-		// because the match is scoped by variant_key too.
-		if err := tx.Where("scope_type = ? AND scope_id = ? AND site_key = ? AND url = ? AND variant_key = ? AND product_group_id <> ?",
-			plan.scope.Type, plan.scope.ID, r.siteKey, r.url, r.variantKey, productGroupID).
-			Delete(&models.ProductGroupMember{}).Error; err != nil {
+		l, err := m.upsertListing(tx, plan, productGroupID, r, ms.info[i], now, seen[r.listingHash])
+		if err != nil {
 			return err
 		}
-
-		// Not finding a row is the ordinary case here, so this uses Find
-		// rather than First, which would log every miss as an error.
-		var found []models.ProductGroupMember
-		if err := tx.Where("product_group_id = ? AND site_key = ? AND url = ? AND variant_key = ?",
-			productGroupID, r.siteKey, r.url, r.variantKey).Limit(1).Find(&found).Error; err != nil {
+		seen[r.listingHash] = true
+		written, changed, err := m.recordObservations(tx, plan, l, r, now)
+		if err != nil {
 			return err
 		}
-		if len(found) > 0 {
-			existing := found[0]
-			if err := tx.Model(&models.ProductGroupMember{}).Where("id = ?", existing.ID).Updates(map[string]interface{}{
-				"crawl_job_id": r.jobID, "page_id": r.pageID, "match_method": info.method, "confidence": info.confidence,
-				"stale": false, "last_seen_at": now,
-			}).Error; err != nil {
-				return err
-			}
-			continue
-		}
-		member := models.ProductGroupMember{
-			ProductGroupID: productGroupID,
-			ScopeType:      plan.scope.Type,
-			ScopeID:        plan.scope.ID,
-			SiteKey:        r.siteKey,
-			SiteLabel:      r.siteLabel,
-			CrawlJobID:     r.jobID,
-			PageID:         r.pageID,
-			URL:            r.url,
-			VariantKey:     r.variantKey,
-			MatchMethod:    info.method,
-			Confidence:     info.confidence,
-			LastSeenAt:     now,
-		}
-		if err := tx.Create(&member).Error; err != nil {
-			return err
-		}
+		counts.observations += written
+		counts.changes += changed
 	}
 	return nil
 }
 
-// recordObservations appends this run's value of every compared field for
-// each row: the time series behind the comparison table and its history.
-func (m *Manager) recordObservations(tx *gorm.DB, plan groupPlan, productGroupID string, rows []candidate, idxs []int, now time.Time) (int, error) {
-	written := 0
-	for _, i := range idxs {
-		r := rows[i]
-		for _, field := range plan.compareFields {
-			val, ok := r.fields[field]
-			if !ok || (val.Num == nil && val.Text == "") {
-				continue
-			}
-			// One observation per (run, page, variant, field). Matching
-			// may run several times over the same run — automatically when
-			// the crawl ends, again on "Re-match", and during the crawl
-			// while it fills in — and every pass must update that run's
-			// value, never append a second point to the history.
-			var existing []models.FieldObservation
-			if err := tx.Where("crawl_job_id = ? AND page_id = ? AND variant_key = ? AND field = ?",
-				r.jobID, r.pageID, r.variantKey, field).Limit(1).Find(&existing).Error; err != nil {
-				return 0, err
-			}
-			if len(existing) > 0 {
-				if err := tx.Model(&models.FieldObservation{}).Where("id = ?", existing[0].ID).Updates(map[string]interface{}{
-					"product_group_id": productGroupID, "site_key": r.siteKey, "site_label": r.siteLabel,
-					"title": r.title(), "num_value": val.Num, "text_value": val.Text, "currency": val.Currency, "url": r.url,
-				}).Error; err != nil {
-					return 0, err
+// maxPreviousURLs bounds the URL trail kept on a listing, so a shop that
+// rewrites its slugs every week cannot grow one row without end.
+const maxPreviousURLs = 10
+
+// upsertListing finds this row's listing by identity and brings it up to
+// date, or creates it. Identity is deliberately not the URL: when a shop
+// moves an offer, the URL is what changes and the listing is what stays,
+// so the old URL is filed in PreviousURLs and everything else carries on.
+//
+// A pinned listing keeps the group a human put it in; otherwise this
+// pass's match decides. repeat says another row of this pass already
+// claimed this listing, in which case the URL and page are left alone.
+func (m *Manager) upsertListing(tx *gorm.DB, plan groupPlan, productGroupID string, r candidate, info matchInfo, now time.Time, repeat bool) (*models.Listing, error) {
+	l, err := m.findListing(tx, plan, r)
+	if err != nil {
+		return nil, err
+	}
+	if l != nil {
+		updates := map[string]interface{}{
+			"stale": false, "last_seen_at": now, "crawl_job_id": r.jobID,
+			"site_label": r.siteLabel,
+		}
+		if l.ListingHash != r.listingHash {
+			// Adopted by a weaker key and now carrying a stronger one:
+			// upgrade the identity in place, so the series continues.
+			updates["listing_hash"] = r.listingHash
+			l.ListingHash = r.listingHash
+		}
+		if l.ListingKey != r.listingKey || l.KeyMethod != r.keyMethod {
+			updates["listing_key"], updates["key_method"] = r.listingKey, r.keyMethod
+			l.ListingKey, l.KeyMethod = r.listingKey, r.keyMethod
+		}
+		if l.CrawlJobID != r.jobID {
+			updates["runs"] = l.Runs + 1
+			l.Runs++
+		}
+		if !l.Pinned {
+			updates["product_group_id"] = productGroupID
+			updates["match_method"] = info.method
+			updates["confidence"] = info.confidence
+			l.ProductGroupID, l.MatchMethod, l.Confidence = productGroupID, info.method, info.confidence
+		}
+		if !repeat {
+			updates["page_id"], updates["title"] = r.pageID, r.title()
+			l.PageID, l.Title = r.pageID, r.title()
+			if l.URL != r.url {
+				trail := append([]string(l.PreviousURLs), l.URL)
+				if len(trail) > maxPreviousURLs {
+					trail = trail[len(trail)-maxPreviousURLs:]
 				}
-				written++
-				continue
+				updates["url"], updates["previous_urls"] = r.url, models.StringSlice(trail)
+				l.URL, l.PreviousURLs = r.url, trail
 			}
-			obs := models.FieldObservation{
-				ScopeType:      plan.scope.Type,
-				ScopeID:        plan.scope.ID,
-				ProductGroupID: productGroupID,
-				Field:          field,
-				CrawlJobID:     r.jobID,
-				PageID:         r.pageID,
-				SiteKey:        r.siteKey,
-				SiteLabel:      r.siteLabel,
-				VariantKey:     r.variantKey,
-				Title:          r.title(),
-				NumValue:       val.Num,
-				TextValue:      val.Text,
-				Currency:       val.Currency,
-				URL:            r.url,
-				ObservedAt:     now,
-			}
-			if err := tx.Create(&obs).Error; err != nil {
-				return 0, err
-			}
-			written++
+		}
+		l.Stale, l.LastSeenAt, l.CrawlJobID = false, now, r.jobID
+		if err := tx.Model(&models.Listing{}).Where("id = ?", l.ID).Updates(updates).Error; err != nil {
+			return nil, err
+		}
+		return l, nil
+	}
+	fresh := &models.Listing{
+		ScopeType: plan.scope.Type, ScopeID: plan.scope.ID,
+		ListingKey: r.listingKey, ListingHash: r.listingHash, KeyMethod: r.keyMethod,
+		SiteKey: r.siteKey, SiteLabel: r.siteLabel, VariantKey: r.variantKey, Title: r.title(),
+		URL: r.url, ProductGroupID: productGroupID,
+		MatchMethod: info.method, Confidence: info.confidence,
+		CrawlJobID: r.jobID, PageID: r.pageID, Runs: 1,
+		FirstSeenAt: now, LastSeenAt: now,
+	}
+	if err := tx.Create(fresh).Error; err != nil {
+		return nil, err
+	}
+	return fresh, nil
+}
+
+// findListing resolves a row to the listing it belongs to: by its strong
+// identity, else by the weaker identities the same offer would have been
+// filed under before the page carried a strong id. Not finding a row is
+// the ordinary case for a new offer, so these use Find rather than First,
+// which would log every miss as an error.
+func (m *Manager) findListing(tx *gorm.DB, plan groupPlan, r candidate) (*models.Listing, error) {
+	for _, hash := range append([]string{r.listingHash}, r.fallbackHashes...) {
+		var found []models.Listing
+		if err := tx.Where("scope_type = ? AND scope_id = ? AND listing_hash = ?",
+			plan.scope.Type, plan.scope.ID, hash).Limit(1).Find(&found).Error; err != nil {
+			return nil, err
+		}
+		if len(found) > 0 {
+			return &found[0], nil
 		}
 	}
-	return written, nil
+	return nil, nil
+}
+
+// recordObservations appends this run's value of every compared field to
+// the listing's series — the time series behind both the comparison table
+// and the per-listing history chart — and records a ListingChange wherever
+// a value actually moved since the listing's previous run.
+func (m *Manager) recordObservations(tx *gorm.DB, plan groupPlan, l *models.Listing, r candidate, now time.Time) (written, changed int, err error) {
+	for _, field := range plan.compareFields {
+		val, ok := r.fields[field]
+		if !ok || (val.Num == nil && val.Text == "") {
+			continue
+		}
+		// One observation per (run, listing, field). Matching may run
+		// several times over the same run — automatically when the crawl
+		// ends, again on "Re-match", and during the crawl while it fills
+		// in — and every pass must update that run's value, never append
+		// a second point to the history.
+		var existing []models.FieldObservation
+		if err := tx.Where("listing_id = ? AND crawl_job_id = ? AND field = ?", l.ID, r.jobID, field).
+			Limit(1).Find(&existing).Error; err != nil {
+			return written, changed, err
+		}
+		if len(existing) > 0 {
+			if err := tx.Model(&models.FieldObservation{}).Where("id = ?", existing[0].ID).Updates(map[string]interface{}{
+				"product_group_id": l.ProductGroupID, "site_key": r.siteKey, "site_label": r.siteLabel,
+				"page_id": r.pageID, "title": r.title(),
+				"num_value": val.Num, "text_value": val.Text, "currency": val.Currency, "url": r.url,
+			}).Error; err != nil {
+				return written, changed, err
+			}
+			written++
+			continue
+		}
+		// A fresh point. What did this listing last say, in an earlier run?
+		var prev []models.FieldObservation
+		if err := tx.Where("listing_id = ? AND field = ? AND crawl_job_id <> ?", l.ID, field, r.jobID).
+			Order("observed_at DESC, id DESC").Limit(1).Find(&prev).Error; err != nil {
+			return written, changed, err
+		}
+		obs := models.FieldObservation{
+			ScopeType: plan.scope.Type, ScopeID: plan.scope.ID,
+			ListingID: l.ID, ProductGroupID: l.ProductGroupID, Field: field,
+			CrawlJobID: r.jobID, PageID: r.pageID,
+			SiteKey: r.siteKey, SiteLabel: r.siteLabel, VariantKey: r.variantKey, Title: r.title(),
+			NumValue: val.Num, TextValue: val.Text, Currency: val.Currency, URL: r.url,
+			ObservedAt: now,
+		}
+		if err := tx.Create(&obs).Error; err != nil {
+			return written, changed, err
+		}
+		written++
+		if len(prev) == 0 || !observationMoved(prev[0], val) {
+			continue
+		}
+		change := models.ListingChange{
+			ScopeType: plan.scope.Type, ScopeID: plan.scope.ID,
+			ListingID: l.ID, Field: field, ProductGroupID: l.ProductGroupID,
+			CrawlJobID: r.jobID, SiteKey: r.siteKey, Title: r.title(), URL: r.url,
+			OldNum: prev[0].NumValue, NewNum: val.Num,
+			OldText: prev[0].TextValue, NewText: val.Text,
+			Currency: val.Currency, DetectedAt: now,
+		}
+		if err := tx.Create(&change).Error; err != nil {
+			return written, changed, err
+		}
+		changed++
+	}
+	return written, changed, nil
+}
+
+// observationMoved reports whether a new value differs from the listing's
+// previous one. A numeric field compares numbers (a price written
+// "42000.0" and "42000" has not moved); a text field compares text.
+func observationMoved(prev models.FieldObservation, val content.FieldValue) bool {
+	if val.Num != nil || prev.NumValue != nil {
+		if val.Num == nil || prev.NumValue == nil {
+			return true // appeared or disappeared
+		}
+		return *val.Num != *prev.NumValue
+	}
+	return val.Text != prev.TextValue
 }
 
 // refreshProductGroupStats recomputes a group's summary of the primary
-// compared field: the lowest and highest a live member site offered in its
-// own latest run. It reads a site's value exactly as the table's cell does
-// (see buildCell), so the "cheapest" the summary names is the cell the
-// table highlights, and sites quoting another currency are left out
-// instead of being compared as bare numbers.
+// compared field: the lowest and highest a live site offered for it, plus
+// how many live listings the group holds.
+//
+// A shop may hold more than one listing of the same product (a marketplace
+// with several sellers, a bundle beside the bare item). The summary takes
+// each shop's cheapest live listing, exactly as the table's cell does, so
+// the "cheapest" it names is the cell the table highlights — and shops
+// quoting another currency are left out rather than compared as bare
+// numbers.
 func (m *Manager) refreshProductGroupStats(tx *gorm.DB, productGroupID, primaryField string) error {
-	var members []models.ProductGroupMember
-	if err := tx.Where("product_group_id = ? AND excluded = ? AND stale = ?", productGroupID, false, false).Find(&members).Error; err != nil {
+	if productGroupID == "" {
+		return nil
+	}
+	var listings []models.Listing
+	if err := tx.Where("product_group_id = ? AND excluded = ? AND stale = ?", productGroupID, false, false).
+		Find(&listings).Error; err != nil {
 		return err
 	}
-	liveSites := make(map[string]bool, len(members))
-	for _, mem := range members {
-		liveSites[mem.SiteKey] = true
+	if len(listings) == 0 {
+		return tx.Model(&models.ProductGroup{}).Where("id = ?", productGroupID).Updates(map[string]interface{}{
+			"member_count": 0, "lowest_value": nil, "highest_value": nil, "currency": "",
+		}).Error
 	}
-	var obs []models.FieldObservation
-	if len(liveSites) > 0 {
-		if err := tx.Where("product_group_id = ? AND field = ?", productGroupID, primaryField).
-			Order("observed_at ASC, id ASC").Find(&obs).Error; err != nil {
-			return err
-		}
+	ids := make([]uint, len(listings))
+	siteOf := make(map[uint]string, len(listings))
+	for i, l := range listings {
+		ids[i] = l.ID
+		siteOf[l.ID] = l.SiteKey
 	}
-	bySite := map[string][]models.FieldObservation{}
-	for _, o := range obs {
-		if liveSites[o.SiteKey] {
-			bySite[o.SiteKey] = append(bySite[o.SiteKey], o)
-		}
+	latest, err := latestObservationPerListing(tx, ids, primaryField)
+	if err != nil {
+		return err
 	}
-	// What each site currently asks, and in which currency.
+	// Each shop's cheapest live listing, with the currency it quoted.
 	type siteValue struct {
 		amount   float64
 		currency string
 	}
-	var values []siteValue
-	for _, siteObs := range bySite {
-		runs := groupObservationsByRun(siteObs)
-		if len(runs) == 0 {
-			continue
-		}
-		latest := runs[len(runs)-1]
-		if latest.num == nil {
+	bySite := map[string]siteValue{}
+	for listingID, o := range latest {
+		if o.NumValue == nil {
 			continue // a text field has no low/high
 		}
-		values = append(values, siteValue{*latest.num, latest.currency})
+		site := siteOf[listingID]
+		if cur, ok := bySite[site]; ok && cur.amount <= *o.NumValue {
+			continue
+		}
+		bySite[site] = siteValue{*o.NumValue, o.Currency}
 	}
 	// Prices in different currencies are not comparable, so the summary
-	// speaks for the currency most of the sites quote.
+	// speaks for the currency most of the shops quote.
 	counts := map[string]int{}
-	for _, v := range values {
+	for _, v := range bySite {
 		if v.currency != "" {
 			counts[v.currency]++
 		}
@@ -1189,7 +1394,7 @@ func (m *Manager) refreshProductGroupStats(tx *gorm.DB, productGroupID, primaryF
 		}
 	}
 	var low, high *float64
-	for _, v := range values {
+	for _, v := range bySite {
 		if currency != "" && v.currency != "" && v.currency != currency {
 			continue
 		}
@@ -1204,6 +1409,6 @@ func (m *Manager) refreshProductGroupStats(tx *gorm.DB, productGroupID, primaryF
 		}
 	}
 	return tx.Model(&models.ProductGroup{}).Where("id = ?", productGroupID).Updates(map[string]interface{}{
-		"member_count": len(members), "lowest_value": low, "highest_value": high, "currency": currency,
+		"member_count": len(listings), "lowest_value": low, "highest_value": high, "currency": currency,
 	}).Error
 }

@@ -18,6 +18,8 @@
         .switch input:focus-visible + span { box-shadow: 0 0 0 2px #fff, 0 0 0 4px #6366f1; }
     </style>
     {{template "settingsStyles"}}
+    {{template "groupingStyles"}}
+    {{template "urlManagerStyles"}}
 </head>
 <body class="bg-gray-100 min-h-screen">
     {{template "nav" .}}
@@ -61,11 +63,16 @@
         </div>
         {{end}}
 
+        {{if .urlScope}}
+        <div class="mb-6">{{template "urlManager" .}}</div>
+        {{end}}
+
         <div class="bg-white rounded-lg shadow">
             {{if not .isNew}}
             <div class="border-b border-gray-200">
                 <nav class="flex gap-8 px-6">
                     <button onclick="showTab('runs')" class="tab-btn py-4 text-sm font-medium" data-tab="runs">Runs ({{len .runs}})</button>
+                    {{if .showGrouping}}<button onclick="showTab('compare')" class="tab-btn py-4 text-sm font-medium" data-tab="compare">Compare &amp; track</button>{{end}}
                     <button onclick="showTab('settings')" class="tab-btn py-4 text-sm font-medium" data-tab="settings">⚙ Settings</button>
                 </nav>
             </div>
@@ -102,6 +109,17 @@
             </div>
             {{end}}
 
+            {{if .showGrouping}}
+            <div id="tab-compare" class="tab-content p-6 hidden">
+                <p class="text-sm text-gray-500 mb-5">
+                    Every run of this schedule matches the same products across the shops it covers and records the
+                    fields you track. Reading <b>across</b> a row compares the shops; opening a cell's sparkline
+                    follows <b>one shop over time</b>.
+                </p>
+                {{template "groupingTable" .grouping}}
+            </div>
+            {{end}}
+
             <div id="tab-settings" class="tab-content p-6{{if not .isNew}} hidden{{end}}">
                 <p class="text-sm text-gray-500 mb-6">Every run creates a crawl with these settings. Anything left on <b>Default</b> follows the engine's <code class="bg-gray-100 px-1 rounded">config.yaml</code>; the default is shown next to each option.{{if not .isNew}} Changes apply from the next run.{{end}}</p>
                 <div id="settings-alert" class="hidden mb-4 p-3 rounded-md text-sm"></div>
@@ -135,12 +153,18 @@
                                 </div>
 
                                 <div id="sch-crawl-urls">
-                                    <div class="flex items-baseline justify-between gap-2">
-                                        <label class="set-label" for="sch-start">Start URLs <span class="set-sub">(one per line)</span></label>
-                                        <span id="sch-site-count" class="text-xs font-mono text-indigo-500"></span>
+                                    <div id="sch-start-input">
+                                        <div class="flex items-baseline justify-between gap-2">
+                                            <label class="set-label" for="sch-start">Start URLs <span class="set-sub">(one per line)</span></label>
+                                            <span id="sch-site-count" class="text-xs font-mono text-indigo-500"></span>
+                                        </div>
+                                        <textarea id="sch-start" rows="2" class="set-input font-mono" placeholder="https://shop.ir/category/phones&#10;https://another-shop.com/phones" dir="ltr"></textarea>
+                                        <p class="set-hint">Each run starts from all of them and follows links within each one's own domain, so one schedule can cover several sites.</p>
                                     </div>
-                                    <textarea id="sch-start" rows="2" class="set-input font-mono" placeholder="https://shop.ir/category/phones&#10;https://another-shop.com/phones" dir="ltr"></textarea>
-                                    <p class="set-hint">Each run starts from all of them and follows links within each one's own domain, so one schedule can cover several sites.</p>
+                                    <p id="sch-start-locked" class="hidden set-hint">
+                                        Start URLs are edited in <b>Sites</b> at the top of this page, so adding or dropping one
+                                        does not mean saving the whole definition.
+                                    </p>
                                     <label id="sch-compare-wrap" class="hidden mt-3 p-3 rounded-lg border border-indigo-200 bg-indigo-50 cursor-pointer items-start gap-2">
                                         <input type="checkbox" id="sch-compare" class="mt-0.5 h-4 w-4 text-indigo-600 border-gray-300 rounded">
                                         <span class="text-sm text-indigo-900">Compare products across these sites
@@ -222,6 +246,8 @@
         var defaultSettings = {{.defaultSettingsJSON}};
         var pluginCatalog = {{.pluginsJSON}};
         var settingsEditable = true;
+        // True when the Sites card is on the page and owns the start URLs.
+        var urlsLocked = {{if .urlScope}}true{{else}}false{{end}};
         var schedule = {{.scheduleJSON}};
         var isNew = {{if .isNew}}true{{else}}false{{end}};
         var tpl = schedule.template || {};
@@ -251,6 +277,11 @@
             var batch = kind() === 'batch';
             document.getElementById('sch-crawl-urls').classList.toggle('hidden', batch);
             document.getElementById('sch-batch-urls').classList.toggle('hidden', !batch);
+            // urlsLocked means the Sites card above is the editor. The
+            // field stays in the DOM holding the current list, so a save
+            // sends it back untouched.
+            document.getElementById('sch-start-input').classList.toggle('hidden', urlsLocked);
+            document.getElementById('sch-start-locked').classList.toggle('hidden', !urlsLocked || batch);
             document.getElementById('scope-batch-note').classList.toggle('hidden', !batch);
             countURLs();
         }
@@ -436,11 +467,12 @@
             document.getElementById('sch-name').value = schedule.name || '';
             var k = tpl.kind === 'batch' ? 'batch' : 'crawl';
             document.querySelector('input[name="sch-kind"][value="' + k + '"]').checked = true;
-            if (k === 'batch') {
-                document.getElementById('sch-urls').value = [tpl.target_url].concat(tpl.seed_urls || []).filter(Boolean).join('\n');
-            } else {
-                document.getElementById('sch-start').value = [tpl.target_url].concat(tpl.seed_urls || []).filter(Boolean).join('\n');
-            }
+            // Both lists are filled, not just the current kind's: switching
+            // kind in the form used to leave the other empty and submit a
+            // schedule with no URL at all.
+            var current = [tpl.target_url].concat(tpl.seed_urls || []).filter(Boolean).join('\n');
+            document.getElementById('sch-urls').value = current;
+            document.getElementById('sch-start').value = current;
             if (tpl.template_vars && Object.keys(tpl.template_vars).length) {
                 var note = document.getElementById('sch-vars-note');
                 note.textContent = 'URL variables: ' + Object.keys(tpl.template_vars).map(function (n) { return n + ' = ' + tpl.template_vars[n]; }).join(', ') + ' (set through the API; kept as they are).';
@@ -478,11 +510,28 @@
             syncKind();
             syncFreq();
             if (!isNew) {
-                var fromHash = function () { showTab(location.hash === '#settings' ? 'settings' : 'runs'); };
+                var fromHash = function () {
+                    var h = (location.hash || '').replace('#', '');
+                    showTab(h === 'settings' || h === 'compare' ? h : 'runs');
+                };
                 fromHash();
                 window.addEventListener('hashchange', fromHash);
             }
         });
     </script>
+{{if .showGrouping}}
+<script>
+    // The shared comparison table (templates/grouping.html) reads this.
+    var cmpScope = { type: 'schedule', id: '{{.schedule.ID}}' };
+</script>
+{{template "groupingScript" .}}
+{{end}}
+{{if .urlScope}}
+<script>
+    // The shared start-URL card (templates/urls.html) reads this.
+    var urlScope = { kind: '{{.urlScope}}', id: '{{.urlScopeID}}' };
+</script>
+{{template "urlManagerScript" .}}
+{{end}}
 </body>
 </html>
